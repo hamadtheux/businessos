@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "AI Business OS"
+description = "A multi-business AI operating system for onboarding a business, supervising an AI team, and managing marketing, sales, support, operations, customers, orders, and analytics."
+version = "1.0.0"
+id = "artifacts/business-os"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23821
+
+[services.development]
+run = "pnpm --filter @workspace/business-os run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/business-os", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/business-os/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23821"
+BASE_PATH = "/"

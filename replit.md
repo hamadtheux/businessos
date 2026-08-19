@@ -1,6 +1,6 @@
-# [Project name]
+# AI Business OS
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+AI Business OS is a multi-business command center where owners supervise an AI team across sales, support, operations, marketing, customers, orders, automations, approvals, and analytics.
 
 ## Run & Operate
 
@@ -22,23 +22,29 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/ai-business-os/src/App.tsx` — main SPA shell, route rendering, seeded business data, local persistence, and feature interactions.
+- `artifacts/ai-business-os/src/index.css` — application theme and responsive visual system.
+- `attached_assets/Pasted-PROJECT-AI-BUSINESS-OS-COMPLETE-FRONTEND-REQUIREMENT-0-_1786996796521.txt` — product requirements and feature scope.
+- `attached_assets/Image_18-08-2026_at_12.38_AM_1786996820303.png` — visual reference supplied for the clean dashboard direction.
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- The first release is a frontend-complete prototype with deterministic AI responses and browser persistence, so the full product loop is usable without external credentials or third-party APIs.
+- Business switching is modeled as a first-class state change; business-scoped data resets and persists independently for the seeded workspace experience.
+- High-risk AI actions remain visible in approvals, while low-risk actions provide direct feedback through the UI.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+The product includes a responsive dashboard, AI command center, unified inbox, orders, customers, CRM pipeline, AI CMO, agent management, automations, approval center, opportunity center, analytics, integrations, Business Brain, and settings.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Keep the experience clean and visually close to the supplied dashboard screenshot.
+- Use the uploaded product requirement as the source of truth for scope and interactions.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- The web artifact's Vite config expects `PORT` and `BASE_PATH`; use the managed workflow for previews or provide both when running a manual production build.
 
 ## Pointers
 

@@ -1,0 +1,62 @@
+. The Onboarding Wizard (Crucial)
+When the app loads and there is no business configured, it must show a full-screen, step-by-step onboarding wizard.
+
+Step 1: Welcome & Business Basics. (Business Name, Industry dropdown [Farm/Agriculture, Real Estate, E-commerce, Dental, Other], Website, Location, Timezone, Currency).
+
+Step 2: Products & Services. (Dynamic list builder to add products/services with Name, Price, and Stock/Availability).
+
+Step 3: Brand Voice. (Text area for business description, tone of voice, and keywords to avoid).
+
+Step 4: Connect Channels. (Visual cards for WhatsApp, Instagram, Email, Stripe. Include 'Connect' buttons. For the prototype, these can just toggle to 'Connected' state).
+
+Step 5: AI Team Setup. (Show a loading/progress bar that visually builds the 5 AI agents: Business Manager, CMO, Sales, Support, Operations. Then show a success screen: "Your AI Business Team is ready!").
+
+Note: The UI must have a progress indicator at the top of the wizard showing the current step.
+
+2. Dynamic Dashboard Logic (Business Brain)
+The dashboard must NOT be hardcoded. It must reflect the onboarding data.
+
+Dynamic Header: "Good Morning, [Business Name]" (e.g., if I enter 'Green Valley Farms', it shows that).
+
+Dynamic Industry Sidebar: If the industry is 'Real Estate', show a sidebar item for 'Properties/Listings'. If it is 'E-commerce', show 'Products'. If it is 'Farm/Agriculture', show 'Inventory/Harvest'.
+
+Dynamic AI Recommendations: Use mock logic. If the industry is 'Farm', show a recommendation like: "Your organic tomatoes are trending this week. Create a post."
+
+Business Switcher: In the Topbar, add a dropdown to switch between multiple businesses. Include a second mock business called "ABC Real Estate" to demonstrate this. When clicked, the dashboard should reload with Real Estate data (Orange/Blue color scheme instead of Green).
+
+3. Color Theming per Business
+For 'Green Valley Farms': Use the Green palette (#15803D).
+
+For 'ABC Real Estate': Use a Deep Navy Blue palette (#1E3A8A).
+
+The logo/initials in the sidebar should also change color based on the active business.
+
+4. Required Main Screens (Beyond Dashboard)
+Please ensure the routing/navigation is set up for these specific screens and populate them with the industry-specific mock data from 'Green Valley Farms':
+
+/dashboard (The dynamic dashboard described above)
+
+/onboarding (The 5-step wizard described above)
+
+/command (The AI Command Center. A large chat interface asking "What should your AI team do today?" with example prompt chips at the bottom).
+
+/conversations (The 3-column Unified Inbox. Left: Channels. Middle: Chat list. Right: Chat window with AI banner).
+
+/orders (Orders table with filters and mock farm orders).
+
+/customers (Customer database table).
+
+/cmo (AI Marketing Manager. Content calendar + Post generator).
+
+/agents (Grid of AI Agent cards showing 'Active' status).
+
+/approvals (List of pending AI actions with Approve/Reject buttons).
+
+/analytics (Charts using Recharts).
+
+/integrations (Grid of tools with Connect toggles).
+
+/settings (Tabs for Business Profile, Brand Voice, and Team).
+
+Goal: I want to see the full journey from registering a business -> configuring the AI team -> landing on a perfectly tailored business dashboard."
+

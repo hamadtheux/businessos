@@ -1,0 +1,126 @@
+[
+  {
+    "id": "green-valley-farms",
+    "name": "Green Valley Farms",
+    "industry": "Farm/Agriculture",
+    "website": "greenvalleyfarms.co",
+    "location": "Sonoma County, California",
+    "timezone": "America/Los_Angeles",
+    "currency": "USD · $",
+    "description": "A family farm growing seasonal produce, fresh eggs, and raw honey for local families.",
+    "tone": "Warm, grounded, and useful",
+    "avoidKeywords": "cheap, best ever, hurry, guaranteed",
+    "connectedChannels": [
+      "WhatsApp",
+      "Instagram",
+      "Email",
+      "Stripe"
+    ],
+    "products": [
+      {
+        "id": "fresh-eggs",
+        "name": "Fresh Eggs",
+        "price": 6,
+        "availability": "In stock"
+      },
+      {
+        "id": "organic-tomatoes",
+        "name": "Organic Tomatoes",
+        "price": 4,
+        "availability": "In stock"
+      },
+      {
+        "id": "raw-honey",
+        "name": "Raw Honey",
+        "price": 12,
+        "availability": "In stock"
+      }
+    ],
+    "onboardingComplete": true,
+    "theme": "green"
+  },
+  {
+    "id": "abc-real-estate",
+    "name": "ABC Real Estate",
+    "industry": "Real Estate",
+    "website": "abcrealestate.com",
+    "location": "Austin, Texas",
+    "timezone": "America/Chicago",
+    "currency": "USD · $",
+    "description": "A relationship-led real estate team helping families find homes and investment properties.",
+    "tone": "Clear, confident, and welcoming",
+    "avoidKeywords": "guaranteed, perfect, once-in-a-lifetime",
+    "connectedChannels": [
+      "Email",
+      "Stripe"
+    ],
+    "products": [
+      {
+        "id": "downtown-loft",
+        "name": "Downtown Loft",
+        "price": 485000,
+        "availability": "Available"
+      },
+      {
+        "id": "oak-hills-home",
+        "name": "Oak Hills Home",
+        "price": 725000,
+        "availability": "Open house Saturday"
+      },
+      {
+        "id": "river-road-lot",
+        "name": "River Road Lot",
+        "price": 210000,
+        "availability": "Coming soon"
+      }
+    ],
+    "onboardingComplete": true,
+    "theme": "navy"
+  },
+  {
+    "id": "famr-1787070320395",
+    "name": "famr",
+    "industry": "Farm/Agriculture",
+    "website": "",
+    "location": "ouch lower dir",
+    "timezone": "Asia/Karachi",
+    "currency": "USD · $",
+    "description": "ddddddd",
+    "tone": "Warm, grounded, and useful",
+    "avoidKeywords": "",
+    "connectedChannels": [],
+    "products": [
+      {
+        "id": "product-1",
+        "name": "eggg",
+        "price": 20,
+        "availability": "In stock"
+      }
+    ],
+    "onboardingComplete": true,
+    "theme": "green"
+  },
+  {
+    "id": "real-e-state-1787071771761",
+    "name": "real e state",
+    "industry": "Real Estate",
+    "website": "2343",
+    "location": "pakistan",
+    "timezone": "Asia/Karachi",
+    "currency": "USD · $",
+    "description": "",
+    "tone": "Warm, grounded, and useful",
+    "avoidKeywords": "",
+    "connectedChannels": [],
+    "products": [
+      {
+        "id": "product-1",
+        "name": "house",
+        "price": 12,
+        "availability": "In stock"
+      }
+    ],
+    "onboardingComplete": true,
+    "theme": "navy"
+  }
+]

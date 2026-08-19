@@ -1,0 +1,2072 @@
+PROJECT: AI BUSINESS OS — COMPLETE FRONTEND REQUIREMENT
+0. PRODUCT VISION
+Product Name
+
+AI Business OS
+
+Core concept
+
+A multi-business AI operating system that gives each business a virtual AI team capable of handling:
+
+Marketing
+Content
+Social media
+Competitor research
+Trend discovery
+Lead generation
+CRM
+Sales
+Customer support
+Website chat
+WhatsApp conversations
+Email
+Orders
+Customers
+Appointments
+Business workflows
+Analytics
+Recommendations
+Business intelligence
+
+The platform should not feel like a simple chatbot.
+
+It should feel like:
+
+A complete AI-powered business team working under the business owner's supervision.
+
+The AI should:
+
+Understand → Analyze → Recommend → Create → Automate → Execute → Measure → Improve
+
+Important:
+
+Routine, low-risk tasks can be automated.
+Important/high-risk actions require human approval.
+Every AI action should be visible and auditable.
+1. MULTI-BUSINESS ARCHITECTURE
+
+The platform is designed for multiple businesses, not one specific company.
+
+A user can manage multiple businesses from one account.
+
+Example:
+
+My Businesses
+
+
+Green Valley Farms
+ABC Real Estate
+Urban Dental Clinic
+Fresh Kitchen
+
+Each business must have completely isolated:
+
+Customers
+Orders
+Products
+Conversations
+AI agents
+Knowledge
+Integrations
+Automations
+Analytics
+Campaigns
+Approvals
+Settings
+Business Selector
+
+Located in the topbar.
+
+Dropdown:
+
+Green Valley Farms
+✓ Active
+
+
+ABC Real Estate
+Urban Dental Clinic
+
+
++ Add Business
+
+When switching businesses, every dashboard module updates to that business.
+
+2. GLOBAL DESIGN SYSTEM
+Font
+
+Plus Jakarta Sans
+
+Strict weights:
+
+Heading: 600
+Body: 400
+Numbers/statistics: 500
+Do not use 700+
+3. COLOR PALETTE
+Primary
+
+#15803D
+
+Deep Forest Green
+
+Primary Light
+
+#F0FDF4
+
+Secondary
+
+#78350F
+
+Earth Brown
+
+Accent
+
+#F97316
+
+Harvest Orange
+
+Use orange primarily for:
+
+Primary CTAs
+Important notifications
+High-priority actions
+Background
+
+#FAFAF9
+
+Warm Off-White
+
+Cards
+
+#FFFFFF
+
+Border
+
+#E7E5E4
+
+Success
+
+#16A34A
+
+Warning
+
+#D97706
+
+Danger
+
+#DC2626
+
+4. VISUAL STYLE
+
+The entire application should feel:
+
+Premium
+Minimal
+Modern
+Professional
+Calm
+High whitespace
+Enterprise-quality
+Rules
+No bright gradients
+No excessive colors
+No excessive shadows
+No glassmorphism
+No oversized decorative elements
+No heavy borders
+No unnecessary animations
+Cards
+
+Radius:
+
+12px
+
+Buttons
+
+Radius:
+
+8px
+
+Inputs
+
+Radius:
+
+8px
+
+Borders
+
+1px soft gray.
+
+Shadows
+
+Use subtle shadows such as:
+
+0px 4px 6px -1px rgba(0,0,0,0.1)
+
+5. ICON SYSTEM
+
+Use:
+
+Lucide React
+
+Style:
+
+Outline icons
+1.5px stroke
+Consistent sizing
+
+Do not mix random icon libraries.
+
+6. GLOBAL APPLICATION LAYOUT
+Sidebar
+
+Width:
+
+260px
+
+Background:
+
+White
+
+Top
+
+Logo:
+
+AI Business OS
+
+Navigation
+Dashboard
+AI Command Center
+Conversations
+Orders
+Customers
+Leads & CRM
+AI CMO
+AI Agents
+Automations
+Approvals
+Opportunities
+Analytics
+Integrations
+Settings
+Bottom
+
+User profile:
+
+Avatar
+Name
+Role
+Business selector shortcut
+Settings
+Logout
+7. TOPBAR
+
+Height:
+
+64px
+
+Contains:
+
+Left
+
+Global search / AI command input.
+
+Placeholder:
+
+Ask your AI Business Manager...
+
+Examples:
+
+"How much did we sell this week?"
+
+"Show my top customers."
+
+"What should I focus on today?"
+
+"Create a campaign for inactive customers."
+
+Center
+
+Business selector.
+
+Right
+Notification bell
+Notification badge
+Help
+User avatar
+New Automation button
+8. SCREEN 1 — LOGIN / REGISTER
+
+Split-screen layout.
+
+Left — 40%
+
+Green background:
+
+#15803D
+
+Contains:
+
+Logo
+Product tagline
+Testimonial
+Subtle business/AI graphics
+
+Example:
+
+One AI team for your entire business.
+
+Right — 60%
+
+White background.
+
+Sign in
+Email
+Password
+Remember me
+Forgot password
+Sign In
+
+Primary button:
+
+Orange.
+
+Register
+Name
+Email
+Password
+Business name
+Business type
+9. SCREEN 2 — BUSINESS ONBOARDING
+
+After registration.
+
+Step 1 — Business
+Business name
+Industry
+Website
+Location
+Timezone
+Currency
+Step 2 — Products/Services
+Products
+Services
+Pricing
+Availability
+Step 3 — Customers
+Existing customer import
+CSV upload
+CRM connection
+Step 4 — Brand
+Logo
+Colors
+Brand voice
+Tone
+Keywords
+Keywords to avoid
+Step 5 — Goals
+
+Examples:
+
+Increase sales
+Generate leads
+Improve support
+Increase retention
+Automate operations
+Step 6 — Connect Tools
+WhatsApp
+Instagram
+Facebook
+Email
+Shopify
+Stripe
+Google Calendar
+CRM
+Step 7 — AI Setup
+
+Show:
+
+Your AI Business Team is being configured...
+
+Agents:
+
+Business Manager
+CMO
+Sales
+Support
+Operations
+Analytics
+10. SCREEN 3 — MAIN DASHBOARD
+
+Header:
+
+Good Morning, Green Valley Farms
+
+Subtext:
+
+Here's what your AI Business Team found today.
+
+KPI ROW
+
+Four cards:
+
+Revenue
+
+Today's revenue
+
+$4,820
+
++18%
+
+Orders
+
+Pending orders
+
+24
+
+Urgent:
+
+3
+
+Conversations
+
+Unread messages
+
+42
+
+Channels:
+
+WhatsApp + Instagram + Email
+
+Leads
+
+New leads
+
+31
+
+11. DASHBOARD — BUSINESS HEALTH
+
+Large card:
+
+Business Health
+
+Score:
+
+87/100
+
+Breakdown:
+
+Sales
+Marketing
+Customers
+Support
+Operations
+12. DASHBOARD — AI RECOMMENDATIONS
+
+Light green card.
+
+AI Recommendations
+
+Example:
+
+5 customers haven't ordered in 30 days.
+
+Potential revenue:
+
+$1,240
+
+Review
+
+Another:
+
+Instagram engagement increased 32%.
+
+Recommended:
+
+Create another Reel around this topic.
+
+Review
+
+13. DASHBOARD — APPROVAL TASKS
+
+Show:
+
+3 actions waiting for approval
+
+Examples:
+
+Send customer follow-up
+Publish Instagram post
+Approve discount campaign
+
+Buttons:
+
+Approve
+
+Reject
+
+14. DASHBOARD — RECENT CONVERSATIONS
+
+Show:
+
+Avatar
+Customer
+Channel
+Message
+Time
+AI/Human status
+15. DASHBOARD — RECENT ORDERS
+
+Show:
+
+Order
+Customer
+Total
+Status
+Time
+16. DASHBOARD — AI ACTIVITY FEED
+
+Chronological AI actions:
+
+10:42 AM
+AI Support answered Sarah
+
+
+10:44 AM
+AI Sales qualified a new lead
+
+
+10:47 AM
+AI Operations confirmed Order #1042
+
+
+10:52 AM
+AI CMO generated Instagram content
+17. SCREEN 4 — AI COMMAND CENTER
+
+This is one of the most important screens.
+
+Header:
+
+AI Business Manager
+
+Subtext:
+
+Ask anything about your business or give your AI team a task.
+
+Large conversational interface.
+
+Example prompts
+
+How is my business doing?
+
+What should I focus on today?
+
+Why did sales decrease?
+
+Find inactive customers.
+
+Create a marketing campaign.
+
+Show today's orders.
+
+Follow up with my high-value leads.
+
+AI Response
+
+The AI should show:
+
+Answer
+Data used
+Recommended action
+Actions
+Review
+Approve
+Execute
+
+Example:
+
+Revenue increased 18% this week.
+
+Your strongest product is Fresh Eggs.
+
+12 customers have not ordered in 60+ days.
+
+I recommend a reactivation campaign.
+
+[Create Campaign]
+
+18. SCREEN 5 — CONVERSATIONS / UNIFIED INBOX
+
+Three-column layout.
+
+Column 1 — Channels
+All
+WhatsApp
+Instagram
+Facebook
+Email
+Website
+
+Show unread badges.
+
+Column 2 — Conversations
+
+Show:
+
+Avatar
+Name
+Message
+Time
+Unread indicator
+AI/Human indicator
+Column 3 — Chat
+
+Header:
+
+Customer
+Channel
+AI status
+
+Banner:
+
+AI Assistant is handling this conversation
+
+Message bubbles:
+
+AI:
+
+White
+
+Customer:
+
+Green
+
+Footer:
+
+Input
+Attachment
+Send
+Take Over
+19. CUSTOMER CHAT ACTIONS
+
+Inside conversation:
+
+AI actions
+Search customer
+Search order
+Create order
+Update order
+Create lead
+Book appointment
+Send confirmation
+Escalate to human
+20. SCREEN 6 — ORDERS
+
+Header:
+
+Orders Management
+
+CTA:
+
+Create Order
+
+Filters:
+
+All
+Pending
+Confirmed
+Processing
+Out for Delivery
+Delivered
+Cancelled
+
+Table:
+
+Order ID
+Customer
+Items
+Total
+Payment
+Status
+Date
+Actions
+21. ORDER DETAIL
+
+Show:
+
+Customer
+
+Name/contact.
+
+Products
+
+Items + quantity.
+
+Payment
+Paid
+Pending
+Failed
+Refunded
+Delivery
+
+Address/status.
+
+Timeline
+Order created
+Payment received
+Processing
+Out for delivery
+Delivered
+22. AUTOMATIC ORDER COMMUNICATION
+
+The system should support workflows for:
+
+Order confirmation
+
+Your order #10482 has been confirmed.
+
+Payment confirmation
+
+Payment received.
+
+Processing
+
+We're preparing your order.
+
+Shipping
+
+Your order is on the way.
+
+Delivery
+
+Your order has been delivered.
+
+Channels:
+
+WhatsApp
+Email
+Website
+Other supported channels
+23. SCREEN 7 — CUSTOMERS
+
+Header:
+
+Customer Database
+
+CTA:
+
+Add Customer
+
+Search:
+
+Name
+Email
+Phone
+
+Table:
+
+Avatar
+Name
+Contact
+Orders
+Total Spent
+Segment
+Last Active
+Actions
+
+Segments:
+
+VIP
+Regular
+New
+At Risk
+Inactive
+24. CUSTOMER PROFILE
+
+Show:
+
+Overview
+Total orders
+Total spent
+Average order
+Last activity
+Customer lifetime value
+Orders
+
+Complete order history.
+
+Conversations
+
+All customer conversations.
+
+Activity
+
+Timeline.
+
+AI Insights
+
+Example:
+
+High-value customer.
+
+Usually orders every 21 days.
+
+Hasn't ordered for 45 days.
+
+AI Actions
+Send follow-up
+Create offer
+Create campaign
+Contact customer
+25. SCREEN 8 — LEADS & CRM
+
+Pipeline:
+
+New
+↓
+Qualified
+↓
+Contacted
+↓
+Proposal
+↓
+Won
+↓
+Lost
+
+Lead cards:
+
+Name
+Company
+Source
+Score
+Value
+Last contact
+Owner
+26. AI LEAD QUALIFICATION
+
+AI analyzes:
+
+Customer information
+Conversation
+Need
+Budget
+Location
+Intent
+
+Then:
+
+Lead Score: 92/100
+
+
+HIGH VALUE
+
+AI recommendation:
+
+Contact within 1 hour.
+
+27. SCREEN 9 — AI CMO / MARKETING
+
+Header:
+
+AI Marketing Manager
+
+CTA:
+
+Generate Content
+
+Sections:
+
+Marketing Overview
+Reach
+Engagement
+Leads
+Campaigns
+Conversion
+Upcoming Posts
+
+Show:
+
+Platform
+Content
+Scheduled time
+Status
+Content Generator
+
+Fields:
+
+Prompt
+Platform
+Tone
+Audience
+Content type
+
+Button:
+
+Generate
+
+Preview
+
+Generated post.
+
+Buttons:
+
+Edit
+Approve
+Schedule
+Regenerate
+28. CONTENT CALENDAR
+
+Calendar/list:
+
+Monday
+Instagram Reel
+
+
+Tuesday
+Facebook Post
+
+
+Wednesday
+LinkedIn Post
+
+
+Thursday
+Instagram Carousel
+
+
+Friday
+Instagram Reel
+29. SOCIAL MEDIA MANAGEMENT
+
+Where official APIs/permissions support the required capability:
+
+Schedule
+Publish
+Monitor engagement
+Retrieve performance
+Manage supported replies
+
+Platforms:
+
+Instagram
+Facebook
+LinkedIn
+X
+Other supported platforms
+30. SCREEN 10 — COMPETITOR ANALYSIS
+
+Header:
+
+Competitor Intelligence
+
+Show:
+
+Competitors
+Competitor name
+Website
+Industry
+Status
+Analysis
+Positioning
+Products
+Pricing observations
+Content
+Offers
+Strengths
+Weaknesses
+Opportunities
+AI Summary
+
+Your competitors are focusing heavily on X.
+
+Opportunity: create content around Y.
+
+31. SCREEN 11 — TREND INTELLIGENCE
+
+Show:
+
+Trending topics
+
+Each card:
+
+Topic
+Relevance
+Trend strength
+Source
+AI recommendation
+
+Button:
+
+Create Content
+
+32. SCREEN 12 — AI AGENTS
+
+Header:
+
+AI Employees
+
+Subtext:
+
+Manage your virtual AI team.
+
+Agents:
+
+AI Business Manager
+
+Coordinates the entire system.
+
+AI CMO
+
+Marketing and strategy.
+
+AI Sales
+
+Leads and sales.
+
+AI Support
+
+Customer communication.
+
+AI Operations
+
+Orders, appointments and workflows.
+
+AI Analytics
+
+Business intelligence.
+
+33. AGENT CARD
+
+Each card:
+
+Icon
+Name
+Role
+Status
+Tasks today
+Success rate
+Last activity
+
+Buttons:
+
+Configure
+
+View Activity
+
+Toggle:
+
+Active / Inactive
+
+Active state:
+
+Green top border.
+
+34. SCREEN 13 — AGENT ACTIVITY
+
+Show exactly what AI agents are doing.
+
+Example:
+
+AI Support
+Answered Sarah's question
+10:42 AM
+✓ Completed
+
+
+AI Sales
+Qualified ABC Cafe
+10:45 AM
+✓ Completed
+
+
+AI CMO
+Generated Instagram post
+10:51 AM
+⏳ Awaiting approval
+
+Filters:
+
+Agent
+Status
+Date
+Action type
+35. SCREEN 14 — AUTOMATIONS
+
+Header:
+
+Automation Recipes
+
+CTA:
+
+New Workflow
+
+Templates:
+
+WhatsApp Order Flow
+WhatsApp Message
+↓
+AI Understands Order
+↓
+Check Product
+↓
+Create Order
+↓
+Send Confirmation
+Lead Qualification
+New Lead
+↓
+AI Qualification
+↓
+Lead Score
+↓
+CRM
+↓
+Sales Notification
+Inactive Customer
+Customer inactive 60 days
+↓
+AI analyzes customer
+↓
+Create offer
+↓
+Approval
+↓
+Send message
+36. SCREEN 15 — VISUAL WORKFLOW BUILDER
+
+Canvas-based workflow builder.
+
+Nodes:
+
+Trigger
+AI
+Condition
+Database
+API
+Action
+Notification
+Approval
+
+Example:
+
+Trigger
+   ↓
+AI Decision
+   ↓
+Condition
+ ↙       ↘
+YES      NO
+ ↓        ↓
+Action   Action
+
+Buttons:
+
+Save
+Test
+Enable
+Disable
+37. WORKFLOW TEST MODE
+
+Before activating:
+
+Run Test
+
+Show:
+
+Trigger ✓
+AI Decision ✓
+Database ✓
+API ✓
+Action ✓
+
+If something fails:
+
+API connection failed.
+
+Show exact error state.
+
+38. SCREEN 16 — APPROVAL CENTER
+
+Header:
+
+Approval Center
+
+Filters:
+
+Pending
+Approved
+Rejected
+Expired
+
+Approval card:
+
+AI Sales
+
+Send 10% discount to Sarah.
+
+AI reasoning
+
+Sarah is a high-LTV customer and hasn't purchased for 45 days.
+
+Buttons:
+
+Approve
+
+Reject
+
+Edit
+
+39. SCREEN 17 — OPPORTUNITY CENTER
+
+This should be a major feature.
+
+Header:
+
+AI Opportunities
+
+Categories:
+
+Sales
+Marketing
+Customers
+Operations
+Support
+Revenue
+
+Example:
+
+💰 Revenue opportunity
+
+12 inactive customers represent approximately $2,400 in historical revenue.
+
+📈 Marketing opportunity
+
+A topic related to Product X is gaining traction.
+
+⚠️ Problem
+
+Lead conversion decreased 14%.
+
+Each:
+
+Review → Create Action
+
+40. SCREEN 18 — ANALYTICS
+
+Header:
+
+Business Analytics
+
+Date range selector.
+
+KPI cards:
+
+Revenue
+Orders
+Customers
+Leads
+Conversion
+Average Order
+Repeat Customer Rate
+41. ANALYTICS CHARTS
+
+Use:
+
+Recharts
+
+Revenue
+
+Line chart.
+
+Sales by category
+
+Pie chart.
+
+Acquisition sources
+
+Bar chart:
+
+WhatsApp
+Instagram
+Website
+Referral
+Other
+Orders
+
+Line/bar chart.
+
+42. AI ANALYTICS INSIGHTS
+
+Below charts:
+
+AI Analysis
+
+Revenue increased 18%.
+
+Orders increased 14%.
+
+Conversion decreased 4%.
+
+Why?
+
+AI analyzes available data.
+
+Recommendation
+
+Review checkout experience and follow up with high-intent leads.
+
+43. SCREEN 19 — DAILY AI REPORT
+
+Show:
+
+Good Morning 👋
+
+Business
+
+Revenue: $4,820
+
+Orders: 86
+
+Customers: 31
+
+Marketing
+
+Reach: +21%
+
+Engagement: +18%
+
+Sales
+
+Leads: 42
+
+Conversions: 18%
+
+Support
+
+Auto-resolved: 94%
+
+AI recommendations
+
+3 actions.
+
+44. SCREEN 20 — INTEGRATIONS
+
+Header:
+
+Connect Your Tools
+
+Cards:
+
+Communication
+WhatsApp
+Instagram
+Facebook
+Email
+Commerce
+Shopify
+Stripe
+Productivity
+Google Calendar
+CRM
+HubSpot
+
+Each card:
+
+Icon
+Name
+Description
+Connect
+Connected badge
+45. INTEGRATION DETAIL
+
+When connected:
+
+Show:
+
+Account
+Status
+Connected date
+Permissions
+Data sync
+Last sync
+Disconnect
+46. SCREEN 21 — KNOWLEDGE / BUSINESS BRAIN
+
+Header:
+
+Business Brain
+
+Show:
+
+Knowledge sources
+Website
+Documents
+Products
+FAQs
+Policies
+Brand guidelines
+
+Upload:
+
+PDF
+DOCX
+TXT
+CSV
+
+Show:
+
+Knowledge Sources
+
+
+Company Guide.pdf
+✓ Processed
+
+
+Product Catalog.csv
+✓ Processed
+
+
+Website
+✓ Synced
+47. BUSINESS BRAIN SEARCH
+
+Search:
+
+"What is our return policy?"
+
+AI should show:
+
+Answer
+Source
+Document
+Confidence where appropriate
+48. SCREEN 22 — SETTINGS
+
+Tabs:
+
+Business Profile
+Name
+Logo
+Industry
+Timezone
+Currency
+Website
+Products
+Product
+Price
+Stock
+Status
+Brand Voice
+Personality
+Tone
+Keywords
+Keywords to avoid
+Team
+Members
+Roles
+Permissions
+AI Controls
+Proactive messaging
+Approval thresholds
+Autonomy level
+Communication permissions
+Tool permissions
+49. AI PERMISSIONS
+
+Each agent should have permissions.
+
+Example:
+
+AI Support
+
+Can:
+
+✓ Read customer
+✓ Read orders
+✓ Answer FAQ
+✓ Send basic replies
+
+Cannot:
+
+✕ Refund
+✕ Change price
+
+AI Sales
+
+Can:
+
+✓ Read leads
+✓ Create CRM record
+✓ Draft follow-up
+
+Requires approval:
+
+⚠️ Discount
+⚠️ Mass outreach
+
+50. AUTONOMY LEVELS
+
+Three levels:
+
+Suggest
+
+AI recommends only.
+
+Approval
+
+AI prepares action → human approves.
+
+Autonomous
+
+AI executes within predefined rules.
+
+Example:
+
+Discount under $10 → automatic.
+
+Discount over $10 → approval.
+
+51. TEAM MANAGEMENT
+
+Roles:
+
+Owner
+Admin
+Manager
+Employee
+Viewer
+
+Permissions should control access to:
+
+Orders
+Customers
+AI
+Marketing
+Integrations
+Analytics
+Settings
+52. NOTIFICATIONS
+
+Notification center:
+
+New lead
+New order
+Failed automation
+AI approval
+Low inventory
+Customer escalation
+Integration error
+53. AUDIT LOG
+
+Every important action should be recorded.
+
+Example:
+
+10:42
+AI Support answered customer
+
+
+10:44
+AI Sales created lead
+
+
+10:48
+AI Operations created Order #1042
+
+
+10:52
+Owner approved Instagram post
+
+
+10:55
+AI CMO published post
+54. ERROR HANDLING
+
+Never show a blank screen.
+
+Examples:
+
+Integration error
+
+WhatsApp connection needs attention.
+
+Reconnect
+
+AI error
+
+AI couldn't complete this action.
+
+Retry
+
+API error
+
+Show friendly message + technical details for admin.
+
+55. LOADING STATES
+
+Use skeleton loaders for:
+
+Tables
+Cards
+Charts
+Conversations
+Analytics
+Agent activity
+
+Never use an empty white page while loading.
+
+56. EMPTY STATES
+
+Example:
+
+No orders yet
+
+Orders created through your connected channels will appear here.
+
+CTA:
+
+Connect Store
+
+57. TOASTS
+
+Bottom-right.
+
+Examples:
+
+Order updated successfully.
+
+Workflow enabled.
+
+Content approved.
+
+Customer added.
+
+Integration connected.
+
+58. MODALS
+
+Use modals for:
+
+Create Order
+Add Customer
+Generate Content
+Connect Integration
+Reject Approval
+Delete
+Confirmation
+Create Workflow
+59. RESPONSIVE DESIGN
+
+Desktop first.
+
+Tablet:
+
+Collapsible sidebar
+
+Mobile:
+
+Hamburger navigation
+Responsive cards
+Horizontal tables where necessary
+Mobile-friendly conversation interface
+
+The product must remain usable on:
+
+Desktop
+Laptop
+Tablet
+Mobile
+60. MOCK DATA
+
+Use realistic prototype data.
+
+Business
+
+Green Valley Farms
+
+Products
+Organic Tomatoes — $4/kg
+Fresh Eggs — $6/dozen
+Raw Honey — $12/jar
+Customers
+
+Use realistic diverse names:
+
+Sarah Mitchell
+David Rodriguez
+Aisha Khan
+Michael Chen
+Emily Wilson
+Conversations
+
+Examples:
+
+“Do you have eggs today?”
+
+“I want 5kg tomatoes.”
+
+“Can you deliver tomorrow?”
+
+“What is your wholesale price?”
+
+AI recommendations
+
+“5 customers haven't ordered in 30 days.”
+
+“Post a picture of the new harvest.”
+
+“3 high-value leads need follow-up.”
+
+61. FRONTEND TECHNOLOGY
+
+Recommended:
+
+Framework
+
+Next.js
+
+Language
+
+TypeScript
+
+Styling
+
+Tailwind CSS
+
+Components
+
+shadcn/ui
+
+Icons
+
+Lucide React
+
+Charts
+
+Recharts
+
+Forms
+
+React Hook Form + Zod
+
+State
+
+Use an appropriate lightweight state-management approach.
+
+Tables
+
+Use a reusable data-table component.
+
+62. FRONTEND ARCHITECTURE
+
+Use reusable components.
+
+Example:
+
+components/
+├── ui/
+├── layout/
+├── dashboard/
+├── conversations/
+├── orders/
+├── customers/
+├── crm/
+├── marketing/
+├── agents/
+├── automations/
+├── approvals/
+├── opportunities/
+├── analytics/
+├── integrations/
+└── settings/
+63. DESIGN COMPONENTS
+
+Create reusable:
+
+Buttons
+Inputs
+Selects
+Dropdowns
+Cards
+KPI cards
+Tables
+Badges
+Tabs
+Modals
+Drawers
+Toasts
+Tooltips
+Empty states
+Skeletons
+Charts
+Agent cards
+Approval cards
+Recommendation cards
+Workflow nodes
+64. IMPORTANT UX PRINCIPLE
+
+The interface should always answer:
+
+What happened?
+Why did it happen?
+What does AI recommend?
+What can I do?
+Does AI need my approval?
+
+This should be the foundation of the product.
+
+65. AI COMMAND EXPERIENCE
+
+The owner should be able to type natural-language requests.
+
+Examples:
+
+"Show today's revenue."
+
+"Which customers are at risk?"
+
+"Create a campaign for inactive customers."
+
+"Reply to all unanswered WhatsApp questions."
+
+"What are my competitors doing?"
+
+"Create five Instagram posts."
+
+"Why did sales fall?"
+
+"Show my best-selling product."
+
+"Follow up with high-value leads."
+
+The UI should show:
+
+AI understanding → data → reasoning → action → approval/execution
+
+66. COMPLETE AUTOMATION PHILOSOPHY
+
+The platform should automate repetitive work across:
+
+Marketing
+
+Research → Content → Approval → Publishing → Analytics
+
+Sales
+
+Lead → Qualification → CRM → Follow-up → Conversion
+
+Support
+
+Message → Understand → Answer → Order/Action → Escalate
+
+Orders
+
+Order → Payment → Confirmation → Processing → Delivery → Notification
+
+Customers
+
+Purchase → Profile → Segmentation → Retention → Reactivation
+
+Analytics
+
+Data → Analysis → Insight → Recommendation → Action
+
+67. MASTER AI LOOP
+
+This is the core philosophy of the entire product:
+
+                 OBSERVE
+                    ↓
+                 UNDERSTAND
+                    ↓
+                  ANALYZE
+                    ↓
+               FIND OPPORTUNITY
+                    ↓
+               RECOMMEND ACTION
+                    ↓
+             HUMAN APPROVAL*
+                    ↓
+                 EXECUTE
+                    ↓
+                 MEASURE
+                    ↓
+                  LEARN
+                    ↓
+                 IMPROVE
+                    ↓
+                  OBSERVE
+
+* Approval depends on the configured autonomy level.
+
+68. MVP PRIORITY
+
+Do not build every feature simultaneously.
+
+Phase 1 — Foundation
+
+Build:
+
+Authentication
+Multi-business
+Business onboarding
+Dashboard
+Business Brain
+AI Command Center
+AI Agents
+Basic analytics
+Settings
+Phase 2 — Customer Operations
+
+Build:
+
+Conversations
+Website AI
+WhatsApp
+Customers
+Orders
+Leads/CRM
+Phase 3 — AI CMO
+
+Build:
+
+Content
+Social
+Content calendar
+Competitor analysis
+Trend intelligence
+Campaigns
+Phase 4 — Automation
+
+Build:
+
+Workflow builder
+Triggers
+Conditions
+AI decisions
+Actions
+Scheduled workflows
+Approval system
+Phase 5 — Intelligence
+
+Build:
+
+Opportunity Center
+AI reports
+Advanced analytics
+Business recommendations
+Agent activity
+Optimization loops
+Phase 6 — Scale
+
+Build:
+
+More integrations
+Billing
+Team management
+Advanced permissions
+Enterprise security
+Industry templates
+69. THE FINAL PRODUCT EXPERIENCE
+
+The business owner should ultimately be able to open the platform and see:
+
+Good morning. Your AI Business Team handled 184 tasks overnight.
+
+Today
+
+Revenue: $4,820
+
+Orders: 86
+
+Leads: 42
+
+Messages handled: 137
+
+Tasks automated: 184
+
+Then:
+
+AI found 4 important things
+
+1. Revenue opportunity
+
+12 inactive customers.
+
+2. Marketing opportunity
+
+A relevant trend is gaining traction.
+
+3. Sales problem
+
+Lead conversion dropped 14%.
+
+4. Customer issue
+
+3 conversations require human attention.
+
+Then:
+
+[Review All]
+
+70. THE CORE DIFFERENTIATOR
+
+Your platform should not be positioned as:
+
+"AI chatbot"
+
+or:
+
+"AI content generator"
+
+or:
+
+"AI automation tool"
+
+Your positioning should be:
+
+AI BUSINESS OS
+One AI team for your entire business.
+
+Marketing. Sales. Customer Support. Operations. Analytics. Automation.
+
+The AI does the repetitive work.
+
+The owner stays in control.
+
+Final technical/product goal
+
+Your eventual architecture should support:
+
+                    AI BUSINESS OS
+                          │
+                  BUSINESS BRAIN
+                          │
+                    AI MANAGER
+                          │
+       ┌──────────┬───────┼───────┬──────────┐
+       ↓          ↓       ↓       ↓          ↓
+      CMO       SALES   SUPPORT  OPS      ANALYTICS
+       │          │       │       │          │
+       └──────────┴───────┼───────┴──────────┘
+                          ↓
+                  TOOL / API LAYER
+                          │
+       ┌──────────┬───────┼───────┬──────────┐
+       ↓          ↓       ↓       ↓          ↓
+    WhatsApp   Shopify  Stripe   CRM     Calendar
+       │
+       ↓
+                  AUTOMATION ENGINE
+                          │
+                    APPROVAL ENGINE
+                          │
+                     EXECUTION
+                          │
+                    AUDIT LOG
+                          │
+                    ANALYTICS
+                          │
+                 AI RECOMMENDATIONS

@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: businesses
+    description: Business workspaces and onboarding
 paths:
   /healthz:
     get:
@@ -24,8 +26,215 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /businesses:
+    get:
+      operationId: listBusinesses
+      tags: [businesses]
+      summary: List business workspaces
+      responses:
+        "200":
+          description: Business workspaces
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Business"
+    post:
+      operationId: createBusiness
+      tags: [businesses]
+      summary: Create a business workspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BusinessInput"
+      responses:
+        "201":
+          description: Created business workspace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Business"
+        "400":
+          description: Invalid business data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /businesses/{id}:
+    get:
+      operationId: getBusiness
+      tags: [businesses]
+      summary: Get a business workspace
+      parameters:
+        - $ref: "#/components/parameters/BusinessId"
+      responses:
+        "200":
+          description: Business workspace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Business"
+        "404":
+          description: Business not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    patch:
+      operationId: updateBusiness
+      tags: [businesses]
+      summary: Update a business workspace
+      parameters:
+        - $ref: "#/components/parameters/BusinessId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BusinessUpdate"
+      responses:
+        "200":
+          description: Updated business workspace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Business"
+        "400":
+          description: Invalid business data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Business not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 components:
+  parameters:
+    BusinessId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
   schemas:
+    Product:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        price:
+          type: number
+        availability:
+          type: string
+      required: [id, name, price, availability]
+    Business:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        industry:
+          type: string
+          enum: [Farm/Agriculture, Real Estate, E-commerce, Dental, Other]
+        website:
+          type: string
+        location:
+          type: string
+        timezone:
+          type: string
+        currency:
+          type: string
+        description:
+          type: string
+        tone:
+          type: string
+        avoidKeywords:
+          type: string
+        connectedChannels:
+          type: array
+          items:
+            type: string
+            enum: [WhatsApp, Instagram, Email, Stripe]
+        products:
+          type: array
+          items:
+            $ref: "#/components/schemas/Product"
+        onboardingComplete:
+          type: boolean
+        theme:
+          type: string
+          enum: [green, navy]
+      required:
+        - id
+        - name
+        - industry
+        - website
+        - location
+        - timezone
+        - currency
+        - description
+        - tone
+        - avoidKeywords
+        - connectedChannels
+        - products
+        - onboardingComplete
+        - theme
+    BusinessInput:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+        industry:
+          type: string
+          enum: [Farm/Agriculture, Real Estate, E-commerce, Dental, Other]
+        website:
+          type: string
+        location:
+          type: string
+        timezone:
+          type: string
+        currency:
+          type: string
+        description:
+          type: string
+        tone:
+          type: string
+        avoidKeywords:
+          type: string
+        connectedChannels:
+          type: array
+          items:
+            type: string
+            enum: [WhatsApp, Instagram, Email, Stripe]
+        products:
+          type: array
+          items:
+            $ref: "#/components/schemas/Product"
+        onboardingComplete:
+          type: boolean
+        theme:
+          type: string
+          enum: [green, navy]
+      required: [name, industry]
+    BusinessUpdate:
+      allOf:
+        - $ref: "#/components/schemas/BusinessInput"
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
     HealthStatus:
       type: object
       properties:

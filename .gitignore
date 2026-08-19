@@ -11,6 +11,12 @@ out-tsc
 # dependencies
 node_modules
 
+# Python environments and bytecode
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
 # IDEs and editors
 /.idea
 .project
@@ -40,6 +46,9 @@ testem.log
 # System Files
 .DS_Store
 Thumbs.db
+
+# Unpacked source bundle exceeds GitHub's single-file limit
+attached_assets/*.zip
 
 .cursor/rules/nx-rules.mdc
 .github/instructions/nx.instructions.md
