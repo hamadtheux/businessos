@@ -16,6 +16,8 @@ node_modules
 __pycache__/
 *.py[cod]
 .pytest_cache/
+backend/.env
+backend/storage/
 
 # IDEs and editors
 /.idea

@@ -1,9 +1,4 @@
-import {
-  useState,
-  type ChangeEvent,
-  type DragEvent,
-  type ReactNode,
-} from "react";
+import { useState, type ChangeEvent, type DragEvent } from "react";
 import {
   AlertCircle,
   Check,
@@ -15,23 +10,23 @@ import {
   Plug,
   Plus,
   ShoppingBag,
-  Store,
   UploadCloud,
   X,
 } from "lucide-react";
 import { Badge, Button } from "@/components/product-ui";
+import {
+  catalogFileValidationMessage,
+  createPasteCatalogFile,
+  pasteListLines,
+} from "@/features/catalog/catalog-model";
 import { cx } from "@/lib/product-utils";
+import type { CatalogItemType } from "@/services/api-types";
 import {
   createBlankCatalogProduct,
-  createWorkbookPrototypeRows,
   expectedCatalogColumns,
-  parseCatalogRows,
-  validCatalogProducts,
   type CatalogDraft,
   type CatalogDraftProduct,
   type CatalogImportMethod,
-  type CatalogPreviewRow,
-  type CatalogStoreProvider,
 } from "./catalog-import";
 
 const importOptions: Array<{
@@ -41,28 +36,28 @@ const importOptions: Array<{
   icon: typeof ListPlus;
 }> = [
   {
-    id: "manual",
-    title: "Add manually",
-    copy: "Best for a small catalog",
-    icon: ListPlus,
-  },
-  {
     id: "upload",
     title: "Upload CSV / Excel",
-    copy: "Preview and confirm a file",
+    copy: "Best for an existing catalog",
     icon: FileSpreadsheet,
   },
   {
-    id: "store",
-    title: "Import from store",
-    copy: "Prepare a future store sync",
-    icon: ShoppingBag,
+    id: "paste",
+    title: "Paste a list",
+    copy: "One product or service per line",
+    icon: Package,
   },
   {
-    id: "paste",
-    title: "Paste product list",
-    copy: "Paste rows from a spreadsheet",
-    icon: Package,
+    id: "manual",
+    title: "Add manually",
+    copy: "Best for a few items",
+    icon: ListPlus,
+  },
+  {
+    id: "store",
+    title: "Store connection",
+    copy: "Coming soon",
+    icon: ShoppingBag,
   },
   {
     id: "skip",
@@ -72,112 +67,17 @@ const importOptions: Array<{
   },
 ];
 
-const storeOptions: Array<{
-  name: CatalogStoreProvider;
-  copy: string;
-  icon: typeof ShoppingBag;
-}> = [
-  {
-    name: "Shopify",
-    copy: "Products, variants, prices, and inventory",
-    icon: ShoppingBag,
-  },
-  {
-    name: "WooCommerce",
-    copy: "Catalog and stock from your WordPress store",
-    icon: Store,
-  },
-  {
-    name: "Custom Store / API",
-    copy: "Prepare a backend-managed catalog connection",
-    icon: Plug,
-  },
-];
-
-function CatalogPreview({
-  rows,
-  action,
-}: {
-  rows: CatalogPreviewRow[];
-  action: ReactNode;
-}) {
-  const validRows = rows.filter((row) => row.errors.length === 0).length;
-  const errorRows = rows.length - validRows;
-
-  return (
-    <div className="catalog-preview">
-      <div className="catalog-preview-summary">
-        <div>
-          <span>Total rows</span>
-          <strong>{rows.length}</strong>
-        </div>
-        <div>
-          <span>Valid rows</span>
-          <strong>{validRows}</strong>
-        </div>
-        <div>
-          <span>Rows with errors</span>
-          <strong>{errorRows}</strong>
-        </div>
-        {action}
-      </div>
-      <div className="table-scroll catalog-preview-table">
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>SKU</th>
-              <th>Price</th>
-              <th>Stock / availability</th>
-              <th>Category</th>
-              <th>Description</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.slice(0, 8).map((row) => (
-              <tr key={row.id}>
-                <td>
-                  <strong>{row.name || "—"}</strong>
-                </td>
-                <td>{row.sku || "—"}</td>
-                <td>{row.price ? `$${row.price}` : "—"}</td>
-                <td>{row.availability}</td>
-                <td>{row.category || "—"}</td>
-                <td>{row.description || "—"}</td>
-                <td>
-                  <Badge tone={row.errors.length ? "danger" : "success"}>
-                    {row.errors.length ? row.errors.join(", ") : "Valid"}
-                  </Badge>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {rows.length > 8 && (
-        <div className="catalog-preview-more">
-          Showing 8 of {rows.length} rows
-        </div>
-      )}
-    </div>
-  );
-}
-
 export function ProductCatalogStep({
   catalog,
+  selectedFile,
   onChange,
+  onFileChange,
 }: {
   catalog: CatalogDraft;
+  selectedFile: File | null;
   onChange: (catalog: CatalogDraft) => void;
+  onFileChange: (file: File | null) => void;
 }) {
-  const [previewRows, setPreviewRows] = useState<CatalogPreviewRow[]>(() =>
-    catalog.confirmed
-      ? catalog.products.map((product) => ({ ...product, errors: [] }))
-      : catalog.method === "paste"
-        ? parseCatalogRows(catalog.pastedText)
-        : [],
-  );
   const [dragging, setDragging] = useState(false);
   const [fileError, setFileError] = useState("");
 
@@ -186,19 +86,20 @@ export function ProductCatalogStep({
   };
 
   const selectMethod = (method: CatalogImportMethod) => {
-    setPreviewRows([]);
     setFileError("");
+    onFileChange(null);
     updateCatalog({
       method,
       confirmed: method === "skip",
       sourceName: method === "skip" ? "Skipped during onboarding" : "",
       storeProvider: null,
+      pastedText: method === "paste" ? catalog.pastedText : "",
       products:
-        method === "skip"
-          ? []
-          : method === "manual" && catalog.products.length === 0
+        method === "manual"
+          ? catalog.products.length === 0
             ? [createBlankCatalogProduct()]
-            : catalog.products,
+            : catalog.products
+          : [],
     });
   };
 
@@ -208,68 +109,63 @@ export function ProductCatalogStep({
     value: string,
   ) => {
     updateCatalog({
-      confirmed: false,
       products: catalog.products.map((product) =>
         product.id === id ? { ...product, [field]: value } : product,
       ),
     });
   };
 
-  const addProduct = () => {
-    updateCatalog({
-      products: [...catalog.products, createBlankCatalogProduct()],
-    });
-  };
-
-  const handleFile = async (file?: File) => {
+  const handleFile = (file?: File) => {
     if (!file) return;
-    const extension = file.name.split(".").pop()?.toLowerCase();
-    if (extension !== "csv" && extension !== "xlsx") {
-      setFileError("Choose a .csv or .xlsx file to continue.");
-      setPreviewRows([]);
+    const error = catalogFileValidationMessage(file);
+    if (error) {
+      setFileError(error);
+      onFileChange(null);
       updateCatalog({ confirmed: false, sourceName: "" });
       return;
     }
-
-    const rows =
-      extension === "csv"
-        ? parseCatalogRows(await file.text())
-        : createWorkbookPrototypeRows();
-    setFileError(rows.length ? "" : "No product rows were found in this file.");
-    setPreviewRows(rows);
+    setFileError("");
+    onFileChange(file);
     updateCatalog({
-      confirmed: false,
+      confirmed: true,
       sourceName: file.name,
       products: [],
     });
   };
 
   const handleFileInput = (event: ChangeEvent<HTMLInputElement>) => {
-    void handleFile(event.target.files?.[0]);
+    handleFile(event.target.files?.[0]);
+    event.target.value = "";
   };
 
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDragging(false);
-    void handleFile(event.dataTransfer.files?.[0]);
+    handleFile(event.dataTransfer.files?.[0]);
   };
 
-  const confirmRows = (sourceName: string) => {
-    const products = validCatalogProducts(previewRows);
-    if (!products.length) return;
-    updateCatalog({ confirmed: true, sourceName, products });
+  const preparePaste = () => {
+    try {
+      const file = createPasteCatalogFile(
+        catalog.pastedText,
+        catalog.defaultItemType,
+      );
+      setFileError("");
+      onFileChange(file);
+      updateCatalog({
+        confirmed: true,
+        sourceName: "Pasted catalog list",
+      });
+    } catch (error) {
+      setFileError(
+        error instanceof Error ? error.message : "Check the pasted list.",
+      );
+      onFileChange(null);
+      updateCatalog({ confirmed: false });
+    }
   };
 
-  const updatePastedText = (value: string) => {
-    const rows = parseCatalogRows(value);
-    setPreviewRows(rows);
-    updateCatalog({
-      pastedText: value,
-      confirmed: false,
-      sourceName: "Pasted product list",
-      products: [],
-    });
-  };
+  const pastedLines = pasteListLines(catalog.pastedText);
 
   return (
     <div className="onboarding-panel catalog-onboarding-panel">
@@ -282,7 +178,11 @@ export function ProductCatalogStep({
           <Button
             variant="soft"
             className="btn-sm"
-            onClick={addProduct}
+            onClick={() =>
+              updateCatalog({
+                products: [...catalog.products, createBlankCatalogProduct()],
+              })
+            }
             data-testid="button-add-onboarding-product"
           >
             <Plus /> Add item
@@ -319,8 +219,8 @@ export function ProductCatalogStep({
         <div className="onboarding-tip catalog-choice-tip">
           <Lightbulb size={16} />
           <span>
-            Choose the fastest way to add your catalog. Nothing is imported
-            until you review and confirm it.
+            Bulk setup is the fastest path. Your catalog is saved only after the
+            business exists and the real API validates it.
           </span>
         </div>
       )}
@@ -329,8 +229,10 @@ export function ProductCatalogStep({
         <div className="catalog-method-panel">
           <div className="catalog-method-heading">
             <div>
-              <strong>Add products manually</strong>
-              <span>Good for small catalogs and service lists.</span>
+              <strong>Add a small catalog manually</strong>
+              <span>
+                These drafts will use the same atomic import API during setup.
+              </span>
             </div>
           </div>
           <div className="onboarding-products">
@@ -340,6 +242,18 @@ export function ProductCatalogStep({
                   {String(index + 1).padStart(2, "0")}
                 </div>
                 <div className="field">
+                  <label>Type</label>
+                  <select
+                    value={product.itemType}
+                    onChange={(event) =>
+                      updateProduct(product.id, "itemType", event.target.value)
+                    }
+                  >
+                    <option value="product">Product</option>
+                    <option value="service">Service</option>
+                  </select>
+                </div>
+                <div className="field catalog-draft-name">
                   <label>Name</label>
                   <input
                     value={product.name}
@@ -353,34 +267,42 @@ export function ProductCatalogStep({
                 <div className="field">
                   <label>Price</label>
                   <input
-                    type="number"
-                    min="0"
+                    inputMode="decimal"
                     value={product.price}
                     onChange={(event) =>
                       updateProduct(product.id, "price", event.target.value)
                     }
-                    placeholder="0"
+                    placeholder="Optional"
                     data-testid={`input-onboarding-product-price-${index}`}
                   />
                 </div>
                 <div className="field">
-                  <label>Stock / availability</label>
+                  <label>SKU</label>
                   <input
-                    value={product.availability}
+                    value={product.sku}
+                    onChange={(event) =>
+                      updateProduct(product.id, "sku", event.target.value)
+                    }
+                    placeholder="Optional"
+                  />
+                </div>
+                <div className="field catalog-draft-description">
+                  <label>Description</label>
+                  <input
+                    value={product.description}
                     onChange={(event) =>
                       updateProduct(
                         product.id,
-                        "availability",
+                        "description",
                         event.target.value,
                       )
                     }
-                    placeholder="In stock"
-                    data-testid={`input-onboarding-product-availability-${index}`}
+                    placeholder="Optional"
                   />
                 </div>
                 {catalog.products.length > 1 && (
                   <button
-                    className="icon-btn"
+                    className="icon-btn catalog-draft-remove"
                     onClick={() =>
                       updateCatalog({
                         products: catalog.products.filter(
@@ -388,20 +310,13 @@ export function ProductCatalogStep({
                         ),
                       })
                     }
-                    aria-label={`Remove product ${index + 1}`}
+                    aria-label={`Remove item ${index + 1}`}
                   >
                     <X size={14} />
                   </button>
                 )}
               </div>
             ))}
-          </div>
-          <div className="onboarding-tip">
-            <Lightbulb size={16} />
-            <span>
-              You can update this list any time from Settings. Your AI team uses
-              availability when answering customer questions.
-            </span>
           </div>
         </div>
       )}
@@ -411,9 +326,12 @@ export function ProductCatalogStep({
           <div className="catalog-method-heading">
             <div>
               <strong>Upload CSV or Excel</strong>
-              <span>Review every row before adding it to your workspace.</span>
+              <span>
+                The server will detect columns and validate every row after the
+                business is created.
+              </span>
             </div>
-            <Badge>Prototype import</Badge>
+            <Badge>Real import</Badge>
           </div>
           <div
             className={cx("catalog-upload-zone", dragging && "dragging")}
@@ -424,7 +342,7 @@ export function ProductCatalogStep({
           >
             <UploadCloud />
             <strong>Drop a .csv or .xlsx file here</strong>
-            <span>or choose a file from your computer</span>
+            <span>Maximum 10 MB · legacy .xls is not supported</span>
             <label className="btn btn-soft btn-sm">
               Choose file
               <input
@@ -434,129 +352,26 @@ export function ProductCatalogStep({
                 data-testid="input-catalog-file"
               />
             </label>
-            {catalog.sourceName && (
+            {selectedFile && (
               <small>
-                <FileSpreadsheet /> {catalog.sourceName}
+                <FileSpreadsheet /> {selectedFile.name}
               </small>
             )}
           </div>
           <div className="catalog-expected-columns">
-            <span>Expected columns</span>
+            <span>Automatic aliases</span>
             <div>
               {expectedCatalogColumns.map((column) => (
                 <Badge key={column}>{column}</Badge>
               ))}
             </div>
           </div>
-          {fileError && (
-            <div className="catalog-inline-error">
-              <AlertCircle /> {fileError}
-            </div>
-          )}
-          {previewRows.length > 0 && (
-            <CatalogPreview
-              rows={previewRows}
-              action={
-                <Button
-                  variant="green"
-                  className="btn-sm"
-                  disabled={!previewRows.some((row) => !row.errors.length)}
-                  onClick={() =>
-                    confirmRows(catalog.sourceName || "Uploaded catalog")
-                  }
-                  data-testid="button-confirm-file-import"
-                >
-                  <Check /> Confirm import
-                </Button>
-              }
-            />
-          )}
-          {catalog.confirmed && (
+          {catalog.confirmed && selectedFile && (
             <div className="onboarding-tip catalog-confirmed">
               <Check size={16} />
               <span>
-                {catalog.products.length} valid products are ready to import
-                into this business workspace.
-              </span>
-            </div>
-          )}
-          <div className="prototype-note catalog-prototype-note">
-            The browser only prepares this prototype preview. File storage and
-            durable parsing will be handled by the future backend.
-          </div>
-        </div>
-      )}
-
-      {catalog.method === "store" && (
-        <div className="catalog-method-panel">
-          <div className="catalog-method-heading">
-            <div>
-              <strong>Import from your store</strong>
-              <span>Choose the connection your backend will sync later.</span>
-            </div>
-            <Badge>Frontend prototype</Badge>
-          </div>
-          <div className="catalog-store-grid">
-            {storeOptions.map(({ name, copy, icon: Icon }) => (
-              <button
-                key={name}
-                className={cx(
-                  "onboarding-channel-card catalog-store-card",
-                  catalog.storeProvider === name && "connected",
-                )}
-                onClick={() =>
-                  updateCatalog({
-                    storeProvider: name,
-                    sourceName: name,
-                    confirmed: false,
-                    products: [],
-                  })
-                }
-                data-testid={`button-store-${name.toLowerCase().replaceAll(" ", "-")}`}
-              >
-                <div className="integration-icon">
-                  <Icon />
-                </div>
-                <div className="row-main">
-                  <div className="row-title">{name}</div>
-                  <div className="row-copy">{copy}</div>
-                </div>
-                {catalog.storeProvider === name && <Check />}
-              </button>
-            ))}
-          </div>
-          <div className="onboarding-tip">
-            <Plug size={16} />
-            <span>
-              No secret credentials are requested here. Authentication and real
-              catalog sync will be connected securely through the future
-              backend.
-            </span>
-          </div>
-          {catalog.storeProvider && (
-            <div className="catalog-confirm-row">
-              <div>
-                <strong>{catalog.storeProvider} selected</strong>
-                <span>
-                  Save this prototype connection for the new workspace.
-                </span>
-              </div>
-              <Button
-                variant="green"
-                className="btn-sm"
-                onClick={() => updateCatalog({ confirmed: true })}
-                data-testid="button-confirm-store-import"
-              >
-                <Check /> Confirm connection
-              </Button>
-            </div>
-          )}
-          {catalog.confirmed && (
-            <div className="onboarding-tip catalog-confirmed">
-              <Check size={16} />
-              <span>
-                Prototype connection confirmed. No external account was
-                accessed.
+                File kept for this browser session. It will be previewed, then
+                imported atomically after the business is saved.
               </span>
             </div>
           )}
@@ -567,53 +382,99 @@ export function ProductCatalogStep({
         <div className="catalog-method-panel">
           <div className="catalog-method-heading">
             <div>
-              <strong>Paste a product list</strong>
-              <span>Copy rows directly from Excel, Sheets, or a CSV.</span>
+              <strong>Paste one item per line</strong>
+              <span>
+                No AI parsing or price extraction—just reliable names.
+              </span>
             </div>
+            <Badge>{pastedLines.length} items</Badge>
+          </div>
+          <div
+            className="catalog-type-choice"
+            role="group"
+            aria-label="Pasted item type"
+          >
+            {(["product", "service"] as CatalogItemType[]).map((itemType) => (
+              <button
+                key={itemType}
+                className={cx(catalog.defaultItemType === itemType && "active")}
+                onClick={() => {
+                  onFileChange(null);
+                  updateCatalog({
+                    defaultItemType: itemType,
+                    confirmed: false,
+                  });
+                }}
+              >
+                {itemType === "product" ? "Products" : "Services"}
+              </button>
+            ))}
           </div>
           <div className="field">
-            <label>Product rows</label>
+            <label>Item names</label>
             <textarea
               className="catalog-paste-area"
               value={catalog.pastedText}
-              onChange={(event) => updatePastedText(event.target.value)}
-              placeholder={expectedCatalogColumns.join("\t")}
+              onChange={(event) => {
+                onFileChange(null);
+                updateCatalog({
+                  pastedText: event.target.value,
+                  confirmed: false,
+                  sourceName: "",
+                });
+              }}
+              placeholder={"Apples\nBananas\nOrange Juice\nMilk"}
               data-testid="textarea-paste-catalog"
             />
           </div>
-          <div className="catalog-expected-columns">
-            <span>Column order</span>
-            <div>
-              {expectedCatalogColumns.map((column) => (
-                <Badge key={column}>{column}</Badge>
+          {pastedLines.length > 0 && (
+            <div className="catalog-name-preview">
+              {pastedLines.slice(0, 8).map((line, index) => (
+                <span key={`${line}-${index}`}>{line}</span>
               ))}
+              {pastedLines.length > 8 && (
+                <span>+{pastedLines.length - 8} more</span>
+              )}
             </div>
-          </div>
-          {previewRows.length > 0 && (
-            <CatalogPreview
-              rows={previewRows}
-              action={
-                <Button
-                  variant="green"
-                  className="btn-sm"
-                  disabled={!previewRows.some((row) => !row.errors.length)}
-                  onClick={() => confirmRows("Pasted product list")}
-                  data-testid="button-confirm-paste-import"
-                >
-                  <Check /> Confirm import
-                </Button>
-              }
-            />
           )}
-          {catalog.confirmed && (
+          <div className="catalog-confirm-row">
+            <div>
+              <strong>Up to 2,000 names</strong>
+              <span>Blank lines are ignored and names are quoted safely.</span>
+            </div>
+            <Button
+              variant="green"
+              className="btn-sm"
+              onClick={preparePaste}
+              data-testid="button-confirm-paste-import"
+            >
+              <Check /> Prepare list
+            </Button>
+          </div>
+          {catalog.confirmed && selectedFile && (
             <div className="onboarding-tip catalog-confirmed">
               <Check size={16} />
               <span>
-                {catalog.products.length} valid products are ready to import
-                into this business workspace.
+                The generated CSV will use the real preview and atomic import
+                endpoints after the business is saved.
               </span>
             </div>
           )}
+        </div>
+      )}
+
+      {catalog.method === "store" && (
+        <div className="catalog-method-panel catalog-skip-panel">
+          <div className="success-mark catalog-skip-mark">
+            <Plug />
+          </div>
+          <div>
+            <strong>Store connections are coming soon</strong>
+            <p>
+              Shopify and WooCommerce are not connected yet. Choose upload,
+              paste, manual entry, or skip this step.
+            </p>
+          </div>
         </div>
       )}
 
@@ -625,10 +486,16 @@ export function ProductCatalogStep({
           <div>
             <strong>Continue without a catalog</strong>
             <p>
-              You can add or sync your catalog later from Settings or
-              Integrations.
+              Your business will be created with an empty catalog. Upload,
+              paste, or add items later from Products &amp; Services.
             </p>
           </div>
+        </div>
+      )}
+
+      {fileError && (
+        <div className="catalog-inline-error" role="alert">
+          <AlertCircle /> {fileError}
         </div>
       )}
     </div>

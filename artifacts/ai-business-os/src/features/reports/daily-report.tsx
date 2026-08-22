@@ -4,11 +4,18 @@ import { Badge, Button, Card, PageHeader, SectionTitle } from "@/components/prod
 import { useBusiness } from "@/business-context";
 import { useWorkspaceData } from "@/hooks/use-workspace-data";
 import { money } from "@/lib/product-utils";
+import { demoWorkspaceDataEnabled } from "@/services/workspace-repository";
 
 export function DailyReportPage() {
   const { activeBusiness } = useBusiness();
   const { data, industry, update } = useWorkspaceData();
   const [, setLocation] = useLocation();
+  if (!demoWorkspaceDataEnabled) {
+    return <>
+      <PageHeader eyebrow="Daily AI Report" title="Your operating brief is waiting for live data" subtitle={`The workspace for ${activeBusiness?.name} is connected to real authentication and business records.`} />
+      <Card><div className="empty"><Sparkles /><h3>No report data yet</h3><p>Daily reports will populate when the supporting business APIs are available.</p></div></Card>
+    </>;
+  }
   const taskCount = data.agentActivity.reduce((sum) => sum + 41, 20);
   const reportGroups = industry === "Real Estate" ? [
     { title: "Business", icon: TrendingUp, metrics: [["Pipeline", money(data.analytics.revenue, true)], ["Active listings", String(activeBusiness?.products.length ?? 0)], ["Viewings", "8"]] },
@@ -45,4 +52,3 @@ export function DailyReportPage() {
     <div className="grid report-insights">{insights.map(([title, why, impact, action, href], index) => <Card className="report-insight" key={title}><div className="insight-number">0{index + 1}</div><div className="row-main"><div className="eyebrow">What happened</div><h2>{title}</h2><div className="report-why"><strong>Why it matters</strong><p>{why}</p></div><Badge tone={index < 2 ? "warning" : "info"}>Potential impact · {impact}</Badge><div className="toolbar" style={{ marginTop: 16 }}><Button variant="green" className="btn-sm" onClick={() => { createAction(title, why); setLocation(href); }}>{action} <ArrowRight /></Button></div></div><Lightbulb /></Card>)}</div>
   </>;
 }
-

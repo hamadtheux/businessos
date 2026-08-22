@@ -13,13 +13,13 @@ export function IntegrationsPage() {
   const connect = (integration: WorkspaceIntegration) => {
     const connected: WorkspaceIntegration = { ...integration, connected: true, account: `${integration.name.toLowerCase().replace(" ", ".")}@workspace.demo`, connectedDate: "Just now", permissions: ["Read business records", "Sync status changes"], dataAvailable: ["Activity", "Customer context", "Performance"], lastSync: "Just now", syncStatus: "Healthy" };
     update((current) => ({ ...current, integrations: current.integrations.map((item) => item.id === integration.id ? connected : item) }));
-    recordAudit({ actor: "Alexandra Andria", actorType: "Human user", action: "Connected prototype integration", entity: integration.name, after: "Connection ready", status: "Completed", source: "Integrations" });
+    recordAudit({ actor: "Current user", actorType: "Human user", action: "Connected local integration draft", entity: integration.name, after: "Connection ready", status: "Completed", source: "Integrations" });
     setConnectTarget(null); setSelected(connected);
   };
   const disconnect = (integration: WorkspaceIntegration) => {
     const disconnected: WorkspaceIntegration = { ...integration, connected: false, account: "Not connected", connectedDate: "—", permissions: [], dataAvailable: [], lastSync: "Never", syncStatus: "Disconnected" };
     update((current) => ({ ...current, integrations: current.integrations.map((item) => item.id === integration.id ? disconnected : item) }));
-    recordAudit({ actor: "Alexandra Andria", actorType: "Human user", action: "Disconnected prototype integration", entity: integration.name, before: integration.account, after: "Disconnected", status: "Completed", source: "Integrations" });
+    recordAudit({ actor: "Current user", actorType: "Human user", action: "Disconnected local integration draft", entity: integration.name, before: integration.account, after: "Disconnected", status: "Completed", source: "Integrations" });
     setSelected(disconnected);
   };
   const sync = (integration: WorkspaceIntegration) => {
@@ -39,4 +39,3 @@ export function IntegrationsPage() {
     {selected && <Modal title={selected.name} description={`${selected.account} · Connected ${selected.connectedDate}`} onClose={() => setSelected(null)}><div className="integration-detail-status"><div className="integration-icon"><Database /></div><div className="row-main"><div className="eyebrow">Connection status</div><h2>{selected.connected ? "Connected and available" : "Disconnected"}</h2><p className="subtle">Last sync · {selected.lastSync}</p></div><Badge tone={selected.syncStatus === "Healthy" ? "success" : selected.syncStatus === "Syncing" ? "warning" : "danger"}>{selected.syncStatus === "Syncing" && <RefreshCw className="spin" />} {selected.syncStatus}</Badge></div><div className="analysis-grid"><Card><SectionTitle title="Permissions" />{selected.permissions.length ? selected.permissions.map((item) => <div className="check-line" key={item}><Check /> {item}</div>) : <p className="subtle">No permissions granted.</p>}</Card><Card><SectionTitle title="Data available" />{selected.dataAvailable.length ? selected.dataAvailable.map((item) => <div className="check-line" key={item}><Check /> {item}</div>) : <p className="subtle">Connect to make prototype data available.</p>}</Card></div><div className="toolbar" style={{ marginTop: 18 }}>{selected.connected ? <><Button variant="green" onClick={() => sync(selected)} disabled={selected.syncStatus === "Syncing"}><RefreshCw /> Sync now</Button><Button onClick={() => setConnectTarget(selected)}>Reconnect</Button><Button variant="danger" onClick={() => disconnect(selected)}><Unplug /> Disconnect</Button></> : <Button variant="green" onClick={() => { setSelected(null); setConnectTarget(selected); }}>Reconnect</Button>}</div></Modal>}
   </>;
 }
-

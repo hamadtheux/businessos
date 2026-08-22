@@ -65,7 +65,7 @@ export function CompetitorIntelligencePage() {
       summary: "Run an analysis to create a grounded competitor summary.",
     };
     update((current) => ({ ...current, competitors: [item, ...current.competitors] }));
-    recordAudit({ actor: "Alexandra Andria", actorType: "Human user", action: "Added competitor", entity: name, after: "Ready for analysis", status: "Completed", source: "Competitor Intelligence" });
+    recordAudit({ actor: "Current user", actorType: "Human user", action: "Added competitor", entity: name, after: "Ready for analysis", status: "Completed", source: "Competitor Intelligence" });
     setAdding(false);
     setNotice(`${name} added to your watchlist.`);
   };
@@ -145,4 +145,3 @@ export function TrendIntelligencePage() {
     </>
   );
 }
-

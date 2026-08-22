@@ -38,7 +38,7 @@ export function WorkflowBuilderPage() {
     window.setTimeout(() => setTest(simulateFailure ? { state: "failed", failedNode: selected.nodes.find((node) => node.type === "API")?.id ?? selected.nodes[2]?.id } : { state: "success" }), 950);
   };
   const save = () => {
-    recordAudit({ actor: "Alexandra Andria", actorType: "Human user", action: "Saved workflow", entity: selected.name, after: `${selected.nodes.length} nodes`, status: "Completed", source: "Automations" });
+    recordAudit({ actor: "Current user", actorType: "Human user", action: "Saved workflow", entity: selected.name, after: `${selected.nodes.length} nodes`, status: "Completed", source: "Automations" });
     setNotice("Workflow saved to this business.");
   };
 
@@ -55,4 +55,3 @@ export function WorkflowBuilderPage() {
     {(editing || adding) && <Modal title={editing ? "Configure node" : "Add node"} description="Every node stays editable in this frontend prototype." onClose={() => { setEditing(null); setAdding(false); }}><form onSubmit={saveNode}><div className="form-grid"><div className="field"><label>Node type</label><select name="type" defaultValue={editing?.type ?? "Action"}>{nodeTypes.map((type) => <option key={type}>{type}</option>)}</select></div><div className="field"><label>Branch</label><select name="branch" defaultValue={editing?.branch ?? ""}><option value="">Main path</option><option>YES</option><option>NO</option></select></div><div className="field full"><label>Label</label><input name="label" required defaultValue={editing?.label ?? ""} placeholder="What happens here?" /></div><div className="field full"><label>Configuration</label><textarea name="config" required defaultValue={editing?.config ?? ""} placeholder="Human-readable node configuration" /></div></div><div className="modal-foot"><Button type="button" onClick={() => { setEditing(null); setAdding(false); }}>Cancel</Button><Button variant="primary" type="submit">Save node</Button></div></form></Modal>}
   </>;
 }
-

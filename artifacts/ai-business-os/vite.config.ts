@@ -74,7 +74,7 @@ export default defineConfig({
     },
     proxy: {
       '/api': {
-        target: process.env.API_DEV_URL ?? 'http://127.0.0.1:5100',
+        target: process.env.API_DEV_URL ?? 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
     },

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { BusinessInput } from "@workspace/api-client-react";
+import type { BusinessInput } from "@/types/business";
 import { useLocation } from "wouter";
 import {
   AlertCircle,
@@ -8,7 +8,6 @@ import {
   Bot,
   Check,
   Globe2,
-  Lightbulb,
   Link2,
   Mail,
   MessageCircle,
@@ -16,14 +15,31 @@ import {
 } from "lucide-react";
 import { useBusiness } from "@/business-context";
 import { Badge, Button, Card } from "@/components/product-ui";
-import { cx } from "@/lib/product-utils";
-import { workspaceRepository } from "@/services/workspace-repository";
-import { createInitialCatalogDraft, type CatalogDraft } from "./catalog-import";
 import {
-  addCatalogToWorkspace,
+  BrandingEditor,
+  brandingDraftHasErrors,
+} from "@/features/branding/branding-editor";
+import {
+  brandIdentityFromDraft,
+  createBrandIdentityDraft,
+  type BrandIdentityDraft,
+} from "@/lib/brand-theme";
+import { cx } from "@/lib/product-utils";
+import { revokeBrandLogo } from "@/services/brand-logo";
+import { BusinessLogoUploadAfterCreationError } from "@/services/business-onboarding-persistence";
+import { catalogApi } from "@/services/catalog";
+import {
+  catalogDraftForSessionStorage,
+  createInitialCatalogDraft,
+  restoreCatalogDraft,
+  type CatalogDraft,
+} from "./catalog-import";
+import {
+  CatalogPersistenceAfterBusinessCreationError,
   createOnboardingBusinessId,
   humanizeOnboardingSaveError,
   onboardingSetupSteps,
+  persistOnboardingCatalog,
   saveOnboardingWorkspace,
 } from "./onboarding-save";
 import { ProductCatalogStep } from "./product-catalog-step";
@@ -57,12 +73,7 @@ const onboardingChannels = [
 
 type SetupState = "idle" | "saving" | "success" | "failed";
 
-function createDraftId() {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID();
-  }
-  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
+const ONBOARDING_DRAFT_KEY = "ai-business-os:onboarding-draft:v2";
 
 export function OnboardingPage() {
   const [, setLocation] = useLocation();
@@ -72,20 +83,32 @@ export function OnboardingPage() {
   const [completedSetupSteps, setCompletedSetupSteps] = useState(0);
   const [setupError, setSetupError] = useState("");
   const [createdBusinessId, setCreatedBusinessId] = useState("");
-  const [draftId, setDraftId] = useState(createDraftId);
+  const [businessSavedBeforeFailure, setBusinessSavedBeforeFailure] =
+    useState(false);
+  const [catalogSaveFailed, setCatalogSaveFailed] = useState(false);
+  const [businessId, setBusinessId] = useState(createOnboardingBusinessId);
   const saveInFlight = useRef(false);
   const [notice, setNotice] = useState("");
   const [draftReady, setDraftReady] = useState(false);
   const [catalog, setCatalog] = useState<CatalogDraft>(() =>
     createInitialCatalogDraft(),
   );
+  const [catalogFile, setCatalogFile] = useState<File | null>(null);
+  const [brandDraft, setBrandDraft] = useState<BrandIdentityDraft>(() =>
+    createBrandIdentityDraft(),
+  );
+  const pendingLogo = useRef(brandDraft.logo);
+  pendingLogo.current = brandDraft.logo;
+  const [brandingSkipped, setBrandingSkipped] = useState(false);
+  const [brandingTouched, setBrandingTouched] = useState(false);
   const [form, setForm] = useState({
     name: "",
     industry: "Farm/Agriculture" as BusinessInput["industry"],
     website: "",
     location: "",
     timezone: "Asia/Karachi",
-    currency: "USD · $",
+    currency: "USD",
+    locale: "en",
     description: "",
     tone: "Warm, grounded, and useful",
     avoidKeywords: "",
@@ -94,86 +117,111 @@ export function OnboardingPage() {
 
   useEffect(() => {
     try {
-      if (sessionStorage.getItem("ai-business-os:new-registration")) {
-        sessionStorage.removeItem("ai-business-os:onboarding-draft");
-        sessionStorage.removeItem("ai-business-os:new-registration");
-      } else {
-        const raw = sessionStorage.getItem("ai-business-os:onboarding-draft");
-        if (raw) {
-          const draft = JSON.parse(raw) as {
-            step?: number;
-            form?: typeof form;
-            catalog?: CatalogDraft;
-            draftId?: string;
-          };
-          if (draft.draftId) setDraftId(draft.draftId);
-          if (draft.form) setForm(draft.form);
-          if (draft.catalog) {
-            setCatalog({
-              ...createInitialCatalogDraft(),
-              ...draft.catalog,
-              products:
-                draft.catalog.products ?? createInitialCatalogDraft().products,
-            });
-          } else {
-            const legacyProducts = (
-              draft.form as
-                | (typeof form & { products?: CatalogDraft["products"] })
-                | undefined
-            )?.products;
-            if (legacyProducts?.length) {
-              setCatalog({
-                ...createInitialCatalogDraft(),
+      const raw = sessionStorage.getItem(ONBOARDING_DRAFT_KEY);
+      if (raw) {
+        const draft = JSON.parse(raw) as {
+          step?: number;
+          form?: typeof form;
+          catalog?: Partial<CatalogDraft>;
+          businessId?: string;
+          brandDraft?: BrandIdentityDraft;
+          brandingSkipped?: boolean;
+          brandingTouched?: boolean;
+        };
+        if (draft.businessId) setBusinessId(draft.businessId);
+        if (draft.form) setForm(draft.form);
+        if (draft.catalog) {
+          setCatalog(restoreCatalogDraft(draft.catalog));
+        } else {
+          const legacyProducts = (
+            draft.form as
+              | (typeof form & { products?: CatalogDraft["products"] })
+              | undefined
+          )?.products;
+          if (legacyProducts?.length) {
+            setCatalog(
+              restoreCatalogDraft({
                 method: "manual",
-                products: legacyProducts.map((product) => ({
-                  ...createInitialCatalogDraft().products[0],
-                  ...product,
-                })),
-              });
-            }
+                products: legacyProducts,
+              }),
+            );
           }
-          if (typeof draft.step === "number") {
-            setStep(Math.min(3, Math.max(0, draft.step)));
-          }
+        }
+        if (draft.brandDraft) {
+          setBrandDraft(onboardingBrandDraftFromStorage(draft.brandDraft));
+        }
+        setBrandingSkipped(Boolean(draft.brandingSkipped));
+        setBrandingTouched(Boolean(draft.brandingTouched));
+        if (typeof draft.step === "number") {
+          setStep(Math.min(4, Math.max(0, draft.step)));
         }
       }
     } catch {
-      // Start clean when a stale prototype draft cannot be read.
+      // Start clean when a stale UI draft cannot be read.
     }
     setDraftReady(true);
   }, []);
+
+  useEffect(
+    () => () => {
+      revokeBrandLogo(pendingLogo.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!draftReady || setupState === "success") return;
     try {
       sessionStorage.setItem(
-        "ai-business-os:onboarding-draft",
-        JSON.stringify({ step: Math.min(step, 3), form, catalog, draftId }),
+        ONBOARDING_DRAFT_KEY,
+        JSON.stringify({
+          step: Math.min(step, 4),
+          form,
+          catalog: catalogDraftForSessionStorage(catalog),
+          brandDraft: onboardingBrandDraftForStorage(brandDraft),
+          brandingSkipped,
+          brandingTouched,
+          businessId,
+        }),
       );
     } catch {
       // Persistence errors are surfaced by the final save operation.
     }
-  }, [catalog, draftId, draftReady, form, setupState, step]);
+  }, [
+    brandDraft,
+    brandingSkipped,
+    brandingTouched,
+    catalog,
+    businessId,
+    draftReady,
+    form,
+    setupState,
+    step,
+  ]);
 
   useEffect(() => {
-    if (step !== 4 || setupState !== "saving" || saveInFlight.current) return;
+    if (step !== 5 || setupState !== "saving" || saveInFlight.current) return;
     saveInFlight.current = true;
-    const businessId = createOnboardingBusinessId(form.name, draftId);
 
     const save = async () => {
       try {
         const business = await saveOnboardingWorkspace(
-          form,
+          {
+            ...form,
+            brandIdentity: brandingSkipped
+              ? undefined
+              : brandIdentityFromDraft(brandDraft),
+          },
           catalog,
           businessId,
           {
             createBusiness,
-            saveWorkspace: (created, products, currentCatalog) => {
-              workspaceRepository.updateOrThrow(
+            saveCatalog: async (created, currentCatalog) => {
+              await persistOnboardingCatalog(
+                catalogApi,
                 created.id,
-                created.industry,
-                (current) =>
-                  addCatalogToWorkspace(current, currentCatalog, products),
+                currentCatalog,
+                catalogFile,
               );
             },
             onProgress: async (completed) => {
@@ -184,10 +232,28 @@ export function OnboardingPage() {
             },
           },
         );
+        revokeBrandLogo(brandDraft.logo);
+        setBrandDraft(
+          createBrandIdentityDraft(
+            business.brandIdentity,
+            business.theme === "navy" ? "navy" : "green",
+          ),
+        );
         setCreatedBusinessId(business.id);
+        setBusinessSavedBeforeFailure(false);
+        setCatalogSaveFailed(false);
+        setCatalogFile(null);
         setSetupError("");
         setSetupState("success");
       } catch (error) {
+        const catalogWasSaved =
+          error instanceof CatalogPersistenceAfterBusinessCreationError;
+        const businessWasSaved =
+          error instanceof BusinessLogoUploadAfterCreationError ||
+          catalogWasSaved;
+        setBusinessSavedBeforeFailure(businessWasSaved);
+        setCatalogSaveFailed(catalogWasSaved);
+        if (businessWasSaved) setCreatedBusinessId(businessId);
         setSetupError(humanizeOnboardingSaveError(error));
         setSetupState("failed");
       } finally {
@@ -196,13 +262,31 @@ export function OnboardingPage() {
     };
 
     void save();
-  }, [catalog, createBusiness, draftId, form, setupState, step]);
+  }, [
+    brandDraft,
+    brandingSkipped,
+    catalog,
+    catalogFile,
+    createBusiness,
+    businessId,
+    form,
+    setupState,
+    step,
+  ]);
 
   const update = <K extends keyof typeof form>(
     key: K,
     value: (typeof form)[K],
   ) => {
     setForm((current) => ({ ...current, [key]: value }));
+    if (key === "industry" && !brandingTouched) {
+      setBrandDraft(
+        createBrandIdentityDraft(
+          undefined,
+          value === "Real Estate" ? "navy" : "green",
+        ),
+      );
+    }
   };
 
   const toggleChannel = (
@@ -221,32 +305,46 @@ export function OnboardingPage() {
         ? catalog.method === "skip" ||
           (catalog.method === "manual"
             ? catalog.products.some((product) => product.name.trim())
-            : Boolean(catalog.method && catalog.confirmed))
-        : true;
+            : catalog.method !== "store" &&
+              Boolean(catalog.method && catalog.confirmed && catalogFile))
+        : step === 4
+          ? !brandingDraftHasErrors(brandDraft)
+          : true;
+
+  const beginSetup = (skipBranding = false) => {
+    setCompletedSetupSteps(0);
+    setSetupError("");
+    setCreatedBusinessId("");
+    setBusinessSavedBeforeFailure(false);
+    setCatalogSaveFailed(false);
+    setBrandingSkipped(skipBranding);
+    setSetupState("saving");
+    setStep(5);
+  };
 
   const next = () => {
     if (!canContinue) {
       setNotice(
         step === 0
           ? "Add a business name and choose an industry to continue."
-          : !catalog.method
-            ? "Choose how you want to add products, or skip this step for now."
-            : catalog.method === "manual"
-              ? "Add at least one product or service to continue."
-              : "Review and confirm this catalog option before continuing.",
+          : step === 4
+            ? "Check the HEX values before continuing."
+            : !catalog.method
+              ? "Choose how you want to add products, or skip this step for now."
+              : catalog.method === "store"
+                ? "Store connections are coming soon. Choose another option or skip for now."
+                : catalog.method === "manual"
+                  ? "Add at least one product or service to continue."
+                  : "Review and confirm this catalog option before continuing.",
       );
       return;
     }
     setNotice("");
-    if (step === 3) {
-      setCompletedSetupSteps(0);
-      setSetupError("");
-      setCreatedBusinessId("");
-      setSetupState("saving");
-      setStep(4);
+    if (step === 4) {
+      beginSetup(false);
       return;
     }
-    setStep((current) => Math.min(3, current + 1));
+    setStep((current) => Math.min(4, current + 1));
   };
 
   const retrySetup = () => {
@@ -260,14 +358,50 @@ export function OnboardingPage() {
     if (saveInFlight.current) return;
     setSetupError("");
     setSetupState("idle");
-    setStep(3);
+    setBusinessSavedBeforeFailure(false);
+    setCatalogSaveFailed(false);
+    setStep(4);
+  };
+
+  const backToCatalog = () => {
+    if (saveInFlight.current) return;
+    setSetupError("");
+    setSetupState("idle");
+    setBusinessSavedBeforeFailure(false);
+    setCatalogSaveFailed(false);
+    setStep(1);
+  };
+
+  const skipFailedLogo = () => {
+    if (saveInFlight.current) return;
+    revokeBrandLogo(brandDraft.logo);
+    setBrandDraft((current) => ({ ...current, logo: undefined }));
+    setCompletedSetupSteps(0);
+    setSetupError("");
+    setSetupState("saving");
+  };
+
+  const skipFailedCatalog = () => {
+    if (saveInFlight.current) return;
+    setCatalogFile(null);
+    setCatalog((current) => ({
+      ...current,
+      method: "skip",
+      confirmed: true,
+      sourceName: "Skipped after catalog save failure",
+      pastedText: "",
+      products: [],
+    }));
+    setCompletedSetupSteps(0);
+    setSetupError("");
+    setCatalogSaveFailed(false);
+    setSetupState("saving");
   };
 
   const openDashboard = () => {
     if (!createdBusinessId || setupState !== "success") return;
     selectBusiness(createdBusinessId);
-    sessionStorage.removeItem("ai-business-os:onboarding-draft");
-    sessionStorage.removeItem("ai-business-os:new-registration");
+    sessionStorage.removeItem(ONBOARDING_DRAFT_KEY);
     setLocation("/dashboard");
   };
 
@@ -276,33 +410,44 @@ export function OnboardingPage() {
     "Products & services",
     "Brand voice",
     "Connect channels",
+    "Brand identity",
     "AI team setup",
   ];
   const setupProgress = Math.round(
     (completedSetupSteps / onboardingSetupSteps.length) * 100,
   );
   const pageTitle =
-    step !== 4
+    step !== 5
       ? stepTitles[step]
       : setupState === "success"
         ? "Your AI Business Team is ready!"
         : setupState === "failed"
-          ? "We couldn't finish setting up your workspace"
+          ? businessSavedBeforeFailure
+            ? catalogSaveFailed
+              ? "Your business is saved — the catalog needs another try"
+              : "Your business is saved — the logo needs another try"
+            : "We couldn't finish setting up your workspace"
           : "Setting up your AI Business Team...";
   const pageDescription =
     step === 0
       ? "Tell us a little about your business so your AI team can make better decisions from day one."
       : step === 1
-        ? "Give your team the products, services, and availability it should know about."
+        ? "Give your team the products, services, prices, and details it should know about."
         : step === 2
           ? "Your AI team will use this voice whenever it writes, replies, or recommends."
           : step === 3
             ? "Choose the channels your team should be ready to work across."
-            : setupState === "success"
-              ? "Your workspace is configured and your AI team has a clear starting point."
-              : setupState === "failed"
-                ? "Your onboarding information is still safe. Nothing has been lost."
-                : "We are saving your workspace and preparing a focused team around the way your business works.";
+            : step === 4
+              ? "Add your brand identity and we'll personalize your workspace while keeping everything clear, accessible, and professional."
+              : setupState === "success"
+                ? "Your workspace is configured and your AI team has a clear starting point."
+                : setupState === "failed"
+                  ? businessSavedBeforeFailure
+                    ? catalogSaveFailed
+                      ? "The workspace already exists. Retry the same catalog against this business, or skip it without creating another business."
+                      : "The workspace already exists. Retry only the logo upload, or skip the logo without creating another business."
+                    : "Your onboarding information is still safe. Nothing has been lost."
+                  : "We are saving your workspace and preparing a focused team around the way your business works.";
 
   return (
     <div className="onboarding-screen">
@@ -329,12 +474,12 @@ export function OnboardingPage() {
             </div>
           ))}
         </div>
-        <div className="onboarding-help">Step {step + 1} of 5</div>
+        <div className="onboarding-help">Step {step + 1} of 6</div>
       </div>
       <div className="onboarding-progress-line">
         <i
           style={{
-            width: `${((step + (step === 4 ? setupProgress / 100 : 0)) / 5) * 100}%`,
+            width: `${((step + (step === 5 ? setupProgress / 100 : 0)) / 6) * 100}%`,
           }}
         />
       </div>
@@ -344,7 +489,13 @@ export function OnboardingPage() {
           <h1>{pageTitle}</h1>
           <p>{pageDescription}</p>
         </div>
-        <Card className="onboarding-card" pad={false}>
+        <Card
+          className={cx(
+            "onboarding-card",
+            step === 4 && "branding-onboarding-card",
+          )}
+          pad={false}
+        >
           {step === 0 && (
             <div className="onboarding-panel">
               <div className="form-grid">
@@ -415,10 +566,10 @@ export function OnboardingPage() {
                     onChange={(event) => update("currency", event.target.value)}
                     data-testid="select-onboarding-currency"
                   >
-                    <option>USD · $</option>
-                    <option>PKR · ₨</option>
-                    <option>EUR · €</option>
-                    <option>GBP · £</option>
+                    <option value="USD">USD · $</option>
+                    <option value="PKR">PKR · ₨</option>
+                    <option value="EUR">EUR · €</option>
+                    <option value="GBP">GBP · £</option>
                   </select>
                 </div>
               </div>
@@ -426,7 +577,12 @@ export function OnboardingPage() {
           )}
 
           {step === 1 && (
-            <ProductCatalogStep catalog={catalog} onChange={setCatalog} />
+            <ProductCatalogStep
+              catalog={catalog}
+              selectedFile={catalogFile}
+              onChange={setCatalog}
+              onFileChange={setCatalogFile}
+            />
           )}
 
           {step === 2 && (
@@ -521,6 +677,21 @@ export function OnboardingPage() {
           )}
 
           {step === 4 && (
+            <div className="onboarding-panel branding-onboarding-panel">
+              <BrandingEditor
+                businessName={form.name}
+                value={brandDraft}
+                legacyTheme={form.industry === "Real Estate" ? "navy" : "green"}
+                onChange={(next) => {
+                  setBrandDraft(next);
+                  setBrandingSkipped(false);
+                  setBrandingTouched(true);
+                }}
+              />
+            </div>
+          )}
+
+          {step === 5 && (
             <div className="onboarding-panel onboarding-team-panel">
               {setupState === "saving" && (
                 <>
@@ -591,10 +762,19 @@ export function OnboardingPage() {
                     <AlertCircle />
                   </div>
                   <div className="eyebrow">Setup paused</div>
-                  <h2>We couldn't finish setting up your workspace</h2>
+                  <h2>
+                    {businessSavedBeforeFailure
+                      ? catalogSaveFailed
+                        ? "Business saved. Catalog save paused."
+                        : "Business saved. Logo upload paused."
+                      : "We couldn't finish setting up your workspace"}
+                  </h2>
                   <p>
-                    Your onboarding information is still safe. Nothing has been
-                    lost.
+                    {businessSavedBeforeFailure
+                      ? catalogSaveFailed
+                        ? "Your business is safe and has not been duplicated. Retry the catalog, fix the selected data, or skip it for now."
+                        : "Your business and colors are safe. Continue by retrying the selected logo or skipping it for now."
+                      : "Your onboarding information is still safe. Nothing has been lost."}
                   </p>
                   {setupError && (
                     <div
@@ -611,14 +791,14 @@ export function OnboardingPage() {
             </div>
           )}
 
-          {notice && step < 4 && (
+          {notice && step < 5 && (
             <div className="onboarding-notice">
               <AlertCircle size={15} />
               {notice}
             </div>
           )}
           <div className="onboarding-actions">
-            {step > 0 && step < 4 && (
+            {step > 0 && step < 5 && (
               <Button
                 variant="secondary"
                 onClick={() => {
@@ -630,7 +810,7 @@ export function OnboardingPage() {
                 Back
               </Button>
             )}
-            {step === 4 && setupState === "saving" && (
+            {step === 5 && setupState === "saving" && (
               <Button
                 variant="primary"
                 disabled
@@ -639,25 +819,57 @@ export function OnboardingPage() {
                 <RefreshCw className="spin" /> Setting up…
               </Button>
             )}
-            {step === 4 && setupState === "failed" && (
+            {step === 5 && setupState === "failed" && (
               <>
-                <Button
-                  variant="secondary"
-                  onClick={backToReview}
-                  data-testid="button-onboarding-back-to-review"
-                >
-                  Back to review
-                </Button>
+                {catalogSaveFailed && (
+                  <Button
+                    variant="secondary"
+                    onClick={backToCatalog}
+                    data-testid="button-onboarding-back-to-catalog"
+                  >
+                    Fix catalog
+                  </Button>
+                )}
+                {businessSavedBeforeFailure ? (
+                  <Button
+                    variant="secondary"
+                    onClick={
+                      catalogSaveFailed ? skipFailedCatalog : skipFailedLogo
+                    }
+                    data-testid={
+                      catalogSaveFailed
+                        ? "button-onboarding-skip-failed-catalog"
+                        : "button-onboarding-skip-failed-logo"
+                    }
+                  >
+                    {catalogSaveFailed
+                      ? "Skip catalog for now"
+                      : "Skip logo for now"}
+                  </Button>
+                ) : (
+                  <Button
+                    variant="secondary"
+                    onClick={backToReview}
+                    data-testid="button-onboarding-back-to-review"
+                  >
+                    Back to review
+                  </Button>
+                )}
                 <Button
                   variant="primary"
                   onClick={retrySetup}
                   data-testid="button-onboarding-retry"
                 >
-                  Try again <RefreshCw />
+                  {businessSavedBeforeFailure
+                    ? catalogSaveFailed
+                      ? "Retry catalog"
+                      : "Retry logo"
+                    : "Try again"}{" "}
+                  <RefreshCw />
                 </Button>
               </>
             )}
-            {step === 4 && setupState === "success" && (
+            {step === 5 && setupState === "success" && (
               <Button
                 variant="primary"
                 onClick={openDashboard}
@@ -666,14 +878,23 @@ export function OnboardingPage() {
                 Open my dashboard <ArrowRight />
               </Button>
             )}
-            {step < 4 && (
+            {step === 4 && (
+              <Button
+                variant="secondary"
+                onClick={() => beginSetup(true)}
+                data-testid="button-onboarding-skip-branding"
+              >
+                Skip for now
+              </Button>
+            )}
+            {step < 5 && (
               <Button
                 variant="green"
                 onClick={next}
-                disabled={step === 1 && !canContinue}
+                disabled={(step === 1 || step === 4) && !canContinue}
                 data-testid="button-onboarding-next"
               >
-                {step === 3 ? "Build my AI team" : "Continue"} <ArrowRight />
+                {step === 4 ? "Build my AI team" : "Continue"} <ArrowRight />
               </Button>
             )}
           </div>
@@ -681,4 +902,24 @@ export function OnboardingPage() {
       </main>
     </div>
   );
+}
+
+function onboardingBrandDraftForStorage(
+  draft: BrandIdentityDraft,
+): Omit<BrandIdentityDraft, "logo" | "logoUrl"> {
+  return {
+    primaryColor: draft.primaryColor,
+    secondaryColor: draft.secondaryColor,
+    accentColor: draft.accentColor,
+  };
+}
+
+function onboardingBrandDraftFromStorage(
+  draft: BrandIdentityDraft,
+): BrandIdentityDraft {
+  return {
+    primaryColor: draft.primaryColor,
+    secondaryColor: draft.secondaryColor,
+    accentColor: draft.accentColor,
+  };
 }

@@ -1,17 +1,9 @@
-import {
-  useEffect,
-  useState,
-  type CSSProperties,
-  type FormEvent,
-  type ReactNode,
-} from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
 import {
-  Archive,
   BarChart3,
   Bell,
   Bot,
-  Boxes,
   Brain,
   Check,
   CheckCircle2,
@@ -45,10 +37,12 @@ import {
 } from "lucide-react";
 import { useBusiness } from "@/business-context";
 import { Avatar, Button, Modal } from "@/components/product-ui";
-import { useAuth } from "@/features/auth/auth-context";
+import { BusinessBrandMark } from "@/features/branding/branding-editor";
+import { useAuth, userDisplayName } from "@/features/auth/auth-context";
 import { NotificationCenter } from "@/features/notifications/notification-center";
 import { useWorkspaceData } from "@/hooks/use-workspace-data";
-import { cx, initials } from "@/lib/product-utils";
+import { brandThemeStyle, deriveBrandTheme } from "@/lib/brand-theme";
+import { cx } from "@/lib/product-utils";
 
 const navGroups = [
   {
@@ -144,16 +138,20 @@ export function AppShell({ children }: { children: ReactNode }) {
     selectBusiness,
     isLoading,
   } = useBusiness();
-  const themeClass =
-    activeBusiness?.theme === "navy" ? "theme-navy" : "theme-green";
-  const industryNav =
-    activeBusiness?.industry === "Real Estate"
-      ? { href: "/properties", label: "Properties / Listings", icon: Boxes }
-      : activeBusiness?.industry === "E-commerce"
-        ? { href: "/products", label: "Products", icon: Package }
-        : activeBusiness?.industry === "Farm/Agriculture"
-          ? { href: "/inventory", label: "Inventory / Harvest", icon: Archive }
-          : null;
+  const displayName = userDisplayName(user);
+  const membershipRole = activeBusiness?.membershipRole
+    ? `${activeBusiness.membershipRole.charAt(0).toUpperCase()}${activeBusiness.membershipRole.slice(1)}`
+    : "Member";
+  const legacyTheme = activeBusiness?.theme === "navy" ? "navy" : "green";
+  const brandTheme = deriveBrandTheme(
+    activeBusiness?.brandIdentity,
+    legacyTheme,
+  );
+  const industryNav = {
+    href: "/products",
+    label: "Products & Services",
+    icon: Package,
+  };
   const IndustryIcon = industryNav?.icon;
   const notify = (message: string) => {
     const id = Date.now();
@@ -194,20 +192,20 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <div
-      className={cx("app-shell", themeClass)}
-      style={
-        {
-          "--business-primary":
-            activeBusiness.theme === "navy" ? "#1E3A8A" : "#15803D",
-        } as CSSProperties
-      }
+      className={cx("app-shell", `theme-${legacyTheme}`)}
+      data-business-theme={activeBusinessId}
+      data-custom-brand={activeBusiness.brandIdentity ? "true" : "false"}
+      style={brandThemeStyle(brandTheme)}
     >
       <aside className={cx("sidebar", open && "open")}>
         <div className="brand">
-          <div className="brand-mark">{initials(activeBusiness.name)}</div>
-          <div>
-            <div className="brand-copy">AI Business OS</div>
-            <div className="brand-sub">quietly moving business forward</div>
+          <BusinessBrandMark
+            businessName={activeBusiness.name}
+            identity={activeBusiness.brandIdentity}
+          />
+          <div className="brand-text">
+            <div className="brand-copy">{activeBusiness.name}</div>
+            <div className="brand-sub">AI Business OS · workspace</div>
           </div>
         </div>
         <div className="nav-list">
@@ -269,12 +267,12 @@ export function AppShell({ children }: { children: ReactNode }) {
             className="profile profile-button"
             onClick={() => setProfileOpen(true)}
           >
-            <Avatar name={user?.name ?? "Alexandra Andria"} />
+            <Avatar name={displayName} />
             <div>
-              <div className="profile-name">
-                {user?.name ?? "Alexandra Andria"}
+              <div className="profile-name">{displayName}</div>
+              <div className="profile-role">
+                {membershipRole} · {activeBusiness.name}
               </div>
-              <div className="profile-role">Owner · {activeBusiness.name}</div>
             </div>
             <ChevronRight size={14} color="#aaa49c" />
           </button>
@@ -338,7 +336,13 @@ export function AppShell({ children }: { children: ReactNode }) {
                       notify(`Switched to ${item.name}`);
                     }}
                   >
-                    {item.name}
+                    <span className="business-menu-name">
+                      <BusinessBrandMark
+                        businessName={item.name}
+                        identity={item.brandIdentity}
+                      />
+                      {item.name}
+                    </span>
                     {item.id === activeBusinessId && <Check size={13} />}
                   </button>
                 ))}
@@ -372,7 +376,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               <Bell />
               {unreadNotifications > 0 && <i className="notif-dot" />}
             </button>
-            <Avatar name={user?.name ?? "Alexandra Andria"} />
+            <Avatar name={displayName} />
             <Button
               variant="primary"
               onClick={() => setLocation("/automations")}
@@ -444,22 +448,22 @@ export function AppShell({ children }: { children: ReactNode }) {
             </button>
           </div>
           <div className="prototype-note">
-            Actions that require live providers or secure credentials clearly
-            remain prototype-only until the FastAPI backend is connected.
+            Features awaiting dedicated provider APIs remain clearly separated
+            from your authenticated business data.
           </div>
         </Modal>
       )}
       {profileOpen && (
         <Modal
-          title={user?.name ?? "Alexandra Andria"}
+          title={displayName}
           description={user?.email ?? "Owner profile"}
           onClose={() => setProfileOpen(false)}
         >
           <div className="profile-modal">
-            <Avatar name={user?.name ?? "Alexandra Andria"} />
+            <Avatar name={displayName} />
             <div>
               <h2>{activeBusiness.name}</h2>
-              <p className="subtle">Owner · Full prototype access</p>
+              <p className="subtle">{membershipRole} · Authenticated access</p>
             </div>
           </div>
           <div className="modal-foot">
