@@ -17,6 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies.business import BusinessAccessDependency
+from app.api.response_materialization import materialize_response_before_commit
 from app.db.session import get_db_session
 from app.exceptions.catalog import (
     CatalogImportFileError,
@@ -50,6 +51,7 @@ from app.services.catalog_import import (
     prepare_catalog_import,
     require_valid_catalog_import,
 )
+from app.services.automation_intelligence import schedule_competitor_discovery
 
 router = APIRouter(
     prefix="/businesses/{business_id}/catalog",
@@ -131,6 +133,10 @@ async def commit_catalog_import(
             access.business.id,
             item_creates,
         )
+        if isinstance(session, AsyncSession):
+            await schedule_competitor_discovery(
+                session, business_id=access.business.id, trigger_type="brain_change"
+            )
         await session.commit()
     except CatalogSkuConflictError:
         await _rollback_safely(session)
@@ -204,6 +210,11 @@ async def create_item(
             access.business.id,
             item_create,
         )
+        if isinstance(session, AsyncSession):
+            await schedule_competitor_discovery(
+                session, business_id=access.business.id, trigger_type="brain_change"
+            )
+        await materialize_response_before_commit(session, item)
         await session.commit()
     except CatalogSkuConflictError:
         await _rollback_safely(session)
@@ -270,6 +281,11 @@ async def patch_catalog_item(
             item_id,
             item_update,
         )
+        if isinstance(session, AsyncSession):
+            await schedule_competitor_discovery(
+                session, business_id=access.business.id, trigger_type="brain_change"
+            )
+        await materialize_response_before_commit(session, item)
         await session.commit()
     except CatalogItemNotFoundError:
         await _rollback_safely(session)
@@ -301,6 +317,10 @@ async def delete_catalog_item(
 ) -> Response:
     try:
         await archive_catalog_item(session, access.business.id, item_id)
+        if isinstance(session, AsyncSession):
+            await schedule_competitor_discovery(
+                session, business_id=access.business.id, trigger_type="brain_change"
+            )
         await session.commit()
     except CatalogItemNotFoundError:
         await _rollback_safely(session)

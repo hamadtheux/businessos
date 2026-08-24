@@ -1,14 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   AlertCircle,
   Check,
-  Edit3,
-  Plus,
+  RefreshCw,
   RotateCcw,
   Save,
   ShieldCheck,
   Sparkles,
-  Trash2,
 } from "lucide-react";
 import { useBusiness } from "@/business-context";
 import {
@@ -24,7 +23,6 @@ import {
   BrandingEditor,
   brandingDraftHasErrors,
 } from "@/features/branding/branding-editor";
-import { useWorkspaceData } from "@/hooks/use-workspace-data";
 import {
   createBrandIdentityDraft,
   type BrandIdentityDraft,
@@ -35,6 +33,7 @@ import {
 } from "@/features/settings/settings-branding-save";
 import { revokeBrandLogo } from "@/services/brand-logo";
 import type { Business } from "@/types/business";
+import { marketingApi } from "@/services/marketing";
 
 function createProfileForm(business: Business) {
   return {
@@ -54,16 +53,53 @@ function createProfileForm(business: Business) {
 export function SettingsPage() {
   const {
     activeBusiness,
+    activeBusinessId,
     deleteLogo,
     updateBranding,
     updateBusiness,
     uploadLogo,
   } = useBusiness();
-  const { data, update } = useWorkspaceData();
   const [tab, setTab] = useState("Business Profile");
   const [saved, setSaved] = useState("");
   const [error, setError] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
+  const canManageSpend = ["owner", "admin"].includes(
+    activeBusiness?.membershipRole ?? "",
+  );
+  const spendPolicy = useQuery({
+    queryKey: ["marketing", activeBusinessId, "spend-policy"],
+    queryFn: ({ signal }) => marketingApi.spendPolicy.get(activeBusinessId, signal),
+    enabled: Boolean(activeBusinessId && canManageSpend),
+  });
+  const saveSpendPolicy = useMutation({
+    mutationFn: (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      const optionalMoney = (name: string) => {
+        const value = String(form.get(name) ?? "").trim();
+        return value || null;
+      };
+      return marketingApi.spendPolicy.update(activeBusinessId, {
+        currency: activeBusiness?.currency ?? "USD",
+        max_single_campaign_budget: String(form.get("max_single_campaign_budget")),
+        max_single_budget_change: String(form.get("max_single_budget_change")),
+        daily_advertising_limit: optionalMoney("daily_advertising_limit"),
+        monthly_ai_managed_limit: optionalMoney("monthly_ai_managed_limit"),
+        active: form.get("active") === "on",
+        confirm_material_increase: form.get("confirm_material_increase") === "on",
+      });
+    },
+    onSuccess: (value) => {
+      setSaved("Server-owned advertising limits were saved and audit logged.");
+      setError("");
+      void spendPolicy.refetch();
+      return value;
+    },
+    onError: (reason) => {
+      setSaved("");
+      setError(reason instanceof Error ? reason.message : "Spend policy could not be saved.");
+    },
+  });
   const [form, setForm] = useState(() =>
     activeBusiness ? createProfileForm(activeBusiness) : null,
   );
@@ -162,7 +198,7 @@ export function SettingsPage() {
         brandIdentity: undefined,
       });
       setSaved(
-        "Branding saved. Other profile edits remain a browser draft until profile updates are available.",
+        "Business profile and branding saved to the authoritative workspace.",
       );
     } catch (reason) {
       setError(
@@ -207,6 +243,7 @@ export function SettingsPage() {
     "Brand Voice",
     "Team",
     "AI Controls",
+    "Ad Spend",
   ];
 
   return (
@@ -337,97 +374,16 @@ export function SettingsPage() {
           )}
 
           {tab === "Products / Services" && (
-            <>
-              <div className="list">
-                {form.products.map((product, index) => (
-                  <div
-                    className="list-row product-settings-row"
-                    key={product.id}
-                  >
-                    <div className="field row-main">
-                      <label>Name</label>
-                      <input
-                        value={product.name}
-                        onChange={(event) =>
-                          change(
-                            "products",
-                            form.products.map((item, itemIndex) =>
-                              itemIndex === index
-                                ? { ...item, name: event.target.value }
-                                : item,
-                            ),
-                          )
-                        }
-                      />
-                    </div>
-                    <div className="field">
-                      <label>Price</label>
-                      <input
-                        type="number"
-                        value={product.price}
-                        onChange={(event) =>
-                          change(
-                            "products",
-                            form.products.map((item, itemIndex) =>
-                              itemIndex === index
-                                ? { ...item, price: Number(event.target.value) }
-                                : item,
-                            ),
-                          )
-                        }
-                      />
-                    </div>
-                    <div className="field">
-                      <label>Availability</label>
-                      <input
-                        value={product.availability}
-                        onChange={(event) =>
-                          change(
-                            "products",
-                            form.products.map((item, itemIndex) =>
-                              itemIndex === index
-                                ? { ...item, availability: event.target.value }
-                                : item,
-                            ),
-                          )
-                        }
-                      />
-                    </div>
-                    <Button
-                      variant="danger"
-                      className="btn-sm"
-                      onClick={() =>
-                        change(
-                          "products",
-                          form.products.filter(
-                            (item) => item.id !== product.id,
-                          ),
-                        )
-                      }
-                    >
-                      <Trash2 />
-                    </Button>
-                  </div>
-                ))}
+            <div className="empty">
+              <ShieldCheck />
+              <h3>Use the authoritative workspace</h3>
+              <p>Products are managed in Catalog. Healthcare and professional services are managed as public appointment types in Scheduling. Settings never keeps a browser-only copy.</p>
+              <div className="toolbar">
+                {["Farm/Agriculture", "E-commerce", "Other"].includes(activeBusiness.industry) && <a className="btn btn-primary" href="/products">Open products</a>}
+                {["Hospital", "Clinic", "Medical Practice", "Dental", "Professional Services"].includes(activeBusiness.industry) && <a className="btn btn-primary" href="/scheduling">Open services</a>}
+                {activeBusiness.industry === "Real Estate" && <span className="subtle">Property listings remain intentionally hidden until the real Property domain exists.</span>}
               </div>
-              <Button
-                variant="soft"
-                className="btn-sm"
-                onClick={() =>
-                  change("products", [
-                    ...form.products,
-                    {
-                      id: `product-${Date.now()}`,
-                      name: "",
-                      price: 0,
-                      availability: "Available",
-                    },
-                  ])
-                }
-              >
-                <Plus /> Add item
-              </Button>
-            </>
+            </div>
           )}
 
           {tab === "Brand Voice" && (
@@ -469,45 +425,12 @@ export function SettingsPage() {
 
           {tab === "Team" && (
             <div className="list">
-              {[
-                [
-                  "Current user",
-                  activeBusiness.membershipRole,
-                  "Authenticated access",
-                ],
-                ["Sam Rivera", "Manager", "Customers, operations, AI"],
-                ["Tina Brooks", "Viewer", "Analytics only"],
-              ].map((member) => (
-                <div className="list-row" key={member[0]}>
-                  <Avatar name={member[0]} />
-                  <div className="row-main">
-                    <div className="row-title">{member[0]}</div>
-                    <div className="row-copy">{member[1]}</div>
-                  </div>
-                  <Badge>{member[2]}</Badge>
-                  <Button
-                    className="btn-sm"
-                    onClick={() =>
-                      setSaved(
-                        `Team permissions for ${member[0]} opened in prototype mode.`,
-                      )
-                    }
-                  >
-                    <Edit3 />
-                  </Button>
-                </div>
-              ))}
-              <Button
-                variant="soft"
-                className="btn-sm"
-                onClick={() =>
-                  setSaved(
-                    "Invitation prepared. Email delivery requires the secure backend.",
-                  )
-                }
-              >
-                <Plus /> Invite teammate
-              </Button>
+              <div className="list-row">
+                <Avatar name="Current user" />
+                <div className="row-main"><div className="row-title">Current authenticated membership</div><div className="row-copy">{activeBusiness.membershipRole}</div></div>
+                <Badge>Server-authorized</Badge>
+              </div>
+              <p className="subtle">No sample teammates are shown. Invitation and role-management controls will appear only when their authenticated membership API is available.</p>
             </div>
           )}
 
@@ -525,59 +448,43 @@ export function SettingsPage() {
                   </p>
                 </div>
               </div>
-              <SectionTitle title="Workspace approval rules" />
-              <div className="toggle-row">
-                <div className="toggle-copy">
-                  <strong>Proactive actions</strong>
-                  <span>
-                    Let AI prepare timely actions from clear business signals.
-                  </span>
-                </div>
-                <input type="checkbox" defaultChecked />
-              </div>
-              <div className="toggle-row">
-                <div className="toggle-copy">
-                  <strong>Require approval for external messages</strong>
-                  <span>
-                    Human review remains visible before promotional outreach.
-                  </span>
-                </div>
-                <input type="checkbox" defaultChecked />
-              </div>
               <SectionTitle title="Agent autonomy & permissions" />
-              {data.agents.map((agent) => (
-                <div className="agent-control-row" key={agent.id}>
-                  <div>
-                    <strong>{agent.name}</strong>
-                    <span>{agent.role}</span>
-                  </div>
-                  <select
-                    value={agent.autonomy}
-                    onChange={(event) =>
-                      update((current) => ({
-                        ...current,
-                        agents: current.agents.map((item) =>
-                          item.id === agent.id
-                            ? {
-                                ...item,
-                                autonomy: event.target
-                                  .value as typeof item.autonomy,
-                              }
-                            : item,
-                        ),
-                      }))
-                    }
-                  >
-                    <option>Suggest</option>
-                    <option>Approval</option>
-                    <option>Autonomous</option>
-                  </select>
-                  <Badge tone={agent.active ? "success" : "neutral"}>
-                    {agent.active ? "Active" : "Paused"}
-                  </Badge>
+              <div className="risk-note">
+                <Sparkles />
+                <div>
+                  <strong>Managed in the AI Workforce</strong>
+                  <p>
+                    Agent status, capabilities, and autonomy use the durable
+                    business API. Integration credentials and connector write
+                    controls are never exposed here.
+                  </p>
                 </div>
-              ))}
+              </div>
+              <div className="toolbar">
+                <a className="btn btn-primary" href="/agents">
+                  Manage AI agents
+                </a>
+                <a className="btn btn-secondary" href="/approvals">
+                  Review approvals
+                </a>
+              </div>
             </div>
+          )}
+
+          {tab === "Ad Spend" && (
+            !canManageSpend ? <div className="empty"><ShieldCheck /><h3>Owner or administrator access required</h3><p>Advertising authorization limits are intentionally hidden from members who cannot change spend governance.</p></div> : spendPolicy.isLoading ? <div className="empty"><RefreshCw className="spin" /><p>Loading server-owned spend limits…</p></div> : spendPolicy.isError ? <div className="empty"><AlertCircle /><h3>Spend policy could not load</h3><Button onClick={() => void spendPolicy.refetch()}>Retry</Button></div> : <form onSubmit={(event) => saveSpendPolicy.mutate(event)} key={spendPolicy.data?.updated_at ?? "new-policy"}>
+              <div className="risk-note"><ShieldCheck /><div><strong>Human approval is not a spend limit</strong><p>These tenant-owned limits are revalidated from the server before durable advertising dispatch. AI and campaign forms cannot change them.</p></div></div>
+              <div className="form-grid section-gap">
+                <label className="field"><span>Policy currency</span><input value={activeBusiness.currency} readOnly /></label>
+                <label className="field"><span>Maximum single campaign budget</span><input name="max_single_campaign_budget" type="number" min="0" max="1000000000" step="0.01" required defaultValue={spendPolicy.data?.max_single_campaign_budget ?? "0.00"} /></label>
+                <label className="field"><span>Maximum single budget change</span><input name="max_single_budget_change" type="number" min="0" max="1000000000" step="0.01" required defaultValue={spendPolicy.data?.max_single_budget_change ?? "0.00"} /></label>
+                <label className="field"><span>Optional daily advertising limit</span><input name="daily_advertising_limit" type="number" min="0" max="1000000000" step="0.01" defaultValue={spendPolicy.data?.daily_advertising_limit ?? ""} /></label>
+                <label className="field"><span>Optional monthly AI-managed limit</span><input name="monthly_ai_managed_limit" type="number" min="0" max="1000000000" step="0.01" defaultValue={spendPolicy.data?.monthly_ai_managed_limit ?? ""} /></label>
+                <label className="toggle-line full"><input name="active" type="checkbox" defaultChecked={spendPolicy.data?.active ?? true} /><span>Enforce this policy for advertising actions</span></label>
+                <label className="toggle-line full"><input name="confirm_material_increase" type="checkbox" /><span>I explicitly confirm any increase to an advertising limit</span></label>
+              </div>
+              <div className="toolbar section-gap"><Button variant="primary" type="submit" disabled={saveSpendPolicy.isPending}><Save />{saveSpendPolicy.isPending ? "Saving limits…" : "Save governed limits"}</Button></div>
+            </form>
           )}
         </Card>
       </div>

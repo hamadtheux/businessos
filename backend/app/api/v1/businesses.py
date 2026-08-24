@@ -15,13 +15,14 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies.auth import CurrentUserDependency
-from app.api.dependencies.business import BusinessAccessDependency
+from app.api.dependencies.business import BusinessAccessDependency, require_business_role
 from app.db.session import get_db_session
 from app.exceptions.business import (
     BusinessBrandingPersistenceError,
     BusinessListingPersistenceError,
     BusinessOnboardingConflictError,
     BusinessOnboardingPersistenceError,
+    BusinessProfilePersistenceError,
 )
 from app.exceptions.logo import (
     BusinessLogoPersistenceError,
@@ -33,12 +34,14 @@ from app.schemas.business import (
     BusinessBrandingUpdate,
     BusinessOnboardingInput,
     BusinessOnboardingResponse,
+    BusinessProfileUpdate,
     BusinessSummary,
 )
 from app.services.business import (
     CreatedBusinessContext,
     create_business_from_onboarding,
     list_accessible_businesses,
+    update_business_profile,
 )
 from app.services.business_branding import (
     get_business_branding,
@@ -50,7 +53,12 @@ from app.services.business_logo import (
     prepare_business_logo_deletion,
     prepare_business_logo_upload,
 )
+from app.services.automation_intelligence import (
+    schedule_competitor_discovery,
+    schedule_marketing_automation,
+)
 from app.services.logo_image import read_and_sanitize_logo
+from app.services.operations import record_audit
 from app.storage.base import ObjectStorage, StorageError
 from app.storage.factory import ObjectStorageDependency
 
@@ -95,6 +103,20 @@ async def create_business(
             current_user.id,
             onboarding,
         )
+        if context.created and isinstance(session, AsyncSession):
+            await schedule_competitor_discovery(
+                session,
+                business_id=context.business.id,
+                trigger_type="onboarding",
+            )
+            await schedule_marketing_automation(
+                session, business_id=context.business.id, run_type="content_plan"
+            )
+            await schedule_marketing_automation(
+                session,
+                business_id=context.business.id,
+                run_type="campaign_opportunities",
+            )
         await session.commit()
     except BusinessOnboardingConflictError:
         if not await _rollback_safely(session):
@@ -136,27 +158,81 @@ async def list_businesses(
     except BusinessListingPersistenceError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Businesses are temporarily unavailable.",
+            detail={
+                "code": "temporary_failure",
+                "message": (
+                    "Business data could not be loaded because the API could "
+                    "not read the workspace records. Please try again."
+                ),
+            },
+            headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
         ) from None
 
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
 
     return [
-        BusinessSummary(
-            id=accessible.business.id,
-            name=accessible.business.name,
-            slug=accessible.business.slug,
-            business_type=accessible.business.business_type,
-            status=accessible.business.status,
-            timezone=accessible.business.timezone,
-            currency=accessible.business.currency,
-            locale=accessible.business.locale,
-            membership_role=accessible.membership_role,
-            created_at=accessible.business.created_at,
-        )
+        _build_business_summary(accessible.business, accessible.membership_role)
         for accessible in accessible_businesses
     ]
+
+
+@router.put(
+    "/{business_id}",
+    response_model=BusinessSummary,
+    status_code=status.HTTP_200_OK,
+    responses={
+        status.HTTP_403_FORBIDDEN: {
+            "description": "Owner or administrator access is required."
+        },
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": "Business profile persistence is temporarily unavailable."
+        },
+    },
+)
+async def replace_business_profile(
+    update: BusinessProfileUpdate,
+    access: BusinessAccessDependency,
+    response: Response,
+    session: SessionDependency,
+) -> BusinessSummary:
+    require_business_role(access)
+    before = (
+        f"name={access.business.name}; timezone={access.business.timezone}; "
+        f"currency={access.business.currency}; locale={access.business.locale}"
+    )
+    try:
+        business = await update_business_profile(
+            session,
+            business=access.business,
+            update=update,
+        )
+        record_audit(
+            session,
+            business_id=business.id,
+            actor_user_id=access.user.id,
+            event_type="business.profile_updated",
+            entity_type="business",
+            entity_id=business.id,
+            summary="Updated the authoritative business profile.",
+            before_value=before,
+            after_value=(
+                f"name={business.name}; timezone={business.timezone}; "
+                f"currency={business.currency}; locale={business.locale}"
+            ),
+        )
+        await session.commit()
+    except (BusinessProfilePersistenceError, SQLAlchemyError):
+        await _rollback_safely(session)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "temporary_failure",
+                "message": "Business profile could not be saved. Please try again.",
+            },
+        ) from None
+    _set_private_response_headers(response)
+    return _build_business_summary(business, access.membership.role)
 
 
 @router.get(
@@ -199,6 +275,7 @@ async def replace_business_branding(
     response: Response,
     session: SessionDependency,
 ) -> BusinessBrandingResponse:
+    require_business_role(access)
     try:
         branding = await update_business_branding(
             session,
@@ -238,6 +315,7 @@ async def upload_business_logo(
     session: SessionDependency,
     storage: ObjectStorageDependency,
 ) -> BusinessBrandingResponse:
+    require_business_role(access)
     _reject_unexpected_logo_form_fields(await request.form())
     prepared: PreparedLogoUpload | None = None
     try:
@@ -295,6 +373,7 @@ async def delete_business_logo(
     session: SessionDependency,
     storage: ObjectStorageDependency,
 ) -> Response:
+    require_business_role(access)
     try:
         prepared = await prepare_business_logo_deletion(
             session,
@@ -327,18 +406,7 @@ def _build_onboarding_response(
     business = context.business
     branding = context.branding
     return BusinessOnboardingResponse(
-        business=BusinessSummary(
-            id=business.id,
-            name=business.name,
-            slug=business.slug,
-            business_type=business.business_type,
-            status=business.status,
-            timezone=business.timezone,
-            currency=business.currency,
-            locale=business.locale,
-            membership_role=context.membership.role,
-            created_at=business.created_at,
-        ),
+        business=_build_business_summary(business, context.membership.role),
         branding=(
             BusinessBrandingResponse.model_validate(branding)
             if branding is not None
@@ -359,6 +427,26 @@ def _build_branding_response(
             logo_url=None,
         )
     return BusinessBrandingResponse.model_validate(branding)
+
+
+def _build_business_summary(business: object, membership_role: str) -> BusinessSummary:
+    return BusinessSummary(
+        id=business.id,
+        name=business.name,
+        slug=business.slug,
+        business_type=business.business_type,
+        status=business.status,
+        timezone=business.timezone,
+        currency=business.currency,
+        locale=business.locale,
+        website_url=getattr(business, "website_url", None),
+        location=getattr(business, "location", None),
+        description=getattr(business, "description", None),
+        brand_voice=getattr(business, "brand_voice", None),
+        avoid_keywords=list(getattr(business, "avoid_keywords", None) or []),
+        membership_role=membership_role,
+        created_at=business.created_at,
+    )
 
 
 def _set_private_response_headers(response: Response) -> None:

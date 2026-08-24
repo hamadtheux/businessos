@@ -388,6 +388,7 @@ class BusinessBrainAssemblyTests(unittest.IsolatedAsyncioTestCase):
             {
                 "business_profile": 1,
                 "branding": 1,
+                "appointment_type": 0,
                 "catalog_item": 2,
                 "knowledge_entry": 1,
             },
@@ -551,6 +552,8 @@ class _AssemblySession:
             page = active[self.catalog_offset : self.catalog_offset + limit]
             self.catalog_offset += len(page)
             return _ScalarResult(page)
+        if "FROM appointment_types" in str(statement):
+            return _ScalarResult([])
         self.knowledge_page_calls += 1
         active = sorted(
             (

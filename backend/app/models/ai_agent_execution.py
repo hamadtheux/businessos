@@ -14,6 +14,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -50,6 +51,9 @@ class AIAgentExecution(
     __tablename__ = "ai_agent_executions"
 
     __table_args__ = (
+        UniqueConstraint(
+            "id", "business_id", name="uq_ai_agent_executions_id_business"
+        ),
         CheckConstraint(
             "role IN ("
             "'business_manager', "
@@ -75,6 +79,8 @@ class AIAgentExecution(
             "trigger_type IN ("
             "'api', "
             "'automation', "
+            "'command', "
+            "'website_widget', "
             "'system'"
             ")",
             name="valid_trigger_type",
@@ -153,6 +159,20 @@ class AIAgentExecution(
             name="valid_completed_at",
         ),
         CheckConstraint(
+            "delegation_sequence BETWEEN 0 AND 3",
+            name="valid_delegation_sequence",
+        ),
+        CheckConstraint(
+            "delegation_depth BETWEEN 0 AND 1",
+            name="valid_delegation_depth",
+        ),
+        CheckConstraint(
+            "(delegation_depth = 0 AND parent_execution_id IS NULL) OR "
+            "(delegation_depth = 1 AND parent_execution_id IS NOT NULL "
+            "AND delegation_role IS NOT NULL)",
+            name="valid_delegation_linkage",
+        ),
+        CheckConstraint(
             "(status = 'running' AND completed_at IS NULL) "
             "OR "
             "(status <> 'running' AND completed_at IS NOT NULL)",
@@ -184,6 +204,12 @@ class AIAgentExecution(
             "created_at",
             "id",
         ),
+        Index(
+            "ix_ai_agent_executions_command_sequence",
+            "business_id",
+            "command_id",
+            "delegation_sequence",
+        ),
     )
 
     business_id: Mapped[UUID] = mapped_column(
@@ -200,6 +226,24 @@ class AIAgentExecution(
             ondelete="SET NULL",
         ),
         nullable=True,
+    )
+
+    command_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("ai_commands.id", ondelete="SET NULL"), nullable=True
+    )
+
+    parent_execution_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("ai_agent_executions.id", ondelete="SET NULL"), nullable=True
+    )
+
+    delegation_role: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    delegation_sequence: Mapped[int] = mapped_column(
+        nullable=False, default=0, server_default="0"
+    )
+
+    delegation_depth: Mapped[int] = mapped_column(
+        nullable=False, default=0, server_default="0"
     )
 
     role: Mapped[str] = mapped_column(

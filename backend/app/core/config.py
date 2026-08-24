@@ -14,6 +14,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["development", "testing", "staging", "production"]
 StorageBackend = Literal["local", "s3"]
+IntegrationCredentialBackend = Literal["disabled", "aws_secrets_manager"]
+ChatbotRateLimitBackend = Literal["memory"]
+BillingProviderBackend = Literal["disabled"]
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -39,6 +42,20 @@ class Settings(BaseSettings):
     database_pool_size: int = Field(default=10, ge=1)
     database_max_overflow: int = Field(default=20, ge=0)
     database_pool_timeout: int = Field(default=30, ge=1)
+
+    # PostgreSQL-backed internal processing. API, worker, and scheduler are
+    # separate processes sharing the same database.
+    job_poll_interval_seconds: float = Field(default=1.0, ge=0.25, le=60)
+    job_batch_size: int = Field(default=10, ge=1, le=100)
+    job_lease_seconds: int = Field(default=300, ge=10, le=900)
+    worker_heartbeat_seconds: int = Field(default=15, ge=5, le=120)
+    scheduler_poll_interval_seconds: float = Field(default=5.0, ge=1, le=300)
+    scheduler_batch_size: int = Field(default=100, ge=1, le=500)
+
+    # Billing is server-authoritative even while commercial checkout is not
+    # configured. Platform administrators are identities, never tenant roles.
+    billing_provider: BillingProviderBackend = "disabled"
+    platform_admin_emails: list[str] = []
 
     # Object storage
     storage_backend: StorageBackend = "local"
@@ -93,6 +110,48 @@ class Settings(BaseSettings):
         le=5,
     )
 
+    # External integrations
+    #
+    # Provider tokens are never stored in application database columns. The
+    # safe default is disabled; production may opt into AWS Secrets Manager
+    # with workload identity and optional KMS configuration.
+    integration_credential_backend: IntegrationCredentialBackend = "disabled"
+    integration_secret_prefix: str = Field(
+        default="aibos/integrations", min_length=3, max_length=80,
+        pattern=r"^[A-Za-z0-9/_+=.@-]+$",
+    )
+    integration_secret_region: str | None = Field(default=None, max_length=64)
+    integration_secret_kms_key_id: str | None = Field(default=None, max_length=2048)
+    integration_oauth_state_ttl_seconds: int = Field(default=600, ge=300, le=900)
+    integration_oauth_callback_url: AnyHttpUrl | None = None
+    integration_webhook_max_bytes: int = Field(default=262_144, ge=1_024, le=1_048_576)
+    external_connector_writes_enabled: bool = False
+    connector_dispatch_timeout_seconds: float = Field(default=30.0, ge=1, le=120)
+
+    google_oauth_client_id: str | None = Field(default=None, max_length=255)
+    google_oauth_client_secret: SecretStr | None = None
+    google_ads_developer_token: SecretStr | None = None
+    google_ads_api_version: str = Field(default="v25", pattern=r"^v[0-9]{1,3}$")
+    meta_oauth_client_id: str | None = Field(default=None, max_length=255)
+    meta_oauth_client_secret: SecretStr | None = None
+    meta_graph_api_version: str = Field(default="v26.0", pattern=r"^v[0-9]{1,3}\.0$")
+    meta_webhook_verify_token: SecretStr | None = None
+    meta_webhook_signing_secret: SecretStr | None = None
+    microsoft_oauth_client_id: str | None = Field(default=None, max_length=255)
+    microsoft_oauth_client_secret: SecretStr | None = None
+
+    # Public website chatbot / isolated widget deployment
+    public_api_base_url: AnyHttpUrl = "http://localhost:8000"
+    widget_loader_url: AnyHttpUrl = "http://localhost:5173/widget-loader.js"
+    widget_app_url: AnyHttpUrl = "http://localhost:5173/widget.html"
+    chatbot_session_ttl_minutes: int = Field(default=1_440, ge=15, le=10_080)
+    chatbot_rate_limit_backend: ChatbotRateLimitBackend = "memory"
+    chatbot_session_creations_per_minute: int = Field(default=10, ge=1, le=100)
+    chatbot_messages_per_minute: int = Field(default=20, ge=1, le=120)
+    chatbot_leads_per_hour: int = Field(default=5, ge=1, le=50)
+    chatbot_order_attempts_per_hour: int = Field(default=5, ge=1, le=50)
+    chatbot_booking_attempts_per_hour: int = Field(default=5, ge=1, le=50)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -124,6 +183,14 @@ class Settings(BaseSettings):
                 "Wildcard CORS origins cannot be used with credentials"
             )
         return value
+
+    @field_validator("platform_admin_emails")
+    @classmethod
+    def normalize_platform_admin_emails(cls, value: list[str]) -> list[str]:
+        normalized = sorted({item.strip().casefold() for item in value if item.strip()})
+        if any("@" not in item or len(item) > 320 for item in normalized):
+            raise ValueError("Platform administrator emails must be valid email identities")
+        return normalized
 
     @field_validator("openai_api_key")
     @classmethod
@@ -191,6 +258,63 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "S3-compatible storage requires bucket, credentials, "
                     "and a public base URL"
+                )
+
+        if self.integration_credential_backend == "aws_secrets_manager":
+            if not self.integration_secret_region or not self.integration_secret_region.strip():
+                raise ValueError(
+                    "AWS Secrets Manager integration storage requires a region"
+                )
+        if (
+            self.external_connector_writes_enabled
+            and self.integration_credential_backend == "disabled"
+        ):
+            raise ValueError(
+                "External connector writes require secure credential storage"
+            )
+
+        for provider, client_id, client_secret in (
+            ("Google", self.google_oauth_client_id, self.google_oauth_client_secret),
+            ("Meta", self.meta_oauth_client_id, self.meta_oauth_client_secret),
+            ("Microsoft", self.microsoft_oauth_client_id, self.microsoft_oauth_client_secret),
+        ):
+            has_id = bool(client_id and client_id.strip())
+            has_secret = bool(
+                client_secret and client_secret.get_secret_value().strip()
+            )
+            if has_id != has_secret:
+                raise ValueError(f"{provider} OAuth client configuration is incomplete")
+            if has_id and (
+                self.integration_oauth_callback_url is None
+                or self.integration_credential_backend == "disabled"
+            ):
+                raise ValueError(
+                    f"{provider} OAuth requires a callback URL and secure credential storage"
+                )
+
+        if (
+            self.google_ads_developer_token is not None
+            and not self.google_ads_developer_token.get_secret_value().strip()
+        ):
+            raise ValueError("Google Ads developer token cannot be blank")
+
+        if self.environment == "production":
+            public_urls = (
+                self.public_api_base_url,
+                self.widget_loader_url,
+                self.widget_app_url,
+            )
+            if any(url.scheme != "https" or url.host in {"localhost", "127.0.0.1"} for url in public_urls):
+                raise ValueError(
+                    "Public chatbot API, loader, and app URLs must use non-local HTTPS in production"
+                )
+            origins = {
+                (url.scheme, url.host, url.port or 443)
+                for url in public_urls
+            }
+            if len(origins) != 1:
+                raise ValueError(
+                    "Public chatbot API, loader, and app must share one browser origin; proxy /api to the backend"
                 )
 
         return self

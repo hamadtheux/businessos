@@ -1,8 +1,10 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
+import { useQuery } from "@tanstack/react-query";
 import {
   BarChart3,
   Bell,
+  CalendarDays,
   Bot,
   Brain,
   Check,
@@ -11,6 +13,7 @@ import {
   ChevronRight,
   CircleHelp,
   ClipboardCheck,
+  CreditCard,
   FileText,
   Globe2,
   Inbox,
@@ -19,6 +22,7 @@ import {
   Link2,
   LogOut,
   Menu,
+  MessageCircle,
   Package,
   PanelLeftClose,
   Plus,
@@ -35,22 +39,55 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useBusiness } from "@/business-context";
 import { Avatar, Button, Modal } from "@/components/product-ui";
 import { BusinessBrandMark } from "@/features/branding/branding-editor";
 import { useAuth, userDisplayName } from "@/features/auth/auth-context";
 import { NotificationCenter } from "@/features/notifications/notification-center";
-import { useWorkspaceData } from "@/hooks/use-workspace-data";
 import { brandThemeStyle, deriveBrandTheme } from "@/lib/brand-theme";
+import { filterBusinessFeatureItems, isBusinessFeatureEnabled, type BusinessFeature } from "@/lib/business-features";
+import {
+  getIndustryWorkspaceProfile,
+  isWorkspaceModuleVisible,
+  type WorkspaceModule,
+} from "@/lib/industry-workspaces";
 import { cx } from "@/lib/product-utils";
+import { operationsApi } from "@/services/operations";
 
-const navGroups = [
+type NavItem = { href: string; label: string; icon: LucideIcon; feature?: BusinessFeature };
+type NavGroup = { label: string; items: NavItem[] };
+
+const NAV_MODULE_BY_HREF: Readonly<Record<string, WorkspaceModule>> = {
+  "/dashboard": "dashboard",
+  "/command": "ai_command_center",
+  "/reports/daily": "daily_report",
+  "/conversations": "conversations",
+  "/orders": "orders",
+  "/customers": "customers",
+  "/crm": "crm",
+  "/scheduling": "scheduling",
+  "/chatbot": "website_chatbot",
+  "/cmo": "marketing_cmo",
+  "/agents": "ai_agents",
+  "/automations": "automations",
+  "/approvals": "approvals",
+  "/opportunities": "opportunities",
+  "/analytics": "analytics",
+  "/competitors": "competitors",
+  "/trends": "trends",
+  "/integrations": "integrations",
+  "/brain": "business_brain",
+  "/audit": "audit",
+};
+
+const navGroups: NavGroup[] = [
   {
     label: "Overview",
     items: [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-      { href: "/command", label: "AI Command Center", icon: Sparkles },
-      { href: "/reports/daily", label: "Daily AI Report", icon: FileText },
+      { href: "/command", label: "AI Command Center", icon: Sparkles, feature: "ai_command_center" as const },
+      { href: "/reports/daily", label: "Daily AI Report", icon: FileText, feature: "reports" as const },
     ],
   },
   {
@@ -60,14 +97,21 @@ const navGroups = [
       { href: "/orders", label: "Orders", icon: ShoppingBag },
       { href: "/customers", label: "Customers", icon: Users },
       { href: "/crm", label: "Leads & CRM", icon: Target },
+      {
+        href: "/scheduling",
+        label: "Scheduling",
+        icon: CalendarDays,
+        feature: "scheduling" as const,
+      },
     ],
   },
   {
     label: "AI Team",
     items: [
-      { href: "/cmo", label: "AI CMO", icon: Wand2 },
-      { href: "/agents", label: "AI Agents", icon: Bot },
-      { href: "/automations", label: "Automations", icon: Zap },
+      { href: "/chatbot", label: "Website Chatbot", icon: MessageCircle, feature: "website_chatbot" as const },
+      { href: "/cmo", label: "AI CMO", icon: Wand2, feature: "marketing_cmo" as const },
+      { href: "/agents", label: "AI Agents", icon: Bot, feature: "ai_agents" as const },
+      { href: "/automations", label: "Automations", icon: Zap, feature: "automations" as const },
       { href: "/approvals", label: "Approvals", icon: ClipboardCheck },
       { href: "/opportunities", label: "Opportunities", icon: Lightbulb },
     ],
@@ -75,10 +119,10 @@ const navGroups = [
   {
     label: "Intelligence",
     items: [
-      { href: "/analytics", label: "Analytics", icon: BarChart3 },
-      { href: "/competitors", label: "Competitors", icon: Target },
-      { href: "/trends", label: "Trends", icon: TrendingUp },
-      { href: "/integrations", label: "Integrations", icon: Link2 },
+      { href: "/analytics", label: "Analytics", icon: BarChart3, feature: "advanced_analytics" as const },
+      { href: "/competitors", label: "Competitors", icon: Target, feature: "competitor_intelligence" as const },
+      { href: "/trends", label: "Trends", icon: TrendingUp, feature: "trend_intelligence" as const },
+      { href: "/integrations", label: "Integrations", icon: Link2, feature: "integrations" as const },
       { href: "/brain", label: "Business Brain", icon: Brain },
       { href: "/audit", label: "Audit Log", icon: ScrollText },
     ],
@@ -127,31 +171,42 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [profileOpen, setProfileOpen] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const { user, logout } = useAuth();
-  const { data: workspaceData } = useWorkspaceData();
-  const unreadNotifications = workspaceData.notifications.filter(
-    (item) => !item.read,
-  ).length;
   const {
     businesses,
     activeBusiness,
     activeBusinessId,
     selectBusiness,
     isLoading,
+    billing,
   } = useBusiness();
+  const notifications = useQuery({
+    queryKey: ["operations", activeBusinessId, "notifications", "unread"],
+    queryFn: ({ signal }) => operationsApi.notifications.list(activeBusinessId, true, signal),
+    enabled: Boolean(activeBusinessId),
+    refetchInterval: 60_000,
+  });
+  const unreadNotifications = notifications.data?.total ?? 0;
   const displayName = userDisplayName(user);
   const membershipRole = activeBusiness?.membershipRole
     ? `${activeBusiness.membershipRole.charAt(0).toUpperCase()}${activeBusiness.membershipRole.slice(1)}`
     : "Member";
+  const canRunCommands = isBusinessFeatureEnabled(activeBusiness, "ai_command_center", billing?.entitlements ?? null);
+  const canAutomate = isBusinessFeatureEnabled(activeBusiness, "automations", billing?.entitlements ?? null);
   const legacyTheme = activeBusiness?.theme === "navy" ? "navy" : "green";
   const brandTheme = deriveBrandTheme(
     activeBusiness?.brandIdentity,
     legacyTheme,
   );
-  const industryNav = {
-    href: "/products",
-    label: "Products & Services",
-    icon: Package,
-  };
+  const workspaceProfile = getIndustryWorkspaceProfile(activeBusiness?.industry);
+  const terminology = workspaceProfile.terminology;
+  const industryNav =
+    workspaceProfile.catalogRoute && workspaceProfile.catalogLabel
+      ? {
+          href: workspaceProfile.catalogRoute,
+          label: workspaceProfile.catalogLabel,
+          icon: Package,
+        }
+      : null;
   const IndustryIcon = industryNav?.icon;
   const notify = (message: string) => {
     const id = Date.now();
@@ -164,6 +219,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   const runCommand = (event: FormEvent) => {
     event.preventDefault();
     if (!command.trim()) return;
+    if (!canRunCommands) {
+      setLocation("/billing?feature=ai_command_center");
+      return;
+    }
     setCommand("");
     setLocation(`/command?q=${encodeURIComponent(command.trim())}`);
   };
@@ -212,18 +271,29 @@ export function AppShell({ children }: { children: ReactNode }) {
           {navGroups.map((group) => (
             <div key={group.label}>
               <div className="nav-section">{group.label}</div>
-              {group.items.map((item) => {
+              {filterBusinessFeatureItems(
+                activeBusiness,
+                group.items,
+                billing?.entitlements ?? null,
+              )
+                .filter((item) => {
+                  const module = NAV_MODULE_BY_HREF[item.href];
+                  return !module || isWorkspaceModuleVisible(activeBusiness.industry, module);
+                })
+                .map((item) => {
                 const Icon = item.icon;
+                const module = NAV_MODULE_BY_HREF[item.href];
                 const label =
-                  activeBusiness.industry === "Real Estate"
-                    ? item.href === "/orders"
-                      ? "Deals & Viewings"
-                      : item.href === "/customers"
-                        ? "Contacts"
-                        : item.href === "/crm"
-                          ? "Leads & Pipeline"
-                          : item.label
-                    : item.label;
+                  module === "customers"
+                    ? terminology.customerPlural
+                    : module === "crm"
+                      ? terminology.crmLabel
+                      : module === "scheduling"
+                        ? terminology.schedulingLabel
+                        : module === "orders" &&
+                            workspaceProfile.dashboardVariant === "real_estate"
+                          ? "Deals & Viewings"
+                          : item.label;
                 return (
                   <Link
                     key={item.href}
@@ -255,6 +325,15 @@ export function AppShell({ children }: { children: ReactNode }) {
           ))}
         </div>
         <div className="sidebar-bottom">
+          <Link
+            href="/billing"
+            className={cx("nav-item", location.startsWith("/billing") && "active")}
+            data-testid="link-nav-billing"
+          >
+            <CreditCard />
+            <span>Billing & plan</span>
+            {billing && <small className="nav-plan-badge">{billing.plan_name}</small>}
+          </Link>
           <Link
             href="/settings"
             className={cx("nav-item", location === "/settings" && "active")}
@@ -379,10 +458,10 @@ export function AppShell({ children }: { children: ReactNode }) {
             <Avatar name={displayName} />
             <Button
               variant="primary"
-              onClick={() => setLocation("/automations")}
+              onClick={() => setLocation(canAutomate ? "/automations" : "/billing?feature=automations")}
               data-testid="button-new-automation"
             >
-              <Plus /> New automation
+              {canAutomate ? <Plus /> : <CreditCard />} {canAutomate ? "New automation" : "View plan"}
             </Button>
           </div>
         </header>

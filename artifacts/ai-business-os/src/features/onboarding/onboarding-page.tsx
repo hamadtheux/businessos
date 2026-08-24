@@ -24,7 +24,12 @@ import {
   createBrandIdentityDraft,
   type BrandIdentityDraft,
 } from "@/lib/brand-theme";
+import {
+  businessIndustryDefaultTheme,
+  ONBOARDING_INDUSTRIES,
+} from "@/lib/business-industries";
 import { cx } from "@/lib/product-utils";
+import { isWorkspaceModuleVisible } from "@/lib/industry-workspaces";
 import { revokeBrandLogo } from "@/services/brand-logo";
 import { BusinessLogoUploadAfterCreationError } from "@/services/business-onboarding-persistence";
 import { catalogApi } from "@/services/catalog";
@@ -43,14 +48,6 @@ import {
   saveOnboardingWorkspace,
 } from "./onboarding-save";
 import { ProductCatalogStep } from "./product-catalog-step";
-
-const onboardingIndustries = [
-  "Farm/Agriculture",
-  "Real Estate",
-  "E-commerce",
-  "Dental",
-  "Other",
-] as const;
 
 const onboardingChannels = [
   {
@@ -114,6 +111,15 @@ export function OnboardingPage() {
     avoidKeywords: "",
     channels: [] as NonNullable<BusinessInput["connectedChannels"]>,
   });
+
+  const catalogEnabled = isWorkspaceModuleVisible(form.industry, "catalog");
+
+  useEffect(() => {
+    if (step === 1 && !catalogEnabled) {
+      setNotice("");
+      setStep(2);
+    }
+  }, [catalogEnabled, step]);
 
   useEffect(() => {
     try {
@@ -236,7 +242,7 @@ export function OnboardingPage() {
         setBrandDraft(
           createBrandIdentityDraft(
             business.brandIdentity,
-            business.theme === "navy" ? "navy" : "green",
+            businessIndustryDefaultTheme(business.industry),
           ),
         );
         setCreatedBusinessId(business.id);
@@ -332,7 +338,7 @@ export function OnboardingPage() {
             : !catalog.method
               ? "Choose how you want to add products, or skip this step for now."
               : catalog.method === "store"
-                ? "Store connections are coming soon. Choose another option or skip for now."
+                ? "Store provider configuration is required. Choose another option or skip for now."
                 : catalog.method === "manual"
                   ? "Add at least one product or service to continue."
                   : "Review and confirm this catalog option before continuing.",
@@ -342,6 +348,10 @@ export function OnboardingPage() {
     setNotice("");
     if (step === 4) {
       beginSetup(false);
+      return;
+    }
+    if (step === 0 && !catalogEnabled) {
+      setStep(2);
       return;
     }
     setStep((current) => Math.min(4, current + 1));
@@ -405,14 +415,22 @@ export function OnboardingPage() {
     setLocation("/dashboard");
   };
 
-  const stepTitles = [
-    "Business basics",
-    "Products & services",
-    "Brand voice",
-    "Connect channels",
-    "Brand identity",
-    "AI team setup",
-  ];
+  const stepTitles: Record<number, string> = {
+    0: "Business basics",
+    1: "Products & services",
+    2: "Brand voice",
+    3: "Connect channels",
+    4: "Brand identity",
+    5: "AI team setup",
+  };
+
+  const visibleStepIndexes = catalogEnabled
+    ? [0, 1, 2, 3, 4, 5]
+    : [0, 2, 3, 4, 5];
+
+  const activeVisibleStepIndex = visibleStepIndexes.indexOf(step);
+  const visibleProgressIndex = Math.max(activeVisibleStepIndex, 0);
+
   const setupProgress = Math.round(
     (completedSetupSteps / onboardingSetupSteps.length) * 100,
   );
@@ -460,26 +478,40 @@ export function OnboardingPage() {
           </div>
         </div>
         <div className="onboarding-progress">
-          {stepTitles.map((title, index) => (
-            <div
-              className={cx(
-                "onboarding-step",
-                index === step && "active",
-                index < step && "complete",
-              )}
-              key={title}
-            >
-              <span>{index < step ? <Check size={13} /> : index + 1}</span>
-              <small>{title}</small>
-            </div>
-          ))}
+          {visibleStepIndexes.map((stepIndex, visibleIndex) => {
+            const title = stepTitles[stepIndex];
+            const complete = visibleIndex < activeVisibleStepIndex;
+
+            return (
+              <div
+                className={cx(
+                  "onboarding-step",
+                  stepIndex === step && "active",
+                  complete && "complete",
+                )}
+                key={stepIndex}
+              >
+                <span>
+                  {complete ? <Check size={13} /> : visibleIndex + 1}
+                </span>
+                <small>{title}</small>
+              </div>
+            );
+          })}
         </div>
-        <div className="onboarding-help">Step {step + 1} of 6</div>
+        <div className="onboarding-help">
+          Step {visibleProgressIndex + 1} of {visibleStepIndexes.length}
+        </div>
       </div>
       <div className="onboarding-progress-line">
         <i
           style={{
-            width: `${((step + (step === 5 ? setupProgress / 100 : 0)) / 6) * 100}%`,
+            width: `${
+              ((visibleProgressIndex +
+                (step === 5 ? setupProgress / 100 : 0)) /
+                visibleStepIndexes.length) *
+              100
+            }%`,
           }}
         />
       </div>
@@ -521,7 +553,7 @@ export function OnboardingPage() {
                     }
                     data-testid="select-onboarding-industry"
                   >
-                    {onboardingIndustries.map((industry) => (
+                    {ONBOARDING_INDUSTRIES.map((industry) => (
                       <option key={industry}>{industry}</option>
                     ))}
                   </select>
@@ -576,7 +608,7 @@ export function OnboardingPage() {
             </div>
           )}
 
-          {step === 1 && (
+          {step === 1 && catalogEnabled && (
             <ProductCatalogStep
               catalog={catalog}
               selectedFile={catalogFile}
@@ -681,7 +713,7 @@ export function OnboardingPage() {
               <BrandingEditor
                 businessName={form.name}
                 value={brandDraft}
-                legacyTheme={form.industry === "Real Estate" ? "navy" : "green"}
+                legacyTheme={businessIndustryDefaultTheme(form.industry)}
                 onChange={(next) => {
                   setBrandDraft(next);
                   setBrandingSkipped(false);
@@ -803,7 +835,9 @@ export function OnboardingPage() {
                 variant="secondary"
                 onClick={() => {
                   setNotice("");
-                  setStep((current) => current - 1);
+                  setStep((current) =>
+                    !catalogEnabled && current === 2 ? 0 : current - 1,
+                  );
                 }}
                 data-testid="button-onboarding-back"
               >

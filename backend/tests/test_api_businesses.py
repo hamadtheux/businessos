@@ -265,6 +265,11 @@ class BusinessListingApiTests(unittest.IsolatedAsyncioTestCase):
                 "timezone",
                 "currency",
                 "locale",
+                "website_url",
+                "location",
+                "description",
+                "brand_voice",
+                "avoid_keywords",
                 "membership_role",
                 "created_at",
             },
@@ -354,8 +359,18 @@ class BusinessListingApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(
             response.json(),
-            {"detail": "Businesses are temporarily unavailable."},
+            {
+                "detail": {
+                    "code": "temporary_failure",
+                    "message": (
+                        "Business data could not be loaded because the API "
+                        "could not read the workspace records. Please try "
+                        "again."
+                    ),
+                }
+            },
         )
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
 
     async def test_existing_routes_remain_available(self) -> None:
         paths = app.openapi()["paths"]

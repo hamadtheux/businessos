@@ -10,17 +10,22 @@ import {
 } from "react";
 import { useAuth } from "@/features/auth/auth-context";
 import { businessApi, humanizeApiError } from "@/services/api-client";
-import { businessDraftRepository } from "@/services/business-draft-repository";
 import { persistBusinessOnboarding } from "@/services/business-onboarding-persistence";
 import {
   applyBrandingToBusinessList,
   brandingUpdateFromIdentity,
   brandingFromResponse,
   businessFromSummary,
+  createBusinessProfilePayload,
   isCurrentBrandingResponse,
   resolveActiveBusinessId,
 } from "@/services/business-model";
 import type { BrandIdentity, Business, BusinessInput } from "@/types/business";
+import {
+  billingApi,
+  isCurrentBillingResponse,
+  type BillingOverview,
+} from "@/services/billing";
 
 const ACTIVE_BUSINESS_KEY = "ai-os-active-business";
 
@@ -30,6 +35,10 @@ type BusinessContextValue = {
   activeBusinessId: string;
   isLoading: boolean;
   error: string;
+  billing: BillingOverview | null;
+  billingLoading: boolean;
+  billingError: string;
+  reloadBilling: () => Promise<BillingOverview | null>;
   selectBusiness: (id: string) => void;
   reloadBusinesses: () => Promise<Business[]>;
   createBusiness: (
@@ -55,10 +64,21 @@ export function BusinessProvider({ children }: { children: ReactNode }) {
   const [hasLoadedAuthenticatedSession, setHasLoadedAuthenticatedSession] =
     useState(false);
   const [error, setError] = useState("");
+  const [billing, setBilling] = useState<BillingOverview | null>(null);
+  const [billingLoading, setBillingLoading] = useState(false);
+  const [billingError, setBillingError] = useState("");
+  const billingVersion = useRef(0);
   const loadVersion = useRef(0);
   const brandingVersion = useRef(0);
   const businessesRef = useRef<Business[]>([]);
   const activeBusinessIdRef = useRef("");
+
+  const clearBillingSnapshot = useCallback((loading = false) => {
+    ++billingVersion.current;
+    setBilling(null);
+    setBillingError("");
+    setBillingLoading(loading);
+  }, []);
 
   const selectBusiness = useCallback((id: string) => {
     if (!businessesRef.current.some((business) => business.id === id)) {
@@ -70,6 +90,7 @@ export function BusinessProvider({ children }: { children: ReactNode }) {
       id,
       null,
     );
+    if (activeBusinessIdRef.current !== id) clearBillingSnapshot(true);
     businessesRef.current = safeBusinesses;
     activeBusinessIdRef.current = id;
     setBusinesses(safeBusinesses);
@@ -98,24 +119,11 @@ export function BusinessProvider({ children }: { children: ReactNode }) {
         businessesRef.current = next;
         setBusinesses(next);
       })
-      .catch((reason: unknown) => {
-        if (
-          isCurrentBrandingResponse(
-            id,
-            version,
-            activeBusinessIdRef.current,
-            brandingVersion.current,
-          )
-        ) {
-          setError(
-            humanizeApiError(
-              reason,
-              "We couldn't load this business's branding. Please try again.",
-            ),
-          );
-        }
+      .catch(() => {
+        // A tenant switch must not blank the authenticated application because
+        // optional presentation data failed. Branding settings can retry it.
       });
-  }, []);
+  }, [clearBillingSnapshot]);
 
   const loadBusinesses = useCallback(
     async ({
@@ -134,7 +142,7 @@ export function BusinessProvider({ children }: { children: ReactNode }) {
       try {
         const summaries = await businessApi.list();
         const loaded = summaries.map((summary) =>
-          businessFromSummary(summary, businessDraftRepository.get(summary.id)),
+          businessFromSummary(summary),
         );
         if (version !== loadVersion.current) return loaded;
 
@@ -142,26 +150,39 @@ export function BusinessProvider({ children }: { children: ReactNode }) {
           preferredActiveId ?? readStoredBusinessId(),
           loaded,
         );
-        const activeBranding = nextActiveId
-          ? await businessApi.getBranding(nextActiveId)
-          : null;
-        if (
-          version !== loadVersion.current ||
-          brandingRequestVersion !== brandingVersion.current
-        ) {
-          return loaded;
+        if (activeBusinessIdRef.current !== nextActiveId) {
+          clearBillingSnapshot(Boolean(nextActiveId));
         }
-        const branded = applyBrandingToBusinessList(
-          loaded,
-          nextActiveId,
-          activeBranding,
-        );
-        businessesRef.current = branded;
+        businessesRef.current = loaded;
         activeBusinessIdRef.current = nextActiveId;
-        setBusinesses(branded);
+        setBusinesses(loaded);
         setActiveBusinessId(nextActiveId);
         writeStoredBusinessId(nextActiveId);
-        return branded;
+        setError("");
+
+        if (!nextActiveId) return loaded;
+
+        try {
+          const activeBranding = await businessApi.getBranding(nextActiveId);
+          if (
+            version !== loadVersion.current ||
+            brandingRequestVersion !== brandingVersion.current
+          ) {
+            return loaded;
+          }
+          const branded = applyBrandingToBusinessList(
+            loaded,
+            nextActiveId,
+            activeBranding,
+          );
+          businessesRef.current = branded;
+          setBusinesses(branded);
+          return branded;
+        } catch {
+          // Branding is optional presentation data. The authenticated business
+          // list remains authoritative and usable if branding cannot refresh.
+          return loaded;
+        }
       } catch (reason) {
         if (version === loadVersion.current && surfaceError) {
           setBusinesses([]);
@@ -183,7 +204,7 @@ export function BusinessProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [],
+    [clearBillingSnapshot],
   );
 
   const reloadBusinesses = useCallback(
@@ -214,14 +235,62 @@ export function BusinessProvider({ children }: { children: ReactNode }) {
     [activeBusinessId, businesses],
   );
 
+  const reloadBilling = useCallback(async () => {
+    const businessId = activeBusinessIdRef.current;
+    if (!businessId || status !== "authenticated") {
+      setBilling(null);
+      return null;
+    }
+    const version = ++billingVersion.current;
+    setBillingLoading(true);
+    setBilling(null);
+    setBillingError("");
+    try {
+      const value = await billingApi.overview(businessId);
+      const isCurrent = isCurrentBillingResponse(
+        businessId,
+        value.business_id,
+        version,
+        billingVersion.current,
+        activeBusinessIdRef.current,
+      );
+      if (isCurrent) {
+        setBilling(value);
+        return value;
+      }
+      if (version === billingVersion.current && activeBusinessIdRef.current === businessId) {
+        setBilling(null);
+        setBillingError("The billing response did not match the active business. Please try again.");
+      }
+      return null;
+    } catch (reason) {
+      if (version === billingVersion.current && activeBusinessIdRef.current === businessId) {
+        setBilling(null);
+        setBillingError(humanizeApiError(reason, "We couldn't load this business's plan access."));
+      }
+      return null;
+    } finally {
+      if (version === billingVersion.current) setBillingLoading(false);
+    }
+  }, [status]);
+
+  useEffect(() => {
+    if (status === "authenticated" && activeBusinessId) {
+      void reloadBilling();
+    } else {
+      ++billingVersion.current;
+      setBilling(null);
+      setBillingError("");
+      setBillingLoading(false);
+    }
+  }, [activeBusinessId, reloadBilling, status]);
+
   const createBusiness = useCallback(
     async (input: BusinessInput, businessId?: string) => {
       if (!businessId) {
         throw new Error("A stable business identity is required.");
       }
       await persistBusinessOnboarding(businessApi, businessId, input);
-      businessDraftRepository.save(businessId, input);
-
       const loaded = await loadBusinesses({
         blockUi: false,
         surfaceError: false,
@@ -249,10 +318,24 @@ export function BusinessProvider({ children }: { children: ReactNode }) {
       if (!current) {
         throw new Error("This business is not available to your account.");
       }
-      const draft = businessDraftRepository.save(id, input);
+      let summary;
+      try {
+        summary = await businessApi.updateProfile(
+          id,
+          createBusinessProfilePayload(input),
+        );
+      } catch (reason) {
+        throw new Error(
+          humanizeApiError(
+            reason,
+            "We couldn't save this business profile. Please try again.",
+          ),
+        );
+      }
       const updated = {
-        ...current,
-        ...draft,
+        ...businessFromSummary(summary),
+        theme: current.theme,
+        connectedChannels: current.connectedChannels,
         brandIdentity: current.brandIdentity,
       };
       const next = businessesRef.current.map((business) =>
@@ -431,6 +514,10 @@ export function BusinessProvider({ children }: { children: ReactNode }) {
           (status === "authenticated" && !hasLoadedAuthenticatedSession) ||
           isLoading,
         error,
+        billing,
+        billingLoading,
+        billingError,
+        reloadBilling,
         selectBusiness,
         reloadBusinesses,
         createBusiness,

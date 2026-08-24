@@ -30,3 +30,27 @@ class AIActionConflictError(
     AIActionError
 ):
     """Raised when an action would violate idempotency or ownership rules."""
+
+
+class UnsupportedAIActionError(
+    AIActionError
+):
+    """Raised when an action type is absent from the server registry."""
+
+
+class AIActionPolicyError(
+    AIActionError
+):
+    """Raised when deterministic policy evaluation cannot safely complete."""
+
+
+class AIActionExecutionError(
+    AIActionError
+):
+    """Raised when the internal action execution boundary fails safely."""
+
+
+class AIActionHandlerNotFoundError(
+    AIActionExecutionError
+):
+    """Raised when no explicitly registered inert/real handler exists."""

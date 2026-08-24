@@ -9,6 +9,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -52,9 +53,11 @@ class AIAction(
         │        ready        rejected/expired
         │
         ↓
+      queued
+        ↓
       executing
         ↓
-    succeeded / failed
+    succeeded / failed / uncertain
 
     `ready` means the action is permitted to enter the future Action
     Execution Engine. It may become ready either because:
@@ -80,10 +83,21 @@ class AIAction(
     __tablename__ = "ai_actions"
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["execution_id", "business_id"],
+            ["ai_agent_executions.id", "ai_agent_executions.business_id"],
+            name="fk_ai_actions_execution_business",
+            ondelete="CASCADE",
+        ),
         UniqueConstraint(
             "execution_id",
             "proposal_index",
             name="uq_ai_actions_execution_proposal",
+        ),
+        UniqueConstraint(
+            "id",
+            "business_id",
+            name="uq_ai_actions_id_business",
         ),
         CheckConstraint(
             "proposal_index >= 0 AND proposal_index < 20",
@@ -111,12 +125,14 @@ class AIAction(
             "'proposed', "
             "'pending_approval', "
             "'ready', "
+            "'queued', "
             "'blocked', "
             "'rejected', "
             "'expired', "
             "'executing', "
             "'succeeded', "
             "'failed', "
+            "'uncertain', "
             "'canceled'"
             ")",
             name="valid_status",
@@ -150,6 +166,12 @@ class AIAction(
             name="valid_policy_reason_code",
         ),
         CheckConstraint(
+            "authorized_payload_hash IS NULL OR "
+            "(char_length(authorized_payload_hash) = 64 AND "
+            "authorized_payload_hash ~ '^[0-9a-f]{64}$')",
+            name="valid_authorized_payload_hash",
+        ),
+        CheckConstraint(
             "result_summary IS NULL "
             "OR char_length(btrim(result_summary)) BETWEEN 1 AND 2000",
             name="valid_result_summary",
@@ -180,11 +202,11 @@ class AIAction(
             "AND execution_started_at IS NOT NULL "
             "AND execution_completed_at IS NULL"
             ") OR ("
-            "status IN ('succeeded', 'failed') "
+            "status IN ('succeeded', 'failed', 'uncertain') "
             "AND execution_started_at IS NOT NULL "
             "AND execution_completed_at IS NOT NULL"
             ") OR ("
-            "status NOT IN ('executing', 'succeeded', 'failed') "
+            "status NOT IN ('executing', 'succeeded', 'failed', 'uncertain') "
             "AND execution_started_at IS NULL "
             "AND execution_completed_at IS NULL"
             ")",
@@ -192,10 +214,10 @@ class AIAction(
         ),
         CheckConstraint(
             "("
-            "status = 'failed' "
+            "status IN ('failed', 'uncertain') "
             "AND failure_code IS NOT NULL"
             ") OR ("
-            "status <> 'failed' "
+            "status NOT IN ('failed', 'uncertain') "
             "AND failure_code IS NULL"
             ")",
             name="valid_failure_state",
@@ -223,9 +245,11 @@ class AIAction(
         CheckConstraint(
             "status NOT IN ("
             "'ready', "
+            "'queued', "
             "'executing', "
             "'succeeded', "
-            "'failed'"
+            "'failed', "
+            "'uncertain'"
             ") "
             "OR policy_decision IN ('allow', 'require_approval')",
             name="executable_state_requires_allowing_policy",
@@ -266,13 +290,7 @@ class AIAction(
         nullable=False,
     )
 
-    execution_id: Mapped[UUID] = mapped_column(
-        ForeignKey(
-            "ai_agent_executions.id",
-            ondelete="CASCADE",
-        ),
-        nullable=False,
-    )
+    execution_id: Mapped[UUID] = mapped_column(nullable=False)
 
     # Stable position inside the originating execution's proposed_actions
     # array. Combined with execution_id, this prevents duplicate
@@ -338,6 +356,11 @@ class AIAction(
         nullable=True,
     )
 
+    authorized_payload_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
     policy_evaluated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -382,4 +405,5 @@ class AIAction(
 
     execution: Mapped["AIAgentExecution"] = relationship(
         lazy="select",
+        overlaps="business",
     )

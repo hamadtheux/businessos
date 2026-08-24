@@ -100,3 +100,19 @@ BusinessAccessDependency = Annotated[
     BusinessAccessContext,
     Depends(get_business_access),
 ]
+
+
+def require_business_role(
+    access: BusinessAccessContext,
+    *,
+    allowed_roles: frozenset[str] = frozenset({"owner", "admin"}),
+) -> None:
+    """Enforce a server-owned membership role for sensitive tenant changes."""
+    if access.membership.role not in allowed_roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "permission_missing",
+                "message": "Business owner or administrator access is required.",
+            },
+        )

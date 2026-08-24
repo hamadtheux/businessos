@@ -24,3 +24,7 @@ class BusinessBrandingError(Exception):
 
 class BusinessBrandingPersistenceError(BusinessBrandingError):
     """Raised when business branding cannot be persisted safely."""
+
+
+class BusinessProfilePersistenceError(Exception):
+    """Raised when an authoritative business profile cannot be persisted."""

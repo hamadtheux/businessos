@@ -63,6 +63,22 @@ export default defineConfig({
   build: {
     outDir: path.resolve(import.meta.dirname, 'dist/public'),
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        app: path.resolve(import.meta.dirname, 'index.html'),
+        widget: path.resolve(import.meta.dirname, 'widget.html'),
+        hosted: path.resolve(import.meta.dirname, 'hosted.html'),
+        loader: path.resolve(import.meta.dirname, 'src/widget/loader.ts'),
+      },
+      output: {
+        entryFileNames: (chunk) =>
+          chunk.name === 'loader'
+            ? 'widget-loader.js'
+            : 'assets/[name]-[hash].js',
+        chunkFileNames: 'assets/[name]-[hash].js',
+        assetFileNames: 'assets/[name]-[hash][extname]',
+      },
+    },
   },
   server: {
     port,
@@ -83,5 +99,11 @@ export default defineConfig({
     port,
     host: '0.0.0.0',
     allowedHosts: true,
+    proxy: {
+      '/api': {
+        target: process.env.API_DEV_URL ?? 'http://127.0.0.1:8000',
+        changeOrigin: true,
+      },
+    },
   },
 });

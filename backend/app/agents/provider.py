@@ -33,6 +33,7 @@ class AIAgentProviderRequest:
     task: str
 
     context: AIContextBundle
+    max_output_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if self.context.business_id != self.business_id:
@@ -48,6 +49,14 @@ class AIAgentProviderRequest:
         if not self.task.strip():
             raise ValueError(
                 "task cannot be blank"
+            )
+
+        if (
+            self.max_output_tokens is not None
+            and not 1 <= self.max_output_tokens <= 32_768
+        ):
+            raise ValueError(
+                "max_output_tokens must be between 1 and 32768"
             )
 
 

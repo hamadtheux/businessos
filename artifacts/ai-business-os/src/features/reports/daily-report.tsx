@@ -1,54 +1,552 @@
-import { ArrowRight, CheckCircle2, Headphones, Lightbulb, MessageCircle, Package, Sparkles, Target, TrendingUp, Users } from "lucide-react";
-import { useLocation } from "wouter";
-import { Badge, Button, Card, PageHeader, SectionTitle } from "@/components/product-ui";
+import { useState } from "react";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import {
+  AlertCircle,
+  BarChart3,
+  CalendarDays,
+  CheckCircle2,
+  Package,
+  Sparkles,
+  Target,
+  TrendingUp,
+  Users,
+} from "lucide-react";
 import { useBusiness } from "@/business-context";
-import { useWorkspaceData } from "@/hooks/use-workspace-data";
-import { money } from "@/lib/product-utils";
-import { demoWorkspaceDataEnabled } from "@/services/workspace-repository";
+import {
+  Badge,
+  Button,
+  Card,
+  PageHeader,
+  SectionTitle,
+} from "@/components/product-ui";
+import { isBusinessFeatureEnabled } from "@/lib/business-features";
+import {
+  getIndustryWorkspaceProfile,
+  isWorkspaceModuleVisible,
+} from "@/lib/industry-workspaces";
+import { businessDateRange } from "@/lib/operational-dates";
+import { humanizeApiError } from "@/services/api-client";
+import { operationsApi } from "@/services/operations";
 
 export function DailyReportPage() {
-  const { activeBusiness } = useBusiness();
-  const { data, industry, update } = useWorkspaceData();
-  const [, setLocation] = useLocation();
-  if (!demoWorkspaceDataEnabled) {
-    return <>
-      <PageHeader eyebrow="Daily AI Report" title="Your operating brief is waiting for live data" subtitle={`The workspace for ${activeBusiness?.name} is connected to real authentication and business records.`} />
-      <Card><div className="empty"><Sparkles /><h3>No report data yet</h3><p>Daily reports will populate when the supporting business APIs are available.</p></div></Card>
-    </>;
-  }
-  const taskCount = data.agentActivity.reduce((sum) => sum + 41, 20);
-  const reportGroups = industry === "Real Estate" ? [
-    { title: "Business", icon: TrendingUp, metrics: [["Pipeline", money(data.analytics.revenue, true)], ["Active listings", String(activeBusiness?.products.length ?? 0)], ["Viewings", "8"]] },
-    { title: "Marketing", icon: Target, metrics: [["Reach", "24.8k"], ["Engagement", "8.1%"], ["Best content", "Investor explainer"]] },
-    { title: "Sales", icon: Users, metrics: [["Leads", String(data.analytics.leads)], ["Conversion", `${data.analytics.conversion}%`], ["Pipeline moved", "$1.2m"]] },
-    { title: "Support", icon: Headphones, metrics: [["Conversations", "29"], ["Response time", "1m 12s"], ["Escalations", "2"]] },
-    { title: "Operations", icon: Package, metrics: [["Viewings", "8"], ["Documents", "3 pending"], ["Calendar conflicts", "0"]] },
-  ] : [
-    { title: "Business", icon: TrendingUp, metrics: [["Revenue", money(data.analytics.revenue, true)], ["Orders", String(data.analytics.orders)], ["Customers", String(data.analytics.customers)]] },
-    { title: "Marketing", icon: Target, metrics: [["Reach", "18.4k"], ["Engagement", "6.8%"], ["Best content", "Harvest story"]] },
-    { title: "Sales", icon: Users, metrics: [["Leads", String(data.analytics.leads)], ["Conversion", `${data.analytics.conversion}%`], ["Pipeline moved", "$4.1k"]] },
-    { title: "Support", icon: Headphones, metrics: [["Conversations", "42"], ["Response time", "48 sec"], ["Auto-resolution", "94%"]] },
-    { title: "Operations", icon: Package, metrics: [["Orders handled", "24"], ["Inventory issues", "1"], ["Deliveries", "18"]] },
-  ];
-  const insights = industry === "Real Estate" ? [
-    ["Oak Hills buyer interest accelerated.", "Four pre-approved buyers saved or requested the property.", "$42,600 potential commission", "Review the viewing queue", "/crm"],
-    ["Fast response is the conversion lever today.", "Three qualified leads have waited beyond your healthy baseline.", "$1.9m pipeline at risk", "Open lead follow-up", "/crm"],
-    ["Investor education is outperforming listing tours.", "The last yield explainer produced 2.1× more saves.", "18 likely guide downloads", "Create investor content", "/cmo?tab=Content"],
-    ["All eight viewing slots are conflict-free.", "AI Operations checked calendars, buffers, and agent coverage.", "Zero scheduling risk", "Review operations", "/properties"],
-  ] : [
-    ["Fresh Eggs are leading repeat revenue.", "Returning customers ordered eggs 22% more often this week.", "$680–$1,240 potential revenue", "Create a repeat-order action", "/opportunities"],
-    ["Raw honey may run out in four days.", "Order velocity is above the current stock plan.", "$340 revenue at risk", "Review inventory", "/inventory"],
-    ["Harvest stories are gaining traction.", "The last field-to-table post reached 32% above average.", "+4,800 estimated reach", "Create harvest content", "/cmo?tab=Content"],
-    ["Three high-intent leads need a faster reply.", "First response time slipped beyond your conversion baseline.", "$4,130 pipeline at risk", "Open sales queue", "/crm"],
-  ];
+  const {
+    activeBusiness,
+    activeBusinessId,
+    billing,
+  } = useBusiness();
 
-  const createAction = (title: string, copy: string) => update((current) => ({ ...current, opportunities: [{ id: Date.now(), title, copy, category: "Daily report", impact: "Prioritized", reviewed: false }, ...current.opportunities] }));
+  const client = useQueryClient();
 
-  return <>
-    <PageHeader eyebrow="Daily AI Report · Today" title={`Good morning. Your AI Business Team completed ${taskCount} tasks.`} subtitle={`A concise operating brief for ${activeBusiness?.name}.`} action={<Badge tone="success"><CheckCircle2 /> Ready · 7:00 AM</Badge>} />
-    <div className="report-summary"><Sparkles /><div><div className="eyebrow">Manager brief</div><h2>{industry === "Real Estate" ? "Buyer interest is healthy, with response time the clearest opportunity." : "Revenue momentum is healthy, with one inventory risk and two growth opportunities."}</h2><p>Your AI team connected activity across marketing, sales, support, and operations before preparing this report.</p></div></div>
-    <div className="grid report-grid">{reportGroups.map(({ title, icon: Icon, metrics }) => <Card key={title} className="report-card"><div className="report-card-head"><div className="integration-icon"><Icon /></div><h2>{title}</h2></div>{metrics.map(([name, value]) => <div className="stat-row" key={name}><span>{name}</span><strong>{value}</strong></div>)}</Card>)}</div>
-    <SectionTitle title="AI found 4 important things" action={<span>Prioritized by impact and urgency</span>} />
-    <div className="grid report-insights">{insights.map(([title, why, impact, action, href], index) => <Card className="report-insight" key={title}><div className="insight-number">0{index + 1}</div><div className="row-main"><div className="eyebrow">What happened</div><h2>{title}</h2><div className="report-why"><strong>Why it matters</strong><p>{why}</p></div><Badge tone={index < 2 ? "warning" : "info"}>Potential impact · {impact}</Badge><div className="toolbar" style={{ marginTop: 16 }}><Button variant="green" className="btn-sm" onClick={() => { createAction(title, why); setLocation(href); }}>{action} <ArrowRight /></Button></div></div><Lightbulb /></Card>)}</div>
-  </>;
+  const [reportType, setReportType] = useState<
+    "daily_operations" | "marketing"
+  >("daily_operations");
+
+  const workspaceProfile = getIndustryWorkspaceProfile(
+    activeBusiness?.industry,
+  );
+
+  const terminology = workspaceProfile.terminology;
+
+  const appointmentWorkspace =
+    workspaceProfile.dashboardVariant === "healthcare" ||
+    workspaceProfile.dashboardVariant ===
+      "professional_services";
+
+  const showOrders = isWorkspaceModuleVisible(
+    activeBusiness?.industry,
+    "orders",
+  );
+
+  const schedulingEnabled = isBusinessFeatureEnabled(
+    activeBusiness,
+    "scheduling",
+    billing?.entitlements ?? null,
+  );
+
+  const reports = useQuery({
+    queryKey: [
+      "operations",
+      activeBusinessId,
+      "reports",
+    ],
+    queryFn: ({ signal }) =>
+      operationsApi.reports.list(
+        activeBusinessId,
+        signal,
+      ),
+    enabled: Boolean(activeBusinessId),
+  });
+
+  const generate = useMutation({
+    mutationFn: () => {
+      const period = businessDateRange(
+        activeBusiness?.timezone || "UTC",
+        reportType === "marketing" ? 30 : 1,
+      );
+
+      return operationsApi.reports.generate(
+        activeBusinessId,
+        {
+          report_type: reportType,
+          period_start: period.start,
+          period_end: period.end,
+        },
+      );
+    },
+    onSuccess: () =>
+      void client.invalidateQueries({
+        queryKey: [
+          "operations",
+          activeBusinessId,
+          "reports",
+        ],
+      }),
+  });
+
+  const report = reports.data?.items[0];
+  const metrics = report?.metrics;
+
+  const money = (value: unknown) =>
+    new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency:
+        activeBusiness?.currency || "USD",
+      notation: "compact",
+    }).format(Number(value || 0));
+
+  const leadLabel =
+    workspaceProfile.dashboardVariant === "healthcare"
+      ? "New inquiries"
+      : "New leads";
+
+  const operatingSummary = () => {
+    if (!report) return "";
+
+    if (appointmentWorkspace) {
+      const customerPart =
+        `${String(metrics?.customers ?? 0)} new ` +
+        terminology.customerPlural.toLowerCase();
+
+      if (!schedulingEnabled) {
+        return `${customerPart} and ${String(
+          metrics?.leads ?? 0,
+        )} ${leadLabel.toLowerCase()}.`;
+      }
+
+      return (
+        `${customerPart}, ` +
+        `${String(metrics?.appointments ?? 0)} ` +
+        `${terminology.bookingPlural.toLowerCase()}, and ` +
+        `${String(metrics?.providers ?? 0)} ` +
+        `${terminology.providerPlural.toLowerCase()}.`
+      );
+    }
+
+    if (showOrders) {
+      return (
+        `${String(metrics?.orders ?? 0)} orders and ` +
+        `${String(metrics?.customers ?? 0)} new ` +
+        `${terminology.customerPlural.toLowerCase()}.`
+      );
+    }
+
+    return (
+      `${String(metrics?.customers ?? 0)} new ` +
+      `${terminology.customerPlural.toLowerCase()} and ` +
+      `${String(metrics?.leads ?? 0)} new leads.`
+    );
+  };
+
+  const reportSummary =
+    report?.report_type === "marketing"
+      ? report.summary
+      : operatingSummary();
+
+  const operationsCardTitle =
+    workspaceProfile.dashboardVariant ===
+    "real_estate"
+      ? "Deal activity"
+      : "Sales";
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Daily AI Report"
+        title={
+          report
+            ? "Your operating brief is ready"
+            : "Generate your first operating brief"
+        }
+        subtitle={`A database-backed business report for ${
+          activeBusiness?.name ||
+          "the active business"
+        }.`}
+        action={
+          <>
+            <select
+              className="business-select"
+              value={reportType}
+              onChange={(event) =>
+                setReportType(
+                  event.target.value as
+                    | "daily_operations"
+                    | "marketing",
+                )
+              }
+            >
+              <option value="daily_operations">
+                Daily operations
+              </option>
+              <option value="marketing">
+                Marketing performance
+              </option>
+            </select>
+
+            <Button
+              variant="primary"
+              onClick={() => generate.mutate()}
+              disabled={generate.isPending}
+            >
+              <Sparkles />
+              {generate.isPending
+                ? "Generating…"
+                : "Generate report"}
+            </Button>
+          </>
+        }
+      />
+
+      {reports.isError && (
+        <Card>
+          <div className="empty">
+            <AlertCircle />
+            <h3>Report unavailable</h3>
+            <p>
+              {humanizeApiError(
+                reports.error,
+                "Try again in a moment.",
+              )}
+            </p>
+            <Button
+              onClick={() =>
+                void reports.refetch()
+              }
+            >
+              Try again
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {generate.isError && !reports.isError && (
+        <div className="ai-banner">
+          <AlertCircle />
+          {humanizeApiError(generate.error, "The report could not be generated. Stored reports remain available.")}
+        </div>
+      )}
+
+      {reports.isLoading && (
+        <Card>
+          <div className="empty">
+            <p>Loading reports…</p>
+          </div>
+        </Card>
+      )}
+
+      {!reports.isLoading &&
+        !report &&
+        !reports.isError && (
+          <Card>
+            <div className="empty">
+              <BarChart3 />
+              <h3>No reports yet</h3>
+              <p>
+                Generate a report from current
+                operational aggregates.
+              </p>
+            </div>
+          </Card>
+        )}
+
+      {report && (
+        <>
+          <div className="report-summary">
+            <Sparkles />
+
+            <div>
+              <div className="eyebrow">
+                {report.report_type.replaceAll(
+                  "_",
+                  " ",
+                )}{" "}
+                ·{" "}
+                {new Date(
+                  report.generated_at,
+                ).toLocaleString()}
+              </div>
+
+              <h2>{reportSummary}</h2>
+
+              <p>
+                Period: {report.period_start} through{" "}
+                {report.period_end}. Values are
+                generated from tenant-scoped database
+                records.
+              </p>
+            </div>
+
+            <Badge tone="success">
+              <CheckCircle2 /> {report.status}
+            </Badge>
+          </div>
+
+          <SectionTitle
+            title={
+              report.report_type === "marketing"
+                ? "Marketing metrics"
+                : "Operating metrics"
+            }
+          />
+
+          {report.report_type === "marketing" ? (
+            <div className="grid report-grid">
+              <Card className="report-card">
+                <div className="report-card-head">
+                  <div className="integration-icon">
+                    <TrendingUp />
+                  </div>
+                  <h2>Investment</h2>
+                </div>
+
+                <div className="stat-row">
+                  <span>Spend</span>
+                  <strong>
+                    {money(metrics?.spend)}
+                  </strong>
+                </div>
+
+                <div className="stat-row">
+                  <span>Revenue</span>
+                  <strong>
+                    {money(metrics?.revenue)}
+                  </strong>
+                </div>
+
+                <div className="stat-row">
+                  <span>ROAS</span>
+                  <strong>
+                    {String(metrics?.roas ?? 0)}x
+                  </strong>
+                </div>
+              </Card>
+
+              <Card className="report-card">
+                <div className="report-card-head">
+                  <div className="integration-icon">
+                    <Target />
+                  </div>
+                  <h2>Outcomes</h2>
+                </div>
+
+                <div className="stat-row">
+                  <span>Leads</span>
+                  <strong>
+                    {String(metrics?.leads ?? 0)}
+                  </strong>
+                </div>
+
+                <div className="stat-row">
+                  <span>Conversions</span>
+                  <strong>
+                    {String(
+                      metrics?.conversions ?? 0,
+                    )}
+                  </strong>
+                </div>
+
+                <div className="stat-row">
+                  <span>Clicks</span>
+                  <strong>
+                    {String(metrics?.clicks ?? 0)}
+                  </strong>
+                </div>
+              </Card>
+            </div>
+          ) : (
+            <div className="grid report-grid">
+              {showOrders && (
+                <Card className="report-card">
+                  <div className="report-card-head">
+                    <div className="integration-icon">
+                      <TrendingUp />
+                    </div>
+                    <h2>
+                      {operationsCardTitle}
+                    </h2>
+                  </div>
+
+                  <div className="stat-row">
+                    <span>
+                      {workspaceProfile.dashboardVariant ===
+                      "real_estate"
+                        ? "Recorded value"
+                        : "Revenue"}
+                    </span>
+                    <strong>
+                      {money(
+                        metrics?.order_revenue,
+                      )}
+                    </strong>
+                  </div>
+
+                  <div className="stat-row">
+                    <span>
+                      {workspaceProfile.dashboardVariant ===
+                      "real_estate"
+                        ? "Deals / records"
+                        : "Orders"}
+                    </span>
+                    <strong>
+                      {String(
+                        metrics?.orders ?? 0,
+                      )}
+                    </strong>
+                  </div>
+
+                  <div className="stat-row">
+                    <span>
+                      {workspaceProfile.dashboardVariant ===
+                      "real_estate"
+                        ? "Average value"
+                        : "Average order"}
+                    </span>
+                    <strong>
+                      {money(
+                        metrics?.average_order_value,
+                      )}
+                    </strong>
+                  </div>
+                </Card>
+              )}
+
+              <Card className="report-card">
+                <div className="report-card-head">
+                  <div className="integration-icon">
+                    <Users />
+                  </div>
+                  <h2>Relationships</h2>
+                </div>
+
+                <div className="stat-row">
+                  <span>
+                    New{" "}
+                    {terminology.customerPlural.toLowerCase()}
+                  </span>
+                  <strong>
+                    {String(
+                      metrics?.customers ?? 0,
+                    )}
+                  </strong>
+                </div>
+
+                <div className="stat-row">
+                  <span>{leadLabel}</span>
+                  <strong>
+                    {String(metrics?.leads ?? 0)}
+                  </strong>
+                </div>
+
+                <div className="stat-row">
+                  <span>Opportunities</span>
+                  <strong>
+                    {String(
+                      metrics?.opportunities ?? 0,
+                    )}
+                  </strong>
+                </div>
+              </Card>
+
+              {schedulingEnabled && (
+                <Card className="report-card">
+                  <div className="report-card-head">
+                    <div className="integration-icon">
+                      <CalendarDays />
+                    </div>
+                    <h2>
+                      {terminology.schedulingLabel}
+                    </h2>
+                  </div>
+
+                  <div className="stat-row">
+                    <span>
+                      {terminology.bookingPlural}
+                    </span>
+                    <strong>
+                      {String(
+                        metrics?.appointments ?? 0,
+                      )}
+                    </strong>
+                  </div>
+
+                  <div className="stat-row">
+                    <span>
+                      {terminology.providerPlural}
+                    </span>
+                    <strong>
+                      {String(
+                        metrics?.providers ?? 0,
+                      )}
+                    </strong>
+                  </div>
+                </Card>
+              )}
+
+              <Card className="report-card">
+                <div className="report-card-head">
+                  <div className="integration-icon">
+                    <Target />
+                  </div>
+                  <h2>AI operations</h2>
+                </div>
+
+                <div className="stat-row">
+                  <span>Executions</span>
+                  <strong>
+                    {String(
+                      metrics?.ai_executions ?? 0,
+                    )}
+                  </strong>
+                </div>
+
+                <div className="stat-row">
+                  <span>Actions</span>
+                  <strong>
+                    {String(
+                      metrics?.ai_actions ?? 0,
+                    )}
+                  </strong>
+                </div>
+              </Card>
+            </div>
+          )}
+
+          <Card>
+            <SectionTitle
+              title="Stored report record"
+              action={<Package />}
+            />
+            <p className="subtle">
+              Report ID {report.id}. The report is
+              immutable output; generate another report
+              to refresh the period.
+            </p>
+          </Card>
+        </>
+      )}
+    </>
+  );
 }

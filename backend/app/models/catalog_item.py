@@ -23,6 +23,11 @@ if TYPE_CHECKING:
 class CatalogItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "catalog_items"
     __table_args__ = (
+        UniqueConstraint(
+            "id",
+            "business_id",
+            name="uq_catalog_items_id_business",
+        ),
         CheckConstraint(
             "item_type IN ('product', 'service')",
             name="valid_item_type",

@@ -582,6 +582,90 @@ test("onboarding creates business before preview/import and reloads real items",
   assert.deepEqual(events, ["business", "preview", "import", "list"]);
 });
 
+test("onboarding persists catalog only for industries whose workspace exposes catalog", async () => {
+  const business = businessFromSummary({
+    id: businessA,
+    name: "Industry Onboarding",
+    slug: "industry-onboarding",
+    business_type: "other",
+    status: "active",
+    timezone: "UTC",
+    currency: "USD",
+    locale: "en",
+    membership_role: "owner",
+    created_at: "2026-01-01T00:00:00Z",
+  });
+
+  const catalog = {
+    ...createInitialCatalogDraft(),
+    method: "skip" as const,
+  };
+
+  const hiddenIndustries: OnboardingForm["industry"][] = [
+    "Real Estate",
+    "Hospital",
+    "Clinic",
+    "Medical Practice",
+    "Dental",
+    "Professional Services",
+  ];
+
+  for (const industry of hiddenIndustries) {
+    let saveCatalogCalls = 0;
+
+    await saveOnboardingWorkspace(
+      {
+        ...onboardingForm(),
+        industry,
+      },
+      catalog,
+      businessA,
+      {
+        createBusiness: async () => business,
+        saveCatalog: async () => {
+          saveCatalogCalls += 1;
+        },
+      },
+    );
+
+    assert.equal(
+      saveCatalogCalls,
+      0,
+      `${industry} must not persist a commerce catalog during onboarding`,
+    );
+  }
+
+  const catalogIndustries: OnboardingForm["industry"][] = [
+    "Farm/Agriculture",
+    "E-commerce",
+  ];
+
+  for (const industry of catalogIndustries) {
+    let saveCatalogCalls = 0;
+
+    await saveOnboardingWorkspace(
+      {
+        ...onboardingForm(),
+        industry,
+      },
+      catalog,
+      businessA,
+      {
+        createBusiness: async () => business,
+        saveCatalog: async () => {
+          saveCatalogCalls += 1;
+        },
+      },
+    );
+
+    assert.equal(
+      saveCatalogCalls,
+      1,
+      `${industry} must retain catalog onboarding persistence`,
+    );
+  }
+});
+
 test("manual onboarding drafts use the atomic import service", async () => {
   let uploadedCsv = "";
   const catalog = {
@@ -824,7 +908,17 @@ test("catalog cutover source has no fake fallback, scattered fetch, or durable f
     onboarding,
     /(?:local|session)Storage\.setItem\([^)]*(?:File|base64|pastedText)/,
   );
-  assert.match(app, /path="\/products" component=\{IndustryWorkspacePage\}/);
+  assert.match(app, /function CatalogWorkspaceRoute/);
+  assert.match(
+    app,
+    /isWorkspaceModuleVisible\(activeBusiness\?\.industry, "catalog"\)/,
+  );
+  assert.match(app, /profile\.catalogRoute === expectedRoute/);
+  assert.match(app, /path="\/products"/);
+  assert.match(app, /expectedRoute="\/products"/);
+  assert.match(app, /path="\/properties"/);
+  assert.match(app, /expectedRoute="\/properties"/);
+  assert.match(app, /return enabled \? <IndustryWorkspacePage \/> : null/);
   assert.doesNotMatch(
     app,
     /path="\/products" component=\{workspaceModule\(IndustryWorkspacePage\)\}/,

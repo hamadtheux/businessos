@@ -6,6 +6,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies.business import BusinessAccessDependency
+from app.api.response_materialization import materialize_response_before_commit
 from app.db.session import get_db_session
 from app.exceptions.business_memory import (
     BusinessMemoryCursorError,
@@ -115,6 +116,7 @@ async def create_business_memory(
             access.business.id,
             memory_create,
         )
+        await materialize_response_before_commit(session, memory)
         await session.commit()
     except (BusinessMemoryPersistenceError, SQLAlchemyError):
         await _rollback_safely(session)
@@ -188,6 +190,7 @@ async def patch_business_memory(
             memory_id,
             memory_update,
         )
+        await materialize_response_before_commit(session, memory)
         await session.commit()
     except BusinessMemoryNotFoundError:
         await _rollback_safely(session)

@@ -6,6 +6,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies.business import BusinessAccessDependency
+from app.api.response_materialization import materialize_response_before_commit
 from app.db.session import get_db_session
 from app.exceptions.business_brain import (
     BusinessKnowledgeEntryNotFoundError,
@@ -26,6 +27,7 @@ from app.services.business_brain import (
     list_knowledge_entries,
     update_knowledge_entry,
 )
+from app.services.automation_intelligence import schedule_competitor_discovery
 
 router = APIRouter(
     prefix="/businesses/{business_id}/brain/knowledge",
@@ -89,6 +91,11 @@ async def create_knowledge(
             access.business.id,
             entry_create,
         )
+        if isinstance(session, AsyncSession):
+            await schedule_competitor_discovery(
+                session, business_id=access.business.id, trigger_type="brain_change"
+            )
+        await materialize_response_before_commit(session, entry)
         await session.commit()
     except (BusinessKnowledgePersistenceError, SQLAlchemyError):
         await _rollback_safely(session)
@@ -149,6 +156,11 @@ async def patch_knowledge_entry(
             entry_id,
             entry_update,
         )
+        if isinstance(session, AsyncSession):
+            await schedule_competitor_discovery(
+                session, business_id=access.business.id, trigger_type="brain_change"
+            )
+        await materialize_response_before_commit(session, entry)
         await session.commit()
     except BusinessKnowledgeEntryNotFoundError:
         await _rollback_safely(session)
@@ -177,6 +189,10 @@ async def delete_knowledge_entry(
 ) -> Response:
     try:
         await archive_knowledge_entry(session, access.business.id, entry_id)
+        if isinstance(session, AsyncSession):
+            await schedule_competitor_discovery(
+                session, business_id=access.business.id, trigger_type="brain_change"
+            )
         await session.commit()
     except BusinessKnowledgeEntryNotFoundError:
         await _rollback_safely(session)

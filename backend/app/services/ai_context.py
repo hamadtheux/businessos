@@ -106,15 +106,10 @@ async def _assemble_business_brain_sources(
             session,
             business_id,
             batch_size=DEFAULT_SOURCE_BATCH_SIZE,
+            allowed_source_types=allowed_source_types,
         ):
             if source.business_id != business_id:
                 raise AIContextAssemblyError(_ASSEMBLY_MESSAGE)
-
-            if (
-                allowed_source_types is not None
-                and source.source_type not in allowed_source_types
-            ):
-                continue
 
             selected.append(
                 BusinessBrainContextSource(

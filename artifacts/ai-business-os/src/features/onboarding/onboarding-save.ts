@@ -13,6 +13,8 @@ import {
 } from "../../services/catalog.ts";
 import { ApiError, humanizeApiError } from "../../services/api-client.ts";
 import { manualCatalogItems, type CatalogDraft } from "./catalog-import.ts";
+import { businessIndustryDefaultTheme } from "../../lib/business-industries.ts";
+import { isWorkspaceModuleVisible } from "../../lib/industry-workspaces.ts";
 
 export const onboardingSetupSteps = [
   "Creating business workspace",
@@ -100,7 +102,7 @@ export function createOnboardingBusinessInput(
     avoidKeywords: form.avoidKeywords.trim(),
     connectedChannels: form.channels,
     onboardingComplete,
-    theme: form.industry === "Real Estate" ? "navy" : "green",
+    theme: businessIndustryDefaultTheme(form.industry),
     brandIdentity: form.brandIdentity,
   };
 }
@@ -116,7 +118,7 @@ export async function persistOnboardingCatalog(
   }
   if (catalog.method === "store") {
     throw new Error(
-      "Store connections are coming soon. Choose another catalog option or skip for now.",
+      "Store provider configuration is required. Choose another catalog option or skip for now.",
     );
   }
 
@@ -172,19 +174,25 @@ export async function saveOnboardingWorkspace(
     businessId,
   );
   await progress(1);
-  await progress(2);
-  try {
-    await adapters.saveCatalog(business, catalog);
-  } catch (error) {
-    const message =
-      error instanceof Error && !(error instanceof ApiError)
-        ? error.message
-        : humanizeCatalogError(
-            error,
-            "The business was saved, but its catalog could not be saved. Retry the catalog or skip it for now.",
-          );
-    throw new CatalogPersistenceAfterBusinessCreationError(message);
+
+  const catalogEnabled = isWorkspaceModuleVisible(form.industry, "catalog");
+
+  if (catalogEnabled) {
+    await progress(2);
+    try {
+      await adapters.saveCatalog(business, catalog);
+    } catch (error) {
+      const message =
+        error instanceof Error && !(error instanceof ApiError)
+          ? error.message
+          : humanizeCatalogError(
+              error,
+              "The business was saved, but its catalog could not be saved. Retry the catalog or skip it for now.",
+            );
+      throw new CatalogPersistenceAfterBusinessCreationError(message);
+    }
   }
+
   await progress(4);
   await progress(5);
   await progress(6);

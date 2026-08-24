@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, String
+from sqlalchemy import CheckConstraint, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -66,6 +67,33 @@ class Business(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         default="en",
         server_default="en",
+    )
+
+    website_url: Mapped[str | None] = mapped_column(
+        String(2048),
+        nullable=True,
+    )
+
+    location: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+
+    description: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    brand_voice: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    avoid_keywords: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default="[]",
     )
 
     branding: Mapped["BusinessBranding | None"] = relationship(

@@ -133,6 +133,7 @@ class OpenAIAgentProvider:
                 ],
                 text_format=AIAgentStructuredOutput,
                 store=False,
+                max_output_tokens=request.max_output_tokens,
             )
 
         except ValidationError:

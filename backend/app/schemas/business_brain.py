@@ -19,6 +19,7 @@ BusinessKnowledgeSourceType = Literal["manual", "system"]
 BusinessBrainSourceType = Literal[
     "business_profile",
     "branding",
+    "appointment_type",
     "catalog_item",
     "knowledge_entry",
 ]

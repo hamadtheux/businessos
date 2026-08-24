@@ -20,11 +20,14 @@ from app.schemas.ai_agent import (
     AIAgentExecutionResult,
     AIAgentRole,
 )
+from app.services.automation_events import record_automation_event
 
 
 AIAgentExecutionTrigger = Literal[
     "api",
     "automation",
+    "command",
+    "website_widget",
     "system",
 ]
 
@@ -45,6 +48,11 @@ async def create_running_ai_agent_execution(
     provider_name: str,
     model_name: str,
     trigger_type: AIAgentExecutionTrigger = "api",
+    command_id: UUID | None = None,
+    parent_execution_id: UUID | None = None,
+    delegation_role: AIAgentRole | None = None,
+    delegation_sequence: int = 0,
+    delegation_depth: int = 0,
 ) -> AIAgentExecution:
     """
     Create one running execution-ledger record.
@@ -72,9 +80,21 @@ async def create_running_ai_agent_execution(
         max_length=128,
     )
 
+    if not 0 <= delegation_sequence <= 3 or not 0 <= delegation_depth <= 1:
+        raise AIAgentExecutionValidationError("Invalid AI delegation metadata")
+    if delegation_depth == 0 and parent_execution_id is not None:
+        raise AIAgentExecutionValidationError("Root execution cannot have a parent")
+    if delegation_depth > 0 and (parent_execution_id is None or delegation_role is None):
+        raise AIAgentExecutionValidationError("Delegated execution requires linkage")
+
     execution = AIAgentExecution(
         business_id=business_id,
         requested_by_user_id=requested_by_user_id,
+        command_id=command_id,
+        parent_execution_id=parent_execution_id,
+        delegation_role=delegation_role,
+        delegation_sequence=delegation_sequence,
+        delegation_depth=delegation_depth,
         role=role,
         trigger_type=trigger_type,
         status="running",
@@ -274,6 +294,11 @@ async def finalize_successful_ai_agent_execution(
             "Unable to finalize AI agent execution record"
         ) from None
 
+    record_automation_event(
+        session, business_id=business_id, event_type="ai_execution_completed",
+        entity_type="ai_execution", entity_id=execution.id,
+        payload={"status": execution.status},
+    )
     return execution
 
 

@@ -64,8 +64,8 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-test("development API fallback stays on the localhost browser site", () => {
-  assert.equal(API_BASE_URL, "http://localhost:8000");
+test("development API fallback stays on the frontend origin", () => {
+  assert.equal(API_BASE_URL, "");
 });
 
 test("registration calls the backend then automatically signs in", async () => {
@@ -185,6 +185,32 @@ test("failed bootstrap resolves into a clean logged-out state", async () => {
     user: null,
     authenticated: false,
   });
+});
+
+test("temporary bootstrap failure stays recoverable instead of becoming logout", async () => {
+  const client = new ApiClient("https://api.example.test", async () =>
+    jsonResponse({ detail: "Database schema is not ready" }, 503),
+  );
+
+  await assert.rejects(
+    client.bootstrap(),
+    (error: unknown) => error instanceof ApiError && error.status === 503,
+  );
+  assert.deepEqual(client.getSessionSnapshot(), {
+    user: null,
+    authenticated: false,
+  });
+});
+
+test("network bootstrap failure stays recoverable instead of becoming logout", async () => {
+  const client = new ApiClient("https://api.example.test", async () => {
+    throw new TypeError("network down");
+  });
+
+  await assert.rejects(
+    client.bootstrap(),
+    (error: unknown) => error instanceof ApiNetworkError,
+  );
 });
 
 test("concurrent 401 responses share one rotating refresh request", async () => {

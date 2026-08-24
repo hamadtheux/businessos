@@ -64,6 +64,7 @@ class SettingsValidationTests(unittest.TestCase):
             debug=False,
             auth_refresh_cookie_secure=True,
             **self._s3_settings(),
+            **self._public_widget_settings(),
         )
 
         self.assertEqual(config.environment, "production")
@@ -77,6 +78,7 @@ class SettingsValidationTests(unittest.TestCase):
                 debug=False,
                 auth_refresh_cookie_secure=False,
                 **self._s3_settings(),
+                **self._public_widget_settings(),
             )
 
     def test_production_and_staging_reject_local_storage(self) -> None:
@@ -168,4 +170,12 @@ class SettingsValidationTests(unittest.TestCase):
             "storage_access_key_id": "storage-access-key",
             "storage_secret_access_key": "storage-secret-key",
             "storage_public_base_url": "https://cdn.example.test",
+        }
+
+    @staticmethod
+    def _public_widget_settings() -> dict[str, object]:
+        return {
+            "public_api_base_url": "https://widgets.example.test",
+            "widget_loader_url": "https://widgets.example.test/widget-loader.js",
+            "widget_app_url": "https://widgets.example.test/widget.html",
         }

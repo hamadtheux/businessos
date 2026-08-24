@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions.ai_action import (
     AIActionConflictError,
+    AIActionError,
     AIActionNotFoundError,
     AIActionPersistenceError,
     AIActionStateError,
@@ -20,6 +21,7 @@ from app.schemas.ai_agent import (
     AIAgentProposedAction,
     MAX_AGENT_ACTIONS,
 )
+from app.services.action_registry import ACTION_REGISTRY
 
 
 _MATERIALIZABLE_EXECUTION_STATUSES = {
@@ -96,7 +98,9 @@ async def materialize_ai_actions(
                 proposal.requires_approval
             ),
             status="proposed",
-            action_payload={},
+            action_payload=_normalized_action_payload(
+                proposal
+            ),
             policy_decision=None,
             policy_reason_code=None,
             policy_evaluated_at=None,
@@ -435,3 +439,33 @@ def _validate_existing_materialization(
             raise AIActionConflictError(
                 "AI action materialization conflicts with existing actions"
             )
+
+        if action.action_payload != _normalized_action_payload(proposal):
+            raise AIActionConflictError(
+                "AI action materialization conflicts with existing actions"
+            )
+
+
+def _normalized_action_payload(
+    proposal: AIAgentProposedAction,
+) -> dict[str, object]:
+    """
+    Persist only a registry-validated, normalized payload.
+
+    Unsupported or malformed candidate data becomes an empty safe object so
+    later policy evaluation can block it without retaining arbitrary fields.
+    """
+    candidate = proposal.action_payload
+    if candidate is not None:
+        candidate = candidate.model_dump(mode="json")
+
+    try:
+        payload = ACTION_REGISTRY.validate_payload(
+            proposal.action_type,
+            candidate,
+        )
+    except AIActionError:
+        return {}
+
+    value = payload.model_dump(mode="json")
+    return dict(value)

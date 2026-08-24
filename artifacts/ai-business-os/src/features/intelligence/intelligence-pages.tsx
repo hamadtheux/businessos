@@ -1,147 +1,130 @@
-import { useMemo, useState, type FormEvent } from "react";
-import {
-  ArrowRight,
-  BarChart3,
-  Bookmark,
-  Check,
-  Eye,
-  Globe2,
-  Lightbulb,
-  Plus,
-  RefreshCw,
-  Search,
-  Sparkles,
-  Target,
-  TrendingUp,
-  Wand2,
-  X,
-} from "lucide-react";
+import { useState, type FormEvent } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { AlertCircle, BarChart3, Check, Eye, Globe2, Lightbulb, Plus, RefreshCw, Search, Sparkles, Target, TrendingUp, Wand2, X } from "lucide-react";
 import { useLocation } from "wouter";
+import { useBusiness } from "@/business-context";
 import { Badge, Button, Card, Modal, PageHeader, SectionTitle } from "@/components/product-ui";
-import { useWorkspaceData } from "@/hooks/use-workspace-data";
-import type { Competitor } from "@/types/workspace";
-import { slug } from "@/lib/product-utils";
+import { humanizeApiError } from "@/services/api-client";
+import type { CompetitorAnalysis, CompetitorCandidate, CompetitorObservation, MarketingCompetitor, MarketingTrend, MarketingTrendStatus } from "@/services/api-types";
+import { marketingApi } from "@/services/marketing";
 
-export function CompetitorIntelligencePage() {
-  const { data, update, recordAudit, industry } = useWorkspaceData();
-  const [, setLocation] = useLocation();
-  const [selected, setSelected] = useState<Competitor | null>(null);
-  const [adding, setAdding] = useState(false);
-  const [notice, setNotice] = useState("");
-
-  const analyze = (competitor: Competitor) => {
-    update((current) => ({
-      ...current,
-      competitors: current.competitors.map((item) => item.id === competitor.id ? { ...item, status: "Analyzing" } : item),
-    }));
-    window.setTimeout(() => {
-      update((current) => ({
-        ...current,
-        competitors: current.competitors.map((item) => item.id === competitor.id ? { ...item, status: "Ready", lastAnalyzed: "Just now" } : item),
-      }));
-      setNotice(`${competitor.name} analysis is ready.`);
-    }, 900);
-  };
-
-  const add = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const name = String(form.get("name"));
-    const item: Competitor = {
-      id: slug(name) || `competitor-${Date.now()}`,
-      name,
-      website: String(form.get("website")),
-      industry: String(form.get("industry")),
-      status: "Needs analysis",
-      positioning: "Analysis not started",
-      products: "Analysis not started",
-      pricing: "Analysis not started",
-      marketing: "Analysis not started",
-      offers: "Analysis not started",
-      strengths: [],
-      weaknesses: [],
-      opportunities: [],
-      lastAnalyzed: "Never",
-      summary: "Run an analysis to create a grounded competitor summary.",
-    };
-    update((current) => ({ ...current, competitors: [item, ...current.competitors] }));
-    recordAudit({ actor: "Current user", actorType: "Human user", action: "Added competitor", entity: name, after: "Ready for analysis", status: "Completed", source: "Competitor Intelligence" });
-    setAdding(false);
-    setNotice(`${name} added to your watchlist.`);
-  };
-
-  const createAction = (competitor: Competitor) => {
-    update((current) => ({
-      ...current,
-      opportunities: [{ id: Date.now(), title: competitor.opportunities[0] ?? `Respond to ${competitor.name}`, copy: competitor.summary, category: "Competitor", impact: "Strategic", reviewed: false }, ...current.opportunities],
-    }));
-    setNotice("Action created in Opportunities.");
-  };
-
-  return (
-    <>
-      <PageHeader eyebrow="AI CMO · Research" title="Competitor Intelligence" subtitle={`Understand how ${industry === "Real Estate" ? "other property teams" : "the local market"} position, price, and promote their offer.`} action={<Button variant="primary" onClick={() => setAdding(true)} data-testid="button-add-competitor"><Plus /> Add competitor</Button>} />
-      {notice && <div className="ai-banner"><Check /> {notice}<button className="close-btn" onClick={() => setNotice("")}><X /></button></div>}
-      <Card className="intelligence-hero">
-        <div className="intelligence-hero-icon"><Sparkles /></div>
-        <div className="row-main"><div className="eyebrow">AI market summary</div><h2>{industry === "Real Estate" ? "Competitors lead with aspiration and market data, while fewer combine fast response with personal guidance." : "Competitors are heavily promoting convenience while few are talking about local freshness."}</h2><p className="subtle">Recommended action: {industry === "Real Estate" ? "Create a campaign that pairs practical buyer analysis with rapid personal follow-up." : "Create a campaign around same-day local harvest."}</p></div>
-        <Button variant="green" onClick={() => setLocation("/campaigns?new=1")}><Target /> Create campaign</Button>
-      </Card>
-      <div className="grid competitor-grid">
-        {data.competitors.map((item) => (
-          <Card className="competitor-card" key={item.id}>
-            <div className="competitor-head"><div className="integration-icon"><Globe2 /></div><div className="row-main"><h2>{item.name}</h2><div className="row-copy">{item.website}</div></div><Badge tone={item.status === "Ready" ? "success" : item.status === "Analyzing" ? "warning" : "neutral"}>{item.status === "Analyzing" && <RefreshCw className="spin" />} {item.status}</Badge></div>
-            <div className="mini-detail"><span>Positioning</span><strong>{item.positioning}</strong></div>
-            <div className="mini-detail"><span>Pricing</span><strong>{item.pricing}</strong></div>
-            <div className="competitor-insight"><Sparkles /><div><div className="eyebrow">AI summary</div><p>{item.summary}</p></div></div>
-            <div className="row-copy">Last analyzed · {item.lastAnalyzed}</div>
-            <div className="toolbar competitor-actions">
-              <Button className="btn-sm" onClick={() => analyze(item)} disabled={item.status === "Analyzing"}><RefreshCw /> Analyze</Button>
-              <Button variant="soft" className="btn-sm" onClick={() => setSelected(item)}><Eye /> View analysis</Button>
-              <Button variant="secondary" className="btn-sm" onClick={() => createAction(item)}><Plus /> Create action</Button>
-              <Button variant="primary" className="btn-sm" onClick={() => setLocation("/cmo?tab=Content")}><Wand2 /> Create content</Button>
-            </div>
-          </Card>
-        ))}
-      </div>
-      {adding && <Modal title="Add competitor" description="Add a public business profile to the prototype watchlist. No private credentials are requested." onClose={() => setAdding(false)}><form onSubmit={add}><div className="form-grid"><div className="field full"><label>Competitor name</label><input name="name" required autoFocus placeholder="Business name" /></div><div className="field"><label>Website</label><input name="website" required placeholder="competitor.example" /></div><div className="field"><label>Industry</label><input name="industry" required defaultValue={industry} /></div></div><div className="modal-foot"><Button type="button" onClick={() => setAdding(false)}>Cancel</Button><Button variant="primary" type="submit">Add competitor</Button></div></form></Modal>}
-      {selected && <Modal wide title={selected.name} description={`${selected.industry} · Last analyzed ${selected.lastAnalyzed}`} onClose={() => setSelected(null)}><div className="analysis-grid"><Card><div className="eyebrow">Positioning</div><p className="detail-copy">{selected.positioning}</p></Card><Card><div className="eyebrow">Products / services</div><p className="detail-copy">{selected.products}</p></Card><Card><div className="eyebrow">Pricing observations</div><p className="detail-copy">{selected.pricing}</p></Card><Card><div className="eyebrow">Marketing & content</div><p className="detail-copy">{selected.marketing}</p></Card><Card><div className="eyebrow">Offers</div><p className="detail-copy">{selected.offers}</p></Card><Card className="recommendation"><div className="eyebrow">AI summary</div><p className="detail-copy">{selected.summary}</p></Card></div><div className="grid three-grid intelligence-lists"><Card><SectionTitle title="Strengths" />{selected.strengths.map((item) => <div className="check-line" key={item}><Check /> {item}</div>)}</Card><Card><SectionTitle title="Weaknesses" />{selected.weaknesses.map((item) => <div className="check-line weak" key={item}><X /> {item}</div>)}</Card><Card><SectionTitle title="Opportunities" />{selected.opportunities.map((item) => <div className="check-line opportunity-line" key={item}><Lightbulb /> {item}</div>)}</Card></div></Modal>}
-    </>
-  );
+function ErrorCard({ error, retry }: { error: unknown; retry: () => void }) {
+  return <Card><div className="empty"><AlertCircle /><h3>Intelligence data unavailable</h3><p>{humanizeApiError(error, "Try again in a moment.")}</p><Button onClick={retry}>Try again</Button></div></Card>;
 }
 
-export function TrendIntelligencePage() {
-  const { data, update, industry } = useWorkspaceData();
+function Pager({ page, pageSize, total, onPage }: { page: number; pageSize: number; total: number; onPage: (value: number) => void }) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  if (pages <= 1) return null;
+  return <div className="table-toolbar"><span className="subtle">Page {page} of {pages}</span><div className="toolbar"><Button className="btn-sm" disabled={page <= 1} onClick={() => onPage(page - 1)}>Previous</Button><Button className="btn-sm" disabled={page >= pages} onClick={() => onPage(page + 1)}>Next</Button></div></div>;
+}
+
+function safeExternalReference(reference: string): string | null {
+  try {
+    const url = new URL(reference);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+export function CompetitorIntelligencePage() {
+  const { activeBusinessId } = useBusiness();
+  const queryClient = useQueryClient();
   const [, setLocation] = useLocation();
-  const [filter, setFilter] = useState("Active");
+  const [selected, setSelected] = useState<MarketingCompetitor | null>(null);
+  const [selectedCandidate, setSelectedCandidate] = useState<CompetitorCandidate | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [addingObservation, setAddingObservation] = useState(false);
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [observationPage, setObservationPage] = useState(1);
+  const [observationCategory, setObservationCategory] = useState<CompetitorObservation["category"] | "">("");
   const [notice, setNotice] = useState("");
-  const trends = useMemo(() => data.trends.filter((item) => filter === "All" || (filter === "Saved" ? item.state === "Saved" : item.state !== "Ignored")), [data.trends, filter]);
+  const [error, setError] = useState("");
 
-  const state = (id: string, next: "Saved" | "Ignored") => update((current) => ({ ...current, trends: current.trends.map((item) => item.id === id ? { ...item, state: next } : item) }));
+  const competitors = useQuery({ queryKey: ["marketing", activeBusinessId, "competitors", search, page], queryFn: ({ signal }) => marketingApi.competitors.list(activeBusinessId, { search, page, pageSize: 24 }, signal), enabled: Boolean(activeBusinessId) });
+  const discovery = useQuery({ queryKey: ["marketing", activeBusinessId, "competitor-discovery"], queryFn: ({ signal }) => marketingApi.competitorDiscovery.status(activeBusinessId, signal), enabled: Boolean(activeBusinessId) });
+  const candidates = useQuery({ queryKey: ["marketing", activeBusinessId, "competitor-candidates"], queryFn: ({ signal }) => marketingApi.competitorDiscovery.candidates(activeBusinessId, undefined, signal), enabled: Boolean(activeBusinessId) });
+  const candidateEvidence = useQuery({ queryKey: ["marketing", activeBusinessId, "competitor-candidates", selectedCandidate?.id, "evidence"], queryFn: ({ signal }) => marketingApi.competitorDiscovery.evidence(activeBusinessId, selectedCandidate!.id, signal), enabled: Boolean(activeBusinessId && selectedCandidate) });
+  const observations = useQuery({ queryKey: ["marketing", activeBusinessId, "competitors", selected?.id, "observations", observationCategory, observationPage], queryFn: ({ signal }) => marketingApi.competitors.observations(activeBusinessId, selected!.id, { page: observationPage, pageSize: 25 }, { category: observationCategory || undefined }, signal), enabled: Boolean(activeBusinessId && selected) });
+  const analyses = useQuery({ queryKey: ["marketing", activeBusinessId, "competitors", selected?.id, "analyses"], queryFn: ({ signal }) => marketingApi.competitors.analyses(activeBusinessId, selected!.id, signal), enabled: Boolean(activeBusinessId && selected) });
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["marketing", activeBusinessId, "competitors"] });
 
-  return (
-    <>
-      <PageHeader eyebrow="AI CMO · Research" title="Trend Intelligence" subtitle={`Early signals selected for ${industry === "Real Estate" ? "property and market relevance" : "agriculture, local food, and customer demand"}.`} action={<div className="search-box"><Search /><input placeholder="Search trend signals" /></div>} />
-      {notice && <div className="ai-banner"><Sparkles /> {notice}<button className="close-btn" onClick={() => setNotice("")}><X /></button></div>}
-      <div className="tabs">{["Active", "Saved", "All"].map((item) => <button className={`tab ${filter === item ? "active" : ""}`} onClick={() => setFilter(item)} key={item}>{item}</button>)}</div>
-      <div className="grid trend-grid">
-        {trends.map((trend) => (
-          <Card className="trend-card" key={trend.id}>
-            <div className="trend-head"><div><Badge tone={trend.strength === "Strong" ? "success" : trend.strength === "Rising" ? "warning" : "info"}><TrendingUp /> {trend.strength}</Badge><h2>{trend.topic}</h2><div className="row-copy">Source · {trend.source}</div></div><div className="relevance-score"><strong>{trend.relevance}</strong><span>relevance</span></div></div>
-            <div className="trend-velocity"><BarChart3 /><div><span>Velocity / change</span><strong>{trend.velocity}</strong></div></div>
-            <div className="mini-detail"><span>Industry relevance</span><strong>{trend.industryRelevance}</strong></div>
-            <div className="why-card"><div className="eyebrow">Why it matters</div><p>{trend.why}</p></div>
-            <div className="recommendation-strip"><Sparkles /><div><div className="eyebrow">AI recommendation</div><p>{trend.recommendation}</p></div></div>
-            <div className="toolbar trend-actions">
-              <Button variant="primary" className="btn-sm" onClick={() => setLocation("/cmo?tab=Content")}><Wand2 /> Create content</Button>
-              <Button variant="green" className="btn-sm" onClick={() => setLocation("/campaigns?new=1")}><Target /> Create campaign</Button>
-              <Button variant="secondary" className="btn-sm" onClick={() => state(trend.id, "Saved")}><Bookmark /> {trend.state === "Saved" ? "Saved" : "Save"}</Button>
-              <Button variant="secondary" className="btn-sm" onClick={() => state(trend.id, "Ignored")}><X /> Ignore</Button>
-              <Button variant="soft" className="btn-sm" onClick={() => { setNotice(`AI Manager connected “${trend.topic}” to current business performance and recommends acting this week.`); }}><Sparkles /> Ask AI Manager</Button>
-            </div>
-          </Card>
-        ))}
-      </div>
-    </>
-  );
+  const add = useMutation({
+    mutationFn: (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); return marketingApi.competitors.create(activeBusinessId, { name: String(form.get("name")), website_domain: String(form.get("website_domain")) || null, description: String(form.get("description")) || null, notes: String(form.get("notes")) || null }); },
+    onSuccess: (item) => { setAdding(false); setSelected(item); setNotice(`${item.name} was added. Add sourced observations before requesting AI analysis.`); setError(""); void invalidate(); },
+    onError: (reason) => setError(humanizeApiError(reason, "Competitor could not be added.")),
+  });
+  const addObservation = useMutation({
+    mutationFn: (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); return marketingApi.competitors.addObservation(activeBusinessId, selected!.id, { observed_at: new Date(String(form.get("observed_at"))).toISOString(), category: String(form.get("category")) as CompetitorObservation["category"], title: String(form.get("title")), summary: String(form.get("summary")), source_type: "manual", source_reference: String(form.get("source_reference")) || null, safe_metrics: {} }); },
+    onSuccess: () => { setAddingObservation(false); setObservationPage(1); setNotice("Sourced observation saved separately from AI conclusions."); setError(""); void invalidate(); },
+    onError: (reason) => setError(humanizeApiError(reason, "Observation could not be saved.")),
+  });
+  const analyze = useMutation({
+    mutationFn: (item: MarketingCompetitor) => marketingApi.competitors.analyze(activeBusinessId, item.id),
+    onSuccess: () => { setNotice("Source-grounded AI analysis is ready."); setError(""); void invalidate(); },
+    onError: (reason) => setError(humanizeApiError(reason, "Add at least one sourced observation before analysis.")),
+  });
+  const createOpportunity = useMutation({
+    mutationFn: ({ competitor, analysis }: { competitor: MarketingCompetitor; analysis: CompetitorAnalysis }) => marketingApi.competitors.opportunity(activeBusinessId, competitor.id, analysis.id),
+    onSuccess: () => { setNotice("Opportunity created for human review. No campaign or action was executed."); setError(""); },
+    onError: (reason) => setError(humanizeApiError(reason, "Opportunity could not be created.")),
+  });
+  const refreshDiscovery = useMutation({ mutationFn: () => marketingApi.competitorDiscovery.refresh(activeBusinessId), onSuccess: (run) => { setNotice(`Competitor research ${run.status.replaceAll("_", " ")}. Manual refreshes use a separate six-hour cooldown.`); setError(""); void queryClient.invalidateQueries({ queryKey: ["marketing", activeBusinessId] }); }, onError: (reason) => setError(humanizeApiError(reason, "Competitor discovery could not be scheduled.")) });
+  const updateCandidate = useMutation({ mutationFn: ({ item, status }: { item: CompetitorCandidate; status: "confirmed" | "dismissed" | "monitoring" }) => marketingApi.competitorDiscovery.setStatus(activeBusinessId, item.id, status), onSuccess: (item) => { setSelectedCandidate(null); setNotice(`${item.name} is now ${item.status}. Its discovery provenance remains attached.`); setError(""); void queryClient.invalidateQueries({ queryKey: ["marketing", activeBusinessId] }); }, onError: (reason) => setError(humanizeApiError(reason, "The suggested competitor could not be updated.")) });
+  const latest = analyses.data?.[0];
+  const manualRefreshAt = discovery.data?.manual_refresh_available_at ? new Date(discovery.data.manual_refresh_available_at) : null;
+  const manualRefreshCoolingDown = Boolean(manualRefreshAt && manualRefreshAt.getTime() > Date.now());
+  const manualRefreshLabel = refreshDiscovery.isPending ? "Scheduling…" : manualRefreshCoolingDown && manualRefreshAt ? `Available ${manualRefreshAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Refresh research";
+
+  return <>
+    <PageHeader eyebrow="AI CMO · Proactive research" title="Competitor Intelligence" subtitle="Review likely competitors discovered from trusted business context and provider-supplied public evidence." action={<div className="toolbar"><div className="search-box"><Search /><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Search monitored competitors" /></div><Button onClick={() => setAdding(true)} data-testid="button-add-competitor"><Plus /> Advanced · Add manually</Button></div>} />
+    {notice && <div className="ai-banner"><Check /> {notice}<button className="close-btn" onClick={() => setNotice("")}><X /></button></div>}
+    {error && <div className="ai-banner"><AlertCircle /> {error}<button className="close-btn" onClick={() => setError("")}><X /></button></div>}
+    <Card className="intelligence-hero"><div className="intelligence-hero-icon"><Sparkles /></div><div className="row-main"><div className="eyebrow">AI discovery status</div><h2>{discovery.data?.suggested_count ? `AI discovered ${discovery.data.suggested_count} likely competitor${discovery.data.suggested_count === 1 ? "" : "s"}` : discovery.data?.latest_run ? `Research ${discovery.data.latest_run.status.replaceAll("_", " ")}` : discovery.data?.provider_available ? "Competitor research is scheduled automatically" : "Research provider configuration required"}</h2><p className="subtle">{discovery.data?.provider_available ? "Suggestions retain source provenance and remain unconfirmed until you review them." : "No research provider is configured, so the system will not invent fallback competitors."}</p>{discovery.data?.latest_run && <div className="row-copy">Last run · {new Date(discovery.data.latest_run.created_at).toLocaleString()} · {discovery.data.latest_run.results_processed} processed · {discovery.data.latest_run.new_candidates} new · {discovery.data.latest_run.refreshed_candidates} refreshed · {discovery.data.latest_run.evidence_added} evidence</div>}</div><Button variant="green" disabled={refreshDiscovery.isPending || manualRefreshCoolingDown} onClick={() => refreshDiscovery.mutate()}><RefreshCw className={refreshDiscovery.isPending ? "spin" : ""} /> {manualRefreshLabel}</Button></Card>
+    <SectionTitle title="Suggested competitors" action={<Badge tone={discovery.data?.suggested_count ? "warning" : "neutral"}>{discovery.data?.suggested_count ?? 0} ready for review</Badge>} />
+    <div className="grid competitor-grid">{candidates.data?.filter((item) => item.status === "suggested").map((item) => <Card className="competitor-card" key={item.id}><div className="competitor-head"><div className="integration-icon"><Sparkles /></div><div className="row-main"><h2>{item.name}</h2><div className="row-copy">{item.website_domain || item.canonical_url || "Domain unknown"}</div></div><Badge tone={Number(item.confidence) >= 0.75 ? "success" : "warning"}>{Math.round(Number(item.confidence) * 100)}% confidence</Badge></div><div className="why-card"><div className="eyebrow">Why AI considers it relevant</div><p>{item.discovery_reason}</p></div><div className="row-copy">Source · {item.source} · discovered {new Date(item.discovered_at).toLocaleDateString()}</div><div className="toolbar competitor-actions"><Button variant="soft" className="btn-sm" onClick={() => setSelectedCandidate(item)}><Eye /> View evidence</Button><Button variant="green" className="btn-sm" disabled={updateCandidate.isPending} onClick={() => updateCandidate.mutate({ item, status: "monitoring" })}><Check /> Confirm & monitor</Button><Button className="btn-sm" disabled={updateCandidate.isPending} onClick={() => updateCandidate.mutate({ item, status: "dismissed" })}><X /> Dismiss</Button></div></Card>)}{candidates.isLoading && <Card><div className="empty"><RefreshCw className="spin" /><p>Loading discovered candidates…</p></div></Card>}{candidates.data && !candidates.data.some((item) => item.status === "suggested") && <Card><div className="empty"><Sparkles /><h3>No unreviewed suggestions</h3><p>{discovery.data?.provider_available ? "The next bounded discovery run will add only provider-backed candidates." : "Connect a future research provider to receive sourced suggestions. No fake candidates are shown."}</p></div></Card>}</div>
+    <SectionTitle title="Monitored competitors" action={<Badge>{competitors.data?.total ?? 0} records</Badge>} />
+    {competitors.isError ? <ErrorCard error={competitors.error} retry={() => void competitors.refetch()} /> : <><div className="grid competitor-grid">{competitors.data?.items.map((item) => <Card className="competitor-card" key={item.id}><div className="competitor-head"><div className="integration-icon"><Globe2 /></div><div className="row-main"><h2>{item.name}</h2><div className="row-copy">{item.website_domain || "No domain recorded"}</div></div><Badge tone={item.active ? "success" : "neutral"}>{item.active ? "Monitored" : "Inactive"}</Badge></div><div className="mini-detail"><span>Description</span><strong>{item.description || "Public description unknown"}</strong></div><div className="row-copy">Origin · {item.confirmation_source === "ai_suggestion" ? "confirmed AI suggestion" : "manual/imported record"}</div><div className="competitor-insight"><Sparkles /><div><div className="eyebrow">Analysis status</div><p>Open the record to review sourced observations and conclusions.</p></div></div><div className="toolbar competitor-actions"><Button variant="soft" className="btn-sm" onClick={() => setSelected(item)}><Eye /> View record</Button><Button className="btn-sm" onClick={() => { setSelected(item); setAddingObservation(true); }}><Plus /> Add observation</Button></div></Card>)}{competitors.isLoading && <Card><div className="empty"><RefreshCw className="spin" /><p>Loading competitors…</p></div></Card>}{competitors.data && !competitors.data.items.length && <Card><div className="empty"><Globe2 /><h3>No monitored competitors yet</h3><p>Confirm a provider-backed suggestion when one is available, or use the advanced manual fallback.</p></div></Card>}</div>{competitors.data && <Pager page={page} pageSize={competitors.data.page_size} total={competitors.data.total} onPage={setPage} />}</>}
+    {adding && <Modal title="Add competitor" description="Record a public domain and general notes. This does not scrape the website." onClose={() => setAdding(false)}><form onSubmit={(event) => add.mutate(event)}><div className="form-grid"><div className="field full"><label>Competitor name</label><input name="name" required autoFocus maxLength={180} /></div><div className="field full"><label>Website domain</label><input name="website_domain" pattern="[A-Za-z0-9.-]+" placeholder="competitor.example" /></div><div className="field full"><label>Description</label><textarea name="description" maxLength={3000} /></div><div className="field full"><label>Notes</label><textarea name="notes" maxLength={4000} /></div></div><div className="modal-foot"><Button type="button" onClick={() => setAdding(false)}>Cancel</Button><Button variant="primary" type="submit" disabled={add.isPending}>Add competitor</Button></div></form></Modal>}
+    {selectedCandidate && <Modal title={selectedCandidate.name} description="AI suggestion · not a trusted competitor fact until confirmed" onClose={() => setSelectedCandidate(null)}><div className="why-card"><div className="eyebrow">Discovery reasoning</div><p>{selectedCandidate.discovery_reason}</p></div><SectionTitle title="Source provenance" action={<Badge>{candidateEvidence.data?.length ?? 0} evidence item(s)</Badge>} />{candidateEvidence.isLoading && <p className="subtle">Loading evidence…</p>}{candidateEvidence.data?.map((item) => { const safeReference = safeExternalReference(item.source_reference); return <div className="list-row" key={item.id}><Globe2 /><div className="row-main"><strong>{item.title}</strong><div className="row-copy">{item.excerpt}</div><div className="row-copy">Discovery run · {item.discovery_run_id}</div>{safeReference ? <a href={safeReference} target="_blank" rel="noreferrer">{item.source_reference}</a> : <span className="row-copy">Reference · {item.source_reference}</span>}</div><Badge tone="info">{item.source_type.replaceAll("_", " ")}</Badge></div>; })}{candidateEvidence.data && !candidateEvidence.data.length && <div className="empty"><AlertCircle /><h3>No source evidence retained</h3><p>This candidate cannot be promoted as a supported public fact.</p></div>}<div className="modal-foot"><Button disabled={updateCandidate.isPending} onClick={() => updateCandidate.mutate({ item: selectedCandidate, status: "dismissed" })}>Dismiss</Button><Button variant="green" disabled={updateCandidate.isPending || !candidateEvidence.data?.length} onClick={() => updateCandidate.mutate({ item: selectedCandidate, status: "monitoring" })}>Confirm & monitor</Button></div></Modal>}
+    {selected && <Modal wide title={selected.name} description={`${selected.website_domain || "No domain"} · stored research only`} onClose={() => { setSelected(null); setAddingObservation(false); setObservationPage(1); setObservationCategory(""); }}><div className="toolbar"><Button onClick={() => setAddingObservation(true)}><Plus /> Add observation</Button><Button variant="primary" disabled={analyze.isPending || !observations.data?.total} onClick={() => analyze.mutate(selected)}><Sparkles /> {analyze.isPending ? "Analyzing…" : "Analyze stored evidence"}</Button></div><SectionTitle title="Source-derived observations" action={<select aria-label="Filter observations by category" value={observationCategory} onChange={(event) => { setObservationCategory(event.target.value as CompetitorObservation["category"] | ""); setObservationPage(1); }}><option value="">All categories</option>{["pricing", "product", "marketing", "content", "positioning", "promotion", "social", "website", "offer"].map((item) => <option value={item} key={item}>{item}</option>)}</select>} />{observations.isError ? <ErrorCard error={observations.error} retry={() => void observations.refetch()} /> : observations.data?.items.map((item) => <div className="list-row" key={item.id}><Badge tone="info">{item.category}</Badge><div className="row-main"><strong>{item.title}</strong><div className="row-copy">{item.summary}</div><div className="row-copy">Source · {item.source_reference || item.source_type} · {new Date(item.observed_at).toLocaleDateString()}</div></div></div>)}{observations.data && !observations.data.items.length && <div className="empty"><Globe2 /><h3>No observations</h3><p>Add sourced research before running analysis.</p></div>}{observations.data && <Pager page={observationPage} pageSize={observations.data.page_size} total={observations.data.total} onPage={setObservationPage} />}<SectionTitle title="Latest AI conclusion" />{latest ? <><Card className="recommendation"><div className="eyebrow">Based on {latest.source_observation_count} stored observation(s)</div><p className="detail-copy">{latest.summary}</p></Card><div className="grid three-grid intelligence-lists"><InsightList title="Strengths" items={latest.strengths} /><InsightList title="Gaps" items={[...latest.positioning_gaps, ...latest.content_gaps]} /><InsightList title="Opportunities" items={latest.campaign_opportunities} /></div><div className="toolbar"><Button variant="green" disabled={createOpportunity.isPending} onClick={() => createOpportunity.mutate({ competitor: selected, analysis: latest })}><Lightbulb /> Create opportunity</Button><Button variant="primary" onClick={() => setLocation("/cmo?tab=Content")}><Wand2 /> Create content</Button></div></> : <div className="empty"><Sparkles /><h3>No analysis yet</h3><p>Analysis remains empty until source observations exist.</p></div>}</Modal>}
+    {addingObservation && selected && <Modal title={`Add observation · ${selected.name}`} description="Record the source separately from later AI conclusions." onClose={() => setAddingObservation(false)}><form onSubmit={(event) => addObservation.mutate(event)}><div className="form-grid"><div className="field"><label>Category</label><select name="category">{["pricing", "product", "marketing", "content", "positioning", "promotion", "social", "website", "offer"].map((item) => <option key={item}>{item}</option>)}</select></div><div className="field"><label>Observed at</label><input name="observed_at" type="datetime-local" required /></div><div className="field full"><label>Title</label><input name="title" required maxLength={180} /></div><div className="field full"><label>Observation summary</label><textarea name="summary" required maxLength={5000} /></div><div className="field full"><label>Source reference</label><input name="source_reference" maxLength={1024} placeholder="Public URL, document ID, or import reference" /></div></div><div className="modal-foot"><Button type="button" onClick={() => setAddingObservation(false)}>Cancel</Button><Button variant="primary" type="submit" disabled={addObservation.isPending}>Save sourced observation</Button></div></form></Modal>}
+  </>;
+}
+
+function InsightList({ title, items }: { title: string; items: string[] }) {
+  return <Card><SectionTitle title={title} />{items.map((item) => <div className="check-line" key={item}><Check /> {item}</div>)}{!items.length && <p className="subtle">No supported conclusion recorded.</p>}</Card>;
+}
+
+const trendTransitions: Record<MarketingTrendStatus, MarketingTrendStatus[]> = {
+  detected: ["reviewed", "dismissed", "expired"], reviewed: ["dismissed", "expired"],
+  acted_on: ["expired"], dismissed: [], expired: [],
+};
+
+export function TrendIntelligencePage() {
+  const { activeBusinessId } = useBusiness();
+  const queryClient = useQueryClient();
+  const [, setLocation] = useLocation();
+  const [filter, setFilter] = useState<MarketingTrendStatus | "">("");
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [adding, setAdding] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const trends = useQuery({ queryKey: ["marketing", activeBusinessId, "trends", search, filter, page], queryFn: ({ signal }) => marketingApi.trends.list(activeBusinessId, { search, status: filter || undefined, page, pageSize: 24 }, signal), enabled: Boolean(activeBusinessId) });
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["marketing", activeBusinessId, "trends"] });
+  const create = useMutation({ mutationFn: (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); return marketingApi.trends.create(activeBusinessId, { title: String(form.get("title")), category: String(form.get("category")), description: String(form.get("description")), source: "manual", source_reference: String(form.get("source_reference")) || null, observed_at: new Date(String(form.get("observed_at"))).toISOString(), relevance_score: String(Number(form.get("relevance")) / 100), confidence: String(Number(form.get("confidence")) / 100) }); }, onSuccess: () => { setAdding(false); setNotice("Sourced trend saved for review."); setError(""); void refresh(); }, onError: (reason) => setError(humanizeApiError(reason, "Trend could not be saved.")) });
+  const move = useMutation({ mutationFn: ({ id, status }: { id: string; status: MarketingTrendStatus }) => marketingApi.trends.status(activeBusinessId, id, status), onSuccess: () => { setError(""); void refresh(); }, onError: (reason) => setError(humanizeApiError(reason, "Trend state could not be changed.")) });
+  const opportunity = useMutation({ mutationFn: (trend: MarketingTrend) => marketingApi.trends.opportunity(activeBusinessId, trend.id), onSuccess: () => { setNotice("Opportunity created for human review. No campaign was executed."); setError(""); void refresh(); }, onError: (reason) => setError(humanizeApiError(reason, "Review the trend before converting it to an opportunity.")) });
+
+  return <>
+    <PageHeader eyebrow="AI CMO · Stored research" title="Trend Intelligence" subtitle="Review sourced signals without claiming a live trend feed." action={<div className="toolbar"><div className="search-box"><Search /><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Search stored trends" /></div><Button onClick={() => setAdding(true)}><Plus /> Advanced · Add sourced trend</Button></div>} />
+    {notice && <div className="ai-banner"><Sparkles /> {notice}<button className="close-btn" onClick={() => setNotice("")}><X /></button></div>}
+    {error && <div className="ai-banner"><AlertCircle /> {error}<button className="close-btn" onClick={() => setError("")}><X /></button></div>}
+    <Card className="intelligence-hero"><div className="intelligence-hero-icon"><TrendingUp /></div><div className="row-main"><div className="eyebrow">Trend provider status</div><h2>Research provider configuration required</h2><p className="subtle">Only explicitly sourced manual or imported signals appear here. The system does not manufacture live trends while a research provider is unavailable.</p></div></Card>
+    <div className="tabs">{["", "detected", "reviewed", "acted_on", "dismissed", "expired"].map((item) => <button className={`tab ${filter === item ? "active" : ""}`} onClick={() => { setFilter(item as MarketingTrendStatus | ""); setPage(1); }} key={item || "all"}>{item ? item.replaceAll("_", " ") : "All"}</button>)}</div>
+    {trends.isError ? <ErrorCard error={trends.error} retry={() => void trends.refetch()} /> : <><div className="grid trend-grid">{trends.data?.items.map((trend) => <Card className="trend-card" key={trend.id}><div className="trend-head"><div><Badge tone={Number(trend.relevance_score) >= 0.8 ? "success" : Number(trend.relevance_score) >= 0.5 ? "warning" : "info"}><TrendingUp /> {trend.status.replaceAll("_", " ")}</Badge><h2>{trend.title}</h2><div className="row-copy">Source · {trend.source_reference || trend.source}</div></div><div className="relevance-score"><strong>{Math.round(Number(trend.relevance_score) * 100)}</strong><span>relevance</span></div></div><div className="trend-velocity"><BarChart3 /><div><span>Confidence</span><strong>{trend.confidence ? `${Math.round(Number(trend.confidence) * 100)}%` : "Not scored"}</strong></div></div><div className="mini-detail"><span>Category</span><strong>{trend.category}</strong></div><div className="why-card"><div className="eyebrow">Stored description</div><p>{trend.description}</p></div><div className="row-copy">Observed · {new Date(trend.observed_at).toLocaleString()}</div><div className="toolbar trend-actions"><Button variant="primary" className="btn-sm" onClick={() => setLocation("/cmo?tab=Content")}><Wand2 /> Create content</Button><Button variant="green" className="btn-sm" onClick={() => setLocation("/campaigns?new=1")}><Target /> Create campaign draft</Button>{trend.status === "reviewed" && !trend.opportunity_id && <Button variant="soft" className="btn-sm" disabled={opportunity.isPending} onClick={() => opportunity.mutate(trend)}><Lightbulb /> Create opportunity</Button>}{trendTransitions[trend.status].map((next) => <Button variant={next === "reviewed" ? "green" : "secondary"} className="btn-sm" key={next} disabled={move.isPending} onClick={() => move.mutate({ id: trend.id, status: next })}>{next === "reviewed" ? <Check /> : <X />} {next}</Button>)}</div></Card>)}{trends.isLoading && <Card><div className="empty"><RefreshCw className="spin" /><p>Loading trends…</p></div></Card>}{trends.data && !trends.data.items.length && <Card><div className="empty"><TrendingUp /><h3>No stored trends</h3><p>Import research or use the advanced sourced fallback. No fake live signals are shown.</p><Button onClick={() => setAdding(true)}>Advanced · Add sourced trend</Button></div></Card>}</div>{trends.data && <Pager page={page} pageSize={trends.data.page_size} total={trends.data.total} onPage={setPage} />}</>}
+    {adding && <Modal title="Add sourced trend" description="This stores a reviewed signal; it does not run a web crawler." onClose={() => setAdding(false)}><form onSubmit={(event) => create.mutate(event)}><div className="form-grid"><div className="field full"><label>Title</label><input name="title" required maxLength={180} /></div><div className="field"><label>Category</label><input name="category" required pattern="[a-z][a-z0-9_]*" defaultValue="market_demand" /></div><div className="field"><label>Observed at</label><input name="observed_at" type="datetime-local" required /></div><div className="field"><label>Relevance (%)</label><input name="relevance" type="number" min="0" max="100" defaultValue="70" required /></div><div className="field"><label>Confidence (%)</label><input name="confidence" type="number" min="0" max="100" defaultValue="60" required /></div><div className="field full"><label>Description</label><textarea name="description" required maxLength={5000} /></div><div className="field full"><label>Source reference</label><input name="source_reference" maxLength={1024} placeholder="Public URL, report, or import reference" /></div></div><div className="modal-foot"><Button type="button" onClick={() => setAdding(false)}>Cancel</Button><Button variant="primary" type="submit" disabled={create.isPending}>Save trend</Button></div></form></Modal>}
+  </>;
 }

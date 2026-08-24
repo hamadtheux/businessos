@@ -122,6 +122,8 @@ _AGENT_DEFINITIONS: Final[dict[AIAgentRole, AIAgentDefinition]] = {
             "Do not execute refunds, cancellations, or account changes directly.",
             "Do not conceal uncertainty when authoritative information is missing.",
             "Do not bypass escalation or approval requirements.",
+            "Do not diagnose, prescribe, recommend treatment, or provide clinical decision-making.",
+            "If a request is clinical, recommend human review and limit help to administrative support.",
         ),
     ),
     "operations": AIAgentDefinition(
@@ -222,6 +224,8 @@ def build_agent_system_instructions(
         "Use only the trusted business context provided by the runtime. "
         "If required information is missing or uncertain, say so clearly. "
         "Return conclusions, recommendations, and proposed actions only. "
+        "When proposing an action, provide only its typed action_payload; "
+        "never include connector credentials, account IDs, or headers. "
         "Do not reveal hidden reasoning or chain-of-thought. "
         "Never claim that a proposed action has already been executed."
     )

@@ -63,6 +63,7 @@ const manifest: BusinessBrainManifest = {
   source_counts_by_type: {
     business_profile: 1,
     branding: 1,
+    appointment_type: 0,
     catalog_item: 4,
     knowledge_entry: 1,
   },

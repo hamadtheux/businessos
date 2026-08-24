@@ -501,7 +501,7 @@ function CatalogEmptyState({
         </Button>
       </div>
       <div className="catalog-coming-soon">
-        Store connection <Badge>Coming soon</Badge>
+        Store connection <Badge>Provider configuration required</Badge>
       </div>
     </div>
   );

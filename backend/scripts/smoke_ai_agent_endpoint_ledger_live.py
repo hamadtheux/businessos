@@ -19,6 +19,7 @@ from app.db.session import AsyncSessionFactory
 from app.main import app
 from app.models.ai_action import AIAction
 from app.models.ai_agent_execution import AIAgentExecution
+from app.models.approval_request import ApprovalRequest
 from app.models.business import Business
 from app.models.business_membership import BusinessMembership
 from app.models.user import User
@@ -132,6 +133,87 @@ async def main() -> None:
                 "SAFE RESPONSE:",
                 response.text,
             )
+
+            async with AsyncSessionFactory() as failure_session:
+                failed_execution = await failure_session.scalar(
+                    select(
+                        AIAgentExecution
+                    )
+                    .where(
+                        AIAgentExecution.business_id
+                        == business_id,
+                        AIAgentExecution.task
+                        == task,
+                    )
+                    .order_by(
+                        AIAgentExecution.created_at.desc(),
+                    )
+                    .limit(1)
+                )
+
+                if failed_execution is None:
+                    print(
+                        "FAILURE LEDGER FOUND:",
+                        False,
+                    )
+                else:
+                    execution_id = failed_execution.id
+
+                    print(
+                        "FAILURE LEDGER FOUND:",
+                        True,
+                    )
+
+                    print(
+                        "FAILURE LEDGER STATUS:",
+                        failed_execution.status,
+                    )
+
+                    print(
+                        "FAILURE CODE:",
+                        failed_execution.failure_code,
+                    )
+
+                    failed_action_count = await failure_session.scalar(
+                        select(
+                            func.count(
+                                AIAction.id
+                            )
+                        ).where(
+                            AIAction.execution_id
+                            == failed_execution.id
+                        )
+                    )
+
+                    failed_approval_count = await failure_session.scalar(
+                        select(
+                            func.count(
+                                ApprovalRequest.id
+                            )
+                        )
+                        .select_from(
+                            ApprovalRequest
+                        )
+                        .join(
+                            AIAction,
+                            AIAction.id
+                            == ApprovalRequest.action_id,
+                        )
+                        .where(
+                            AIAction.execution_id
+                            == failed_execution.id
+                        )
+                    )
+
+                    print(
+                        "FAILURE ACTION COUNT:",
+                        failed_action_count,
+                    )
+
+                    print(
+                        "FAILURE APPROVAL COUNT:",
+                        failed_approval_count,
+                    )
 
             raise RuntimeError(
                 "Live AI endpoint request failed."
@@ -520,25 +602,80 @@ async def main() -> None:
                 ],
             )
 
+            approval = await session.scalar(
+                select(
+                    ApprovalRequest
+                ).where(
+                    ApprovalRequest.business_id
+                    == business_id,
+                    ApprovalRequest.action_id
+                    == action.id,
+                    ApprovalRequest.status
+                    == "pending",
+                )
+            )
+
             print(
                 "ACTION STATUS:",
                 action.status,
             )
 
             print(
-                "ACTION PAYLOAD EMPTY:",
-                action.action_payload == {},
+                "ACTION PAYLOAD MATCHES API:",
+                action.action_payload
+                == api_action["action_payload"],
             )
 
             print(
-                "NO POLICY DECISION:",
-                action.policy_decision is None,
+                "POLICY DECISION:",
+                action.policy_decision,
             )
 
             print(
-                "NO POLICY EVALUATION:",
-                action.policy_evaluated_at is None,
+                "POLICY REASON:",
+                action.policy_reason_code,
             )
+
+            print(
+                "POLICY EVALUATED:",
+                action.policy_evaluated_at
+                is not None,
+            )
+
+            print(
+                "APPROVAL FOUND:",
+                approval is not None,
+            )
+
+            if approval is not None:
+                print(
+                    "APPROVAL STATUS:",
+                    approval.status,
+                )
+
+                print(
+                    "APPROVAL BUSINESS MATCH:",
+                    approval.business_id
+                    == business_id,
+                )
+
+                print(
+                    "APPROVAL ACTION MATCH:",
+                    approval.action_id
+                    == action.id,
+                )
+
+                print(
+                    "APPROVAL REQUESTER MATCH:",
+                    approval.requested_by_user_id
+                    == user_id,
+                )
+
+                print(
+                    "APPROVAL REASON MATCH:",
+                    approval.reason_code
+                    == action.policy_reason_code,
+                )
 
             print(
                 "NO EXECUTION STARTED:",
@@ -631,34 +768,98 @@ async def main() -> None:
                     "Governed action approval flag does not match API."
                 )
 
-            if action.status != "proposed":
+            if (
+                action.action_payload
+                != api_action["action_payload"]
+            ):
                 raise RuntimeError(
-                    "New governed action must remain proposed."
+                    "Governed action payload does not match "
+                    "the validated API proposal."
                 )
 
-            if action.action_payload != {}:
+            if (
+                action.status
+                != "pending_approval"
+            ):
                 raise RuntimeError(
-                    "Executable payload must remain empty."
+                    "Governed action did not enter pending approval."
                 )
 
-            if action.policy_decision is not None:
+            if (
+                action.policy_decision
+                != "require_approval"
+            ):
                 raise RuntimeError(
-                    "Policy decision was unexpectedly created."
+                    "Server policy did not require approval."
                 )
 
-            if action.policy_evaluated_at is not None:
+            if (
+                action.policy_reason_code
+                != "external_communication"
+            ):
                 raise RuntimeError(
-                    "Policy evaluation unexpectedly occurred."
+                    "Unexpected server policy reason."
+                )
+
+            if (
+                action.policy_evaluated_at
+                is None
+            ):
+                raise RuntimeError(
+                    "Policy evaluation timestamp was not persisted."
+                )
+
+            if approval is None:
+                raise RuntimeError(
+                    "Pending ApprovalRequest was not persisted."
+                )
+
+            if approval.status != "pending":
+                raise RuntimeError(
+                    "ApprovalRequest is not pending."
+                )
+
+            if (
+                approval.business_id
+                != business_id
+            ):
+                raise RuntimeError(
+                    "ApprovalRequest business ownership is incorrect."
+                )
+
+            if (
+                approval.action_id
+                != action.id
+            ):
+                raise RuntimeError(
+                    "ApprovalRequest action linkage is incorrect."
+                )
+
+            if (
+                approval.requested_by_user_id
+                != user_id
+            ):
+                raise RuntimeError(
+                    "Approval requester does not match "
+                    "authenticated user."
+                )
+
+            if (
+                approval.reason_code
+                != action.policy_reason_code
+            ):
+                raise RuntimeError(
+                    "Approval reason does not match server policy."
                 )
 
             if action.execution_started_at is not None:
                 raise RuntimeError(
-                    "Governed action unexpectedly started."
+                    "Governed action unexpectedly started execution."
                 )
 
             if action.execution_completed_at is not None:
                 raise RuntimeError(
-                    "Governed action unexpectedly completed."
+                    "Governed action unexpectedly completed execution."
                 )
 
             if action.external_reference_id is not None:
@@ -669,12 +870,12 @@ async def main() -> None:
 
             if action.failure_code is not None:
                 raise RuntimeError(
-                    "Fresh governed action unexpectedly has "
+                    "Pending governed action unexpectedly has "
                     "a failure code."
                 )
 
             print(
-                "LIVE OPENAI → GOVERNED AI ACTION OK"
+                "LIVE OPENAI → POLICY → APPROVAL OK"
             )
 
     finally:
@@ -711,14 +912,46 @@ async def main() -> None:
                     )
                 )
 
+                remaining_approvals = (
+                    await session.scalar(
+                        select(
+                            func.count(
+                                ApprovalRequest.id
+                            )
+                        )
+                        .select_from(
+                            ApprovalRequest
+                        )
+                        .join(
+                            AIAction,
+                            AIAction.id
+                            == ApprovalRequest.action_id,
+                        )
+                        .where(
+                            AIAction.execution_id
+                            == execution_id
+                        )
+                    )
+                )
+
                 print(
                     "SMOKE ACTION CASCADE CLEANUP:",
                     remaining_actions == 0,
                 )
 
+                print(
+                    "SMOKE APPROVAL CASCADE CLEANUP:",
+                    remaining_approvals == 0,
+                )
+
                 if remaining_actions != 0:
                     raise RuntimeError(
                         "Smoke AIAction rows were not cleaned up."
+                    )
+
+                if remaining_approvals != 0:
+                    raise RuntimeError(
+                        "Smoke ApprovalRequest rows were not cleaned up."
                     )
 
 

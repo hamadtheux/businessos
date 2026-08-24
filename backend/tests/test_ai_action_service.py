@@ -464,6 +464,63 @@ class MaterializeAIActionTests(
             0,
         )
 
+    async def test_materialization_persists_only_normalized_typed_payload(
+        self,
+    ) -> None:
+        execution = _execution(
+            status="completed",
+            proposed_actions=[
+                _proposal(
+                    action_type="update_crm",
+                    risk_level="low",
+                    requires_approval=False,
+                    action_payload={
+                        "customer_ref": " lead-1 ",
+                        "stage": "qualified",
+                    },
+                )
+            ],
+        )
+        session = _FakeSession(execution=execution)
+        actions = await materialize_ai_actions(
+            session,
+            business_id=BUSINESS_A_ID,
+            execution_id=execution.id,
+        )
+        self.assertEqual(
+            actions[0].action_payload,
+            {
+                "customer_ref": "lead-1",
+                "stage": "qualified",
+                "owner_ref": None,
+                "note": None,
+                "next_follow_up_at": None,
+            },
+        )
+
+    async def test_malformed_candidate_payload_is_rejected_before_action_storage(
+        self,
+    ) -> None:
+        execution = _execution(
+            proposed_actions=[
+                _proposal(
+                    action_payload={
+                        "customer_ref": "customer-1",
+                        "message": "Hello",
+                        "connector_options": {"raw": "untrusted"},
+                    }
+                )
+            ],
+        )
+        session = _FakeSession(execution=execution)
+        with self.assertRaises(AIActionValidationError):
+            await materialize_ai_actions(
+                session,
+                business_id=BUSINESS_A_ID,
+                execution_id=execution.id,
+            )
+        self.assertEqual(session.actions, [])
+
     async def test_critical_proposal_cannot_bypass_approval(
         self,
     ) -> None:
@@ -852,13 +909,17 @@ def _proposal(
     description: str = "Send customer follow-up.",
     risk_level: str = "medium",
     requires_approval: bool = True,
+    action_payload: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    return {
+    proposal: dict[str, object] = {
         "action_type": action_type,
         "description": description,
         "risk_level": risk_level,
         "requires_approval": requires_approval,
     }
+    if action_payload is not None:
+        proposal["action_payload"] = dict(action_payload)
+    return proposal
 
 
 _UNSET_COMPLETED_AT = object()

@@ -11,11 +11,12 @@ from app.exceptions.business import (
     BusinessListingPersistenceError,
     BusinessOnboardingConflictError,
     BusinessOnboardingPersistenceError,
+    BusinessProfilePersistenceError,
 )
 from app.models.business import Business
 from app.models.business_branding import BusinessBranding
 from app.models.business_membership import BusinessMembership
-from app.schemas.business import BusinessOnboardingInput
+from app.schemas.business import BusinessOnboardingInput, BusinessProfileUpdate
 from app.utils.slug import add_uuid_slug_suffix, create_slug_base
 
 
@@ -180,6 +181,31 @@ async def list_accessible_businesses(
     return accessible_businesses
 
 
+async def update_business_profile(
+    session: AsyncSession,
+    *,
+    business: Business,
+    update: BusinessProfileUpdate,
+) -> Business:
+    """Replace the server-owned editable profile without committing."""
+    try:
+        business.name = update.name
+        business.timezone = update.timezone
+        business.currency = update.currency
+        business.locale = update.locale
+        business.website_url = update.website_url
+        business.location = update.location
+        business.description = update.description
+        business.brand_voice = update.brand_voice
+        business.avoid_keywords = list(update.avoid_keywords)
+        await session.flush()
+    except SQLAlchemyError:
+        raise BusinessProfilePersistenceError(
+            "Unable to persist business profile"
+        ) from None
+    return business
+
+
 async def _load_owned_business_context(
     session: AsyncSession,
     *,
@@ -263,6 +289,11 @@ def _build_new_business_context(
         timezone=onboarding.timezone,
         currency=onboarding.currency,
         locale=onboarding.locale,
+        website_url=onboarding.website_url,
+        location=onboarding.location,
+        description=onboarding.description,
+        brand_voice=onboarding.brand_voice,
+        avoid_keywords=list(onboarding.avoid_keywords),
     )
     membership = BusinessMembership(
         business_id=onboarding.business_id,
@@ -307,6 +338,11 @@ def _ensure_retry_payload_matches(
         business.timezone,
         business.currency,
         business.locale,
+        getattr(business, "website_url", None),
+        getattr(business, "location", None),
+        getattr(business, "description", None),
+        getattr(business, "brand_voice", None),
+        list(getattr(business, "avoid_keywords", None) or []),
     )
     requested_business_values = (
         onboarding.name,
@@ -314,6 +350,11 @@ def _ensure_retry_payload_matches(
         onboarding.timezone,
         onboarding.currency,
         onboarding.locale,
+        onboarding.website_url,
+        onboarding.location,
+        onboarding.description,
+        onboarding.brand_voice,
+        onboarding.avoid_keywords,
     )
 
     branding = existing.branding

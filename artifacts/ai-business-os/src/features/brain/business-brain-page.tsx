@@ -5,6 +5,7 @@ import {
   BookOpen,
   Brain,
   Building2,
+  CalendarDays,
   Check,
   Package,
   Palette,
@@ -15,6 +16,10 @@ import {
   Search,
 } from "lucide-react";
 import { useBusiness } from "@/business-context";
+import {
+  getIndustryWorkspaceProfile,
+  isWorkspaceModuleVisible,
+} from "@/lib/industry-workspaces";
 import {
   Badge,
   Button,
@@ -45,6 +50,17 @@ type StatusFilter = "default" | BusinessKnowledgeStatus;
 
 export function BusinessBrainPage() {
   const { activeBusiness, activeBusinessId } = useBusiness();
+  const workspaceProfile = getIndustryWorkspaceProfile(activeBusiness?.industry);
+  const catalogEnabled = isWorkspaceModuleVisible(
+    activeBusiness?.industry,
+    "catalog",
+  );
+  const schedulingEnabled = isWorkspaceModuleVisible(
+    activeBusiness?.industry,
+    "scheduling",
+  );
+  const catalogSourceLabel =
+    workspaceProfile.catalogLabel ?? "Products & services";
   const [entries, setEntries] = useState<BusinessKnowledgeEntry[]>([]);
   const [manifest, setManifest] = useState<BusinessBrainManifest | null>(null);
   const [knowledgeLoadState, setKnowledgeLoadState] =
@@ -291,6 +307,15 @@ export function BusinessBrainPage() {
             count={manifest?.source_counts_by_type.business_profile}
             loading={manifestLoadState === "loading"}
           />
+          {schedulingEnabled && (
+            <BrainSourceMetric
+              icon={<CalendarDays />}
+              label="Public services"
+              description="From scheduling"
+              count={manifest?.source_counts_by_type.appointment_type}
+              loading={manifestLoadState === "loading"}
+            />
+          )}
           <BrainSourceMetric
             icon={<Palette />}
             label="Brand"
@@ -298,13 +323,15 @@ export function BusinessBrainPage() {
             count={manifest?.source_counts_by_type.branding}
             loading={manifestLoadState === "loading"}
           />
-          <BrainSourceMetric
-            icon={<Package />}
-            label="Products & services"
-            description="From catalog"
-            count={manifest?.source_counts_by_type.catalog_item}
-            loading={manifestLoadState === "loading"}
-          />
+          {catalogEnabled && (
+            <BrainSourceMetric
+              icon={<Package />}
+              label={catalogSourceLabel}
+              description="From catalog"
+              count={manifest?.source_counts_by_type.catalog_item}
+              loading={manifestLoadState === "loading"}
+            />
+          )}
           <BrainSourceMetric
             icon={<BookOpen />}
             label="Curated knowledge"

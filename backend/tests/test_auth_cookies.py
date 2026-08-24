@@ -44,6 +44,9 @@ class RefreshCookieHelperTests(unittest.TestCase):
             storage_access_key_id="test-access-key",
             storage_secret_access_key="test-secret-key",
             storage_public_base_url="https://media.invalid",
+            public_api_base_url="https://widgets.example.test",
+            widget_loader_url="https://widgets.example.test/widget-loader.js",
+            widget_app_url="https://widgets.example.test/widget.html",
         )
 
         set_refresh_cookie(response, "opaque-test-value", config=config)

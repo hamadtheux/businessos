@@ -36,6 +36,9 @@ from app.exceptions.ai_agent import (  # noqa: E402
 from app.exceptions.ai_action import (  # noqa: E402
     AIActionPersistenceError,
 )
+from app.exceptions.approval import (  # noqa: E402
+    ApprovalPersistenceError,
+)
 from app.main import app  # noqa: E402
 from app.schemas.ai_agent import (  # noqa: E402
     AIAgentExecutionResult,
@@ -69,6 +72,14 @@ class AIAgentApiTests(
             self.materialize_patcher.start()
         )
         self.materialize_mock.return_value = []
+
+        self.governance_patcher = patch(
+            "app.api.v1.ai_agents.govern_materialized_ai_actions",
+        )
+        self.governance_mock = (
+            self.governance_patcher.start()
+        )
+        self.governance_mock.return_value = []
 
         self.original_dependency_overrides = (
             app.dependency_overrides.copy()
@@ -129,6 +140,7 @@ class AIAgentApiTests(
         )
 
     async def asyncTearDown(self) -> None:
+        self.governance_patcher.stop()
         self.materialize_patcher.stop()
 
         await self.client.aclose()
@@ -1093,6 +1105,228 @@ class AIAgentApiTests(
         self.assertEqual(
             self.session.execution.failure_code,
             "action_materialization_failed",
+        )
+
+        self._assert_no_usage_metadata()
+
+    async def test_governance_runs_after_materialization_before_terminal_commit(
+        self,
+    ) -> None:
+        expected = _completed_result(
+            BUSINESS_A_ID
+        )
+
+        materialized_actions = [
+            SimpleNamespace(
+                id=UUID(
+                    "84000000-0000-0000-0000-000000000004"
+                ),
+                business_id=BUSINESS_A_ID,
+                proposal_index=0,
+            )
+        ]
+
+        async def materialize_at_boundary(
+            session,
+            *,
+            business_id,
+            execution_id,
+        ):
+            self.assertIs(
+                session,
+                self.session,
+            )
+
+            self.assertEqual(
+                business_id,
+                BUSINESS_A_ID,
+            )
+
+            self.assertEqual(
+                execution_id,
+                self.session.execution.id,
+            )
+
+            self.assertEqual(
+                self.session.commit_calls,
+                1,
+            )
+
+            self.assertEqual(
+                self.session.execution.status,
+                "completed",
+            )
+
+            return materialized_actions
+
+        async def govern_at_boundary(
+            session,
+            *,
+            business_id,
+            actions,
+            requested_by_user_id,
+        ):
+            self.assertIs(
+                session,
+                self.session,
+            )
+
+            self.assertEqual(
+                business_id,
+                BUSINESS_A_ID,
+            )
+
+            self.assertIs(
+                actions,
+                materialized_actions,
+            )
+
+            self.assertEqual(
+                requested_by_user_id,
+                UUID(
+                    "83000000-0000-0000-0000-000000000003"
+                ),
+            )
+
+            # Governance must happen before the terminal commit.
+            self.assertEqual(
+                self.session.commit_calls,
+                1,
+            )
+
+            self.materialize_mock.assert_awaited_once()
+
+            return []
+
+        self.materialize_mock.side_effect = (
+            materialize_at_boundary
+        )
+
+        self.governance_mock.side_effect = (
+            govern_at_boundary
+        )
+
+        with patch(
+            "app.api.v1.ai_agents.execute_ai_agent_with_metadata",
+            new=AsyncMock(
+                return_value=_runtime_result(
+                    expected
+                )
+            ),
+        ):
+            response = await self.client.post(
+                self._url(
+                    BUSINESS_A_ID
+                ),
+                json=self._valid_request(),
+            )
+
+        self.assertEqual(
+            response.status_code,
+            200,
+        )
+
+        self.materialize_mock.assert_awaited_once()
+        self.governance_mock.assert_awaited_once()
+
+        self.assertEqual(
+            self.session.commit_calls,
+            2,
+        )
+
+        self.assertEqual(
+            self.session.rollback_calls,
+            0,
+        )
+
+    async def test_governance_failure_fails_closed(
+        self,
+    ) -> None:
+        materialized_actions = [
+            SimpleNamespace(
+                id=UUID(
+                    "85000000-0000-0000-0000-000000000005"
+                ),
+                business_id=BUSINESS_A_ID,
+                proposal_index=0,
+            )
+        ]
+
+        self.materialize_mock.return_value = (
+            materialized_actions
+        )
+
+        self.governance_mock.side_effect = (
+            ApprovalPersistenceError(
+                "private approval database detail"
+            )
+        )
+
+        with patch(
+            "app.api.v1.ai_agents.execute_ai_agent_with_metadata",
+            new=AsyncMock(
+                return_value=_runtime_result(
+                    _completed_result(
+                        BUSINESS_A_ID
+                    )
+                )
+            ),
+        ):
+            response = await self.client.post(
+                self._url(
+                    BUSINESS_A_ID
+                ),
+                json=self._valid_request(),
+            )
+
+        self.assertEqual(
+            response.status_code,
+            503,
+        )
+
+        self.assertEqual(
+            response.json(),
+            {
+                "detail": (
+                    "AI service is temporarily "
+                    "unavailable."
+                )
+            },
+        )
+
+        self.assertNotIn(
+            "private approval database detail",
+            response.text,
+        )
+
+        self._assert_private(
+            response
+        )
+
+        self.materialize_mock.assert_awaited_once()
+        self.governance_mock.assert_awaited_once()
+
+        # Commit 1 = durable running ledger.
+        # Governance transaction is rolled back.
+        # Commit 2 = safe failed ledger state.
+        self.assertEqual(
+            self.session.commit_calls,
+            2,
+        )
+
+        self.assertEqual(
+            self.session.rollback_calls,
+            1,
+        )
+
+        self.assertEqual(
+            self.session.execution.status,
+            "failed",
+        )
+
+        self.assertEqual(
+            self.session.execution.failure_code,
+            "action_governance_failed",
         )
 
         self._assert_no_usage_metadata()

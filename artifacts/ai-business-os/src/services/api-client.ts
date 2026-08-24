@@ -3,6 +3,7 @@ import type {
   ApiErrorPayload,
   BusinessOnboardingInput,
   BusinessOnboardingResponse,
+  BusinessProfileUpdate,
   BusinessBrandingResponse,
   BusinessBrandingUpdate,
   BusinessSummary,
@@ -106,9 +107,15 @@ export class ApiClient {
     try {
       const session = await this.refreshSession();
       return session.user;
-    } catch {
+    } catch (error) {
       this.clearSession();
-      return null;
+      if (
+        error instanceof AuthLifecycleCancelledError ||
+        (error instanceof ApiError && [401, 403].includes(error.status))
+      ) {
+        return null;
+      }
+      throw error;
     }
   }
 
@@ -593,7 +600,7 @@ export function humanizeApiError(
   fallback: string,
 ): string {
   if (error instanceof ApiNetworkError) {
-    return "We couldn't reach the service. Check your connection and try again.";
+    return "Cannot reach AI Business OS API. Check the local API or your network connection.";
   }
 
   if (error instanceof ApiError) {
@@ -604,6 +611,43 @@ export function humanizeApiError(
       detail.trim()
     ) {
       return detail;
+    }
+
+    if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+      const safeMessage = typeof detail.message === "string"
+        ? detail.message.trim()
+        : "";
+      const actionableErrors: Record<string, string> = {
+        provider_not_configured: "Platform configuration required.",
+        connection_required: "Connect the required provider account to continue.",
+        authorization_expired: "The provider authorization expired. Reconnect the account.",
+        permission_missing: "Your business role does not permit this action.",
+        approval_required: "Human approval is required before this action can run.",
+        spend_policy_required: "Configure an owner-managed advertising spend policy first.",
+        spend_limit_exceeded: "This action exceeds the authorized advertising spend limit.",
+        rate_limited: "Too many requests. Wait a moment and try again.",
+        provider_unavailable: "The external provider is temporarily degraded. Your internal data remains available.",
+        temporary_failure: "The service could not complete the request. Please try again.",
+        external_outcome_uncertain: "The provider outcome is uncertain. This action will not be retried automatically.",
+        feature_not_entitled: "Your current plan does not include this feature.",
+        validation_error: "Check the supplied details and try again.",
+      };
+      const label = typeof detail.entitlement_key === "string"
+        ? detail.entitlement_key.replace(/^max_/, "").replace(/_month$/, "").replaceAll("_", " ")
+        : "plan access";
+      if (
+        detail.code === "usage_limit_reached" &&
+        typeof detail.current === "number" &&
+        typeof detail.limit === "number"
+      ) {
+        return `You've used ${detail.current.toLocaleString()} / ${detail.limit.toLocaleString()} ${label} this billing period. Review Billing to upgrade.`;
+      }
+      if (detail.code === "feature_not_in_plan") {
+        return `Your current plan doesn't include ${label}. Review Billing to compare plans.`;
+      }
+      if (typeof detail.code === "string") {
+        return safeMessage || actionableErrors[detail.code] || fallback;
+      }
     }
 
     if (error.status === 422) {
@@ -636,6 +680,18 @@ export function createBusinessApi(
         "/api/v1/businesses",
         {
           method: "POST",
+          json: input,
+        },
+      ),
+
+    updateProfile: (
+      businessId: string,
+      input: BusinessProfileUpdate,
+    ) =>
+      client.request<BusinessSummary>(
+        `/api/v1/businesses/${encodeURIComponent(businessId)}`,
+        {
+          method: "PUT",
           json: input,
         },
       ),

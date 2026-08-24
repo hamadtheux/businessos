@@ -993,13 +993,14 @@ def _brain_iterator(
         business_id: UUID,
         *,
         batch_size: int,
+        allowed_source_types=None,
     ):
         _ = session
         _ = business_id
         _ = batch_size
-
         for source in sources:
-            yield source
+            if allowed_source_types is None or source.source_type in allowed_source_types:
+                yield source
 
     return iterate
 
@@ -1012,10 +1013,12 @@ def _broken_brain_iterator(
         business_id: UUID,
         *,
         batch_size: int,
+        allowed_source_types=None,
     ):
         _ = session
         _ = business_id
         _ = batch_size
+        _ = allowed_source_types
 
         if False:
             yield None

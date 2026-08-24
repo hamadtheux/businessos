@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -18,6 +18,7 @@ from app.models.business import Business
 from app.models.business_branding import BusinessBranding
 from app.models.business_knowledge_entry import BusinessKnowledgeEntry
 from app.models.catalog_item import CatalogItem
+from app.models.appointment_type import AppointmentType
 from app.schemas.business_brain import BusinessBrainSourceType
 
 DEFAULT_SOURCE_BATCH_SIZE: Final = 250
@@ -25,6 +26,7 @@ MAX_SOURCE_BATCH_SIZE: Final = 1_000
 BUSINESS_BRAIN_SOURCE_TYPES: Final[tuple[BusinessBrainSourceType, ...]] = (
     "business_profile",
     "branding",
+    "appointment_type",
     "catalog_item",
     "knowledge_entry",
 )
@@ -132,6 +134,27 @@ def build_catalog_source(
     )
 
 
+def build_appointment_type_source(
+    business_id: UUID,
+    item: AppointmentType,
+) -> BusinessBrainSource:
+    """Expose only the public, non-patient service description to AI roles."""
+    _require_matching_business(business_id, item.business_id)
+    content = _serialize_fields(
+        (
+            ("Service", item.name),
+            ("Public description", item.description),
+            ("Duration minutes", item.duration_minutes),
+        )
+    )
+    return _build_source(
+        business_id=business_id,
+        source_type="appointment_type",
+        source_id=f"appointment-type:{item.id}",
+        title=item.name,
+        content=content,
+        updated_at=item.updated_at,
+    )
 def build_knowledge_source(
     business_id: UUID,
     entry: BusinessKnowledgeEntry,
@@ -161,30 +184,50 @@ async def iterate_business_brain_sources(
     business_id: UUID,
     *,
     batch_size: int = DEFAULT_SOURCE_BATCH_SIZE,
+    allowed_source_types: Collection[BusinessBrainSourceType] | None = None,
 ) -> AsyncIterator[BusinessBrainSource]:
     """Stream deterministic authoritative sources in bounded tenant-scoped pages."""
     _validate_batch_size(batch_size)
+    allowed = (
+        set(BUSINESS_BRAIN_SOURCE_TYPES)
+        if allowed_source_types is None
+        else set(allowed_source_types)
+    )
+    if not allowed.issubset(BUSINESS_BRAIN_SOURCE_TYPES):
+        raise ValueError("allowed_source_types contains an unsupported source type")
     business = await _load_business(session, business_id)
-    yield build_business_profile_source(business)
+    if "business_profile" in allowed:
+        yield build_business_profile_source(business)
 
-    branding = await _load_branding(session, business_id)
-    branding_source = build_branding_source(business_id, branding)
-    if branding_source is not None:
-        yield branding_source
+    if "branding" in allowed:
+        branding = await _load_branding(session, business_id)
+        branding_source = build_branding_source(business_id, branding)
+        if branding_source is not None:
+            yield branding_source
 
-    async for item in _iterate_active_catalog_items(
-        session,
-        business_id,
-        batch_size=batch_size,
-    ):
-        yield build_catalog_source(business_id, business.currency, item)
+    if "appointment_type" in allowed:
+        async for appointment_type in _iterate_active_appointment_types(
+            session,
+            business_id,
+            batch_size=batch_size,
+        ):
+            yield build_appointment_type_source(business_id, appointment_type)
 
-    async for entry in _iterate_active_knowledge_entries(
-        session,
-        business_id,
-        batch_size=batch_size,
-    ):
-        yield build_knowledge_source(business_id, entry)
+    if "catalog_item" in allowed:
+        async for item in _iterate_active_catalog_items(
+            session,
+            business_id,
+            batch_size=batch_size,
+        ):
+            yield build_catalog_source(business_id, business.currency, item)
+
+    if "knowledge_entry" in allowed:
+        async for entry in _iterate_active_knowledge_entries(
+            session,
+            business_id,
+            batch_size=batch_size,
+        ):
+            yield build_knowledge_source(business_id, entry)
 
 
 async def build_business_brain_manifest(
@@ -287,6 +330,37 @@ async def _iterate_active_catalog_items(
         cursor = (last.created_at, last.id)
 
 
+async def _iterate_active_appointment_types(
+    session: AsyncSession,
+    business_id: UUID,
+    *,
+    batch_size: int,
+) -> AsyncIterator[AppointmentType]:
+    cursor: tuple[datetime, UUID] | None = None
+    while True:
+        statement = select(AppointmentType).where(
+            AppointmentType.business_id == business_id,
+            AppointmentType.active.is_(True),
+        )
+        if cursor is not None:
+            statement = statement.where(
+                _after_cursor(AppointmentType.created_at, AppointmentType.id, cursor)
+            )
+        statement = statement.order_by(
+            AppointmentType.created_at.asc(), AppointmentType.id.asc()
+        ).limit(batch_size)
+        items = await _load_page(session, statement, AppointmentType)
+        if not items:
+            return
+        for item in items:
+            _require_matching_business(business_id, item.business_id)
+            yield item
+        if len(items) < batch_size:
+            return
+        last = items[-1]
+        cursor = (last.created_at, last.id)
+
+
 async def _iterate_active_knowledge_entries(
     session: AsyncSession,
     business_id: UUID,
@@ -323,7 +397,7 @@ async def _iterate_active_knowledge_entries(
         cursor = (last.created_at, last.id)
 
 
-async def _load_page[RecordT: (CatalogItem, BusinessKnowledgeEntry)](
+async def _load_page[RecordT: (AppointmentType, CatalogItem, BusinessKnowledgeEntry)](
     session: AsyncSession,
     statement: Select[tuple[RecordT]],
     expected_type: type[RecordT],

@@ -56,7 +56,7 @@ const importOptions: Array<{
   {
     id: "store",
     title: "Store connection",
-    copy: "Coming soon",
+    copy: "Provider configuration required",
     icon: ShoppingBag,
   },
   {
@@ -469,10 +469,10 @@ export function ProductCatalogStep({
             <Plug />
           </div>
           <div>
-            <strong>Store connections are coming soon</strong>
+            <strong>Store provider configuration required</strong>
             <p>
-              Shopify and WooCommerce are not connected yet. Choose upload,
-              paste, manual entry, or skip this step.
+              Shopify and WooCommerce catalog connectors are not configured on
+              this platform. Choose upload, paste, manual entry, or skip this step.
             </p>
           </div>
         </div>

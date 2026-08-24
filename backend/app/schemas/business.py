@@ -1,5 +1,6 @@
 import re
 from typing import Any, Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -55,6 +56,11 @@ class BusinessOnboardingInput(BaseModel):
     timezone: str = Field(default="UTC", min_length=1, max_length=64)
     currency: str = Field(default="USD", min_length=3, max_length=3)
     locale: str = Field(default="en", min_length=2, max_length=16)
+    website_url: str | None = Field(default=None, max_length=2048)
+    location: str | None = Field(default=None, max_length=500)
+    description: str | None = Field(default=None, max_length=10_000)
+    brand_voice: str | None = Field(default=None, max_length=4_000)
+    avoid_keywords: list[str] = Field(default_factory=list, max_length=100)
     branding: BusinessBrandingInput | None = None
 
     model_config = ConfigDict(extra="forbid")
@@ -116,6 +122,60 @@ class BusinessOnboardingInput(BaseModel):
                 normalized_parts.append(part.lower())
         return "-".join(normalized_parts)
 
+    @field_validator("website_url", mode="before")
+    @classmethod
+    def validate_website_url(cls, value: Any) -> Any:
+        return _normalize_website_url(value)
+
+    @field_validator("location", "description", "brand_voice", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("avoid_keywords", mode="before")
+    @classmethod
+    def normalize_avoid_keywords(cls, value: Any) -> Any:
+        return _normalize_avoid_keywords(value)
+
+
+class BusinessProfileUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    timezone: str = Field(min_length=1, max_length=64)
+    currency: str = Field(min_length=3, max_length=3)
+    locale: str = Field(min_length=2, max_length=16)
+    website_url: str | None = Field(default=None, max_length=2048)
+    location: str | None = Field(default=None, max_length=500)
+    description: str | None = Field(default=None, max_length=10_000)
+    brand_voice: str | None = Field(default=None, max_length=4_000)
+    avoid_keywords: list[str] = Field(default_factory=list, max_length=100)
+
+    model_config = ConfigDict(extra="forbid")
+
+    normalize_name = field_validator("name", mode="before")(
+        BusinessOnboardingInput.normalize_name.__func__
+    )
+    validate_timezone = field_validator("timezone", mode="before")(
+        BusinessOnboardingInput.validate_timezone.__func__
+    )
+    normalize_currency = field_validator("currency", mode="before")(
+        BusinessOnboardingInput.normalize_currency.__func__
+    )
+    normalize_locale = field_validator("locale", mode="before")(
+        BusinessOnboardingInput.normalize_locale.__func__
+    )
+    validate_website_url = field_validator("website_url", mode="before")(
+        BusinessOnboardingInput.validate_website_url.__func__
+    )
+    normalize_optional_text = field_validator(
+        "location", "description", "brand_voice", mode="before"
+    )(BusinessOnboardingInput.normalize_optional_text.__func__)
+    normalize_avoid_keywords = field_validator("avoid_keywords", mode="before")(
+        BusinessOnboardingInput.normalize_avoid_keywords.__func__
+    )
+
 
 class BusinessSummary(BaseModel):
     id: UUID
@@ -126,6 +186,11 @@ class BusinessSummary(BaseModel):
     timezone: str
     currency: str
     locale: str
+    website_url: str | None
+    location: str | None
+    description: str | None
+    brand_voice: str | None
+    avoid_keywords: list[str]
     membership_role: str
     created_at: AwareDatetime
 
@@ -147,3 +212,37 @@ class BusinessOnboardingResponse(BaseModel):
     created: bool
 
     model_config = ConfigDict(extra="forbid")
+
+
+def _normalize_website_url(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    normalized = value.strip()
+    if not normalized:
+        return None
+    parsed = urlsplit(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Website must be an absolute HTTP or HTTPS URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Website URL must not contain credentials")
+    return normalized
+
+
+def _normalize_avoid_keywords(value: Any) -> Any:
+    if not isinstance(value, list):
+        return value
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            return value
+        keyword = item.strip()
+        if not keyword:
+            continue
+        if len(keyword) > 100:
+            raise ValueError("Each avoided word or phrase must be 100 characters or fewer")
+        key = keyword.casefold()
+        if key not in seen:
+            seen.add(key)
+            normalized.append(keyword)
+    return normalized

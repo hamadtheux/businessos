@@ -489,6 +489,7 @@ test("active business preference is accepted only from the backend list", () => 
 test("route decisions wait for bootstrap and send empty accounts to onboarding", () => {
   assert.equal(isApplicationBootstrapping("bootstrapping", false), true);
   assert.equal(isApplicationBootstrapping("authenticated", true), true);
+  assert.equal(isApplicationBootstrapping("recoverable_error", false), false);
   assert.equal(
     nextProtectedRoute({
       status: "authenticated",
@@ -518,6 +519,29 @@ test("route decisions wait for bootstrap and send empty accounts to onboarding",
       location: "/login",
     }),
     "/dashboard",
+  );
+  assert.equal(
+    nextProtectedRoute({
+      status: "recoverable_error",
+      businessesLoading: false,
+      businessesError: "",
+      businessCount: 0,
+      location: "/dashboard",
+    }),
+    null,
+  );
+});
+
+test("optional branding failure cannot become a global business-list failure", async () => {
+  const source = await readFile(
+    new URL("../business-context.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /Branding is optional presentation data/);
+  assert.doesNotMatch(
+    source,
+    /We couldn't load this business's branding/,
   );
 });
 
@@ -567,14 +591,21 @@ test("onboarding payload sends only supported server fields and brand colors", (
   });
 
   assert.deepEqual(Object.keys(payload).sort(), [
+    "avoid_keywords",
+    "brand_voice",
     "branding",
     "business_id",
     "business_type",
     "currency",
+    "description",
     "locale",
+    "location",
     "name",
     "timezone",
+    "website_url",
   ]);
+  assert.equal(payload.website_url, "https://example.test");
+  assert.equal(payload.location, "Private draft location");
   assert.deepEqual(payload.branding, {
     primary_color: "#5B3FBB",
     secondary_color: "#475B91",

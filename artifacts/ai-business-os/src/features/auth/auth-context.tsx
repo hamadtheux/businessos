@@ -16,12 +16,15 @@ import type { UserPublic } from "@/services/api-types";
 export type AuthStatus =
   | "bootstrapping"
   | "authenticated"
-  | "unauthenticated";
+  | "unauthenticated"
+  | "recoverable_error";
 
 type AuthContextValue = {
   user: UserPublic | null;
   status: AuthStatus;
   isLoading: boolean;
+  error: string;
+  retryBootstrap: () => void;
   login: (email: string, password: string) => Promise<void>;
   register: (name: string, email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
@@ -33,6 +36,8 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<UserPublic | null>(null);
   const [status, setStatus] = useState<AuthStatus>("bootstrapping");
+  const [error, setError] = useState("");
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
   const bootstrapComplete = useRef(false);
 
   useEffect(() => {
@@ -47,27 +52,49 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     });
 
-    void apiClient.bootstrap().finally(() => {
-      if (!active) return;
-      bootstrapComplete.current = true;
-      const snapshot = apiClient.getSessionSnapshot();
-      setUser(snapshot.user);
-      setStatus(
-        snapshot.authenticated ? "authenticated" : "unauthenticated",
-      );
-    });
+    void apiClient.bootstrap().then(
+      () => {
+        if (!active) return;
+        bootstrapComplete.current = true;
+        const snapshot = apiClient.getSessionSnapshot();
+        setUser(snapshot.user);
+        setError("");
+        setStatus(
+          snapshot.authenticated ? "authenticated" : "unauthenticated",
+        );
+      },
+      (reason: unknown) => {
+        if (!active) return;
+        bootstrapComplete.current = true;
+        setUser(null);
+        setError(
+          humanizeApiError(
+            reason,
+            "AI Business OS could not restore your session. Try again.",
+          ),
+        );
+        setStatus("recoverable_error");
+      },
+    );
 
     return () => {
       active = false;
       unsubscribe();
     };
-  }, []);
+  }, [bootstrapAttempt]);
 
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
       status,
       isLoading: status === "bootstrapping",
+      error,
+      retryBootstrap: () => {
+        bootstrapComplete.current = false;
+        setError("");
+        setStatus("bootstrapping");
+        setBootstrapAttempt((value) => value + 1);
+      },
       login: async (email, password) => {
         try {
           await apiClient.login({ email, password });
@@ -98,6 +125,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       logout: async () => {
         await apiClient.logout();
         setUser(null);
+        setError("");
         setStatus("unauthenticated");
       },
       reloadUser: async () => {
@@ -113,7 +141,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       },
     }),
-    [user, status],
+    [error, user, status],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

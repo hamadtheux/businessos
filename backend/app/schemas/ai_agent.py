@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.schemas.business_brain import BusinessBrainSourceType
 from app.schemas.business_memory import BusinessMemoryType
+from app.schemas.ai_action_payload import ActionPayloadType
 
 
 AIAgentRole = Literal[
@@ -227,6 +228,11 @@ class AIAgentProposedAction(BaseModel):
     risk_level: AIAgentRiskLevel = "medium"
 
     requires_approval: bool = True
+
+    # Provider output is only a candidate payload. The union prevents free-form
+    # dictionaries at the structured-output boundary; the registry still
+    # revalidates the action-type/payload pairing before execution.
+    action_payload: ActionPayloadType | None = None
 
     model_config = ConfigDict(
         extra="forbid",
