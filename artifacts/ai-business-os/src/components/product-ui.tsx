@@ -6,6 +6,28 @@ import type {
 import { X } from "lucide-react";
 import { cx, initials } from "@/lib/product-utils";
 
+export type ButtonVariant =
+  | "primary"
+  | "green"
+  | "secondary"
+  | "tertiary"
+  | "soft"
+  | "ghost"
+  | "danger"
+  | "destructive";
+
+export type BadgeTone =
+  | "success"
+  | "neutral"
+  | "warning"
+  | "danger"
+  | "error"
+  | "info"
+  | "green"
+  | "orange"
+  | "brown"
+  | "rose";
+
 export function Button({
   children,
   variant = "secondary",
@@ -13,7 +35,7 @@ export function Button({
   ...props
 }: {
   children: ReactNode;
-  variant?: string;
+  variant?: ButtonVariant;
   className?: string;
 } & ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
@@ -26,11 +48,13 @@ export function Button({
 export function Badge({
   children,
   tone = "neutral",
+  className,
 }: {
   children: ReactNode;
-  tone?: string;
+  tone?: BadgeTone;
+  className?: string;
 }) {
-  return <span className={`status ${tone}`}>{children}</span>;
+  return <span className={cx("status", tone, className)}>{children}</span>;
 }
 
 export function PageHeader({
@@ -89,6 +113,38 @@ export function SectionTitle({
   );
 }
 
+export function EmptyState({
+  icon,
+  title,
+  description,
+  action,
+  secondaryAction,
+  compact = false,
+  className,
+}: {
+  icon?: ReactNode;
+  title: string;
+  description?: string;
+  action?: ReactNode;
+  secondaryAction?: ReactNode;
+  compact?: boolean;
+  className?: string;
+}) {
+  return (
+    <div className={cx("empty", compact && "compact-empty", className)}>
+      {icon}
+      <h3>{title}</h3>
+      {description && <p>{description}</p>}
+      {(action || secondaryAction) && (
+        <div className="empty-actions">
+          {action}
+          {secondaryAction}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Avatar({ name, color = "" }: { name: string; color?: string }) {
   return <span className={cx("avatar", color)}>{initials(name)}</span>;
 }
@@ -133,4 +189,3 @@ export function Modal({
     </div>
   );
 }
-

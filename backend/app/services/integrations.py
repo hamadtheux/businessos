@@ -9,7 +9,7 @@ from typing import Mapping, Sequence
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +24,11 @@ from app.exceptions.integration import (
     IntegrationStateError,
     IntegrationValidationError,
     IntegrationWebhookVerificationError,
+)
+from app.exceptions.operations import (
+    OperationsConflictError,
+    OperationsPersistenceError,
+    OperationsValidationError,
 )
 from app.integrations.adapters import ConnectorAdapterRegistry, connector_adapters
 from app.integrations.action_adapters import connector_action_adapters
@@ -40,7 +45,6 @@ from app.models.appointment import Appointment
 from app.models.business_membership import BusinessMembership
 from app.services.billing import require_capacity, require_feature
 from app.models.conversation import Conversation, ConversationMessage
-from app.models.customer import Customer
 from app.models.integration import (
     IntegrationConnection,
     IntegrationEntityLink,
@@ -59,6 +63,7 @@ from app.schemas.integration import (
 from app.schemas.marketing import PerformanceCreate
 from app.services.automation_events import record_automation_event
 from app.services.background_jobs import enqueue_job
+from app.services.customer_identity import resolve_customer_identity
 from app.services.marketing import derive_metrics
 from app.services.operations import record_audit
 
@@ -997,8 +1002,10 @@ async def _record_inbound_message(
     customer_id = await _match_customer(
         session,
         business_id=connection.business_id,
+        display_name=_optional_text(payload.get("sender_display_name"), 160),
         email=_optional_text(payload.get("sender_email"), 320),
         phone=_optional_text(payload.get("sender_phone"), 32),
+        source=connection.connector_type,
     )
     conversation = await session.scalar(select(Conversation).where(
         Conversation.business_id == connection.business_id,
@@ -1065,24 +1072,48 @@ async def _match_customer(
     session: AsyncSession,
     *,
     business_id: UUID,
+    display_name: str | None,
     email: str | None,
     phone: str | None,
+    source: str,
 ) -> UUID | None:
-    conditions = []
-    if email:
-        conditions.append(func.lower(Customer.email) == email.casefold())
-    if phone:
-        phone_digits = "".join(character for character in phone if character.isdigit())
-        if len(phone_digits) >= 7:
-            conditions.append(func.regexp_replace(Customer.phone, "[^0-9]", "", "g") == phone_digits)
-    if not conditions:
+    """
+    Resolve a verified inbound sender through the canonical Customer Identity
+    Engine.
+
+    A deterministic email or phone identity may automatically create a
+    customer. Display name alone is never sufficient identity authority.
+
+    Ambiguous or invalid identities deliberately remain unlinked so the
+    inbound conversation is still recorded without guessing who the customer
+    is.
+    """
+    try:
+        resolution = await resolve_customer_identity(
+            session,
+            business_id=business_id,
+            display_name=display_name,
+            email=email,
+            phone=phone,
+            source=source,
+            create_if_missing=bool(email or phone),
+            actor_user_id=None,
+        )
+    except OperationsConflictError:
+        # Never guess between multiple possible customer identities.
+        # Preserve the inbound conversation as anonymous/unlinked.
         return None
-    matches = list((await session.scalars(
-        select(Customer.id)
-        .where(Customer.business_id == business_id, or_(*conditions))
-        .limit(2)
-    )).all())
-    return matches[0] if len(matches) == 1 else None
+    except OperationsValidationError:
+        # A malformed provider identity must not cause a legitimate inbound
+        # message to disappear. Record the conversation without linking it.
+        return None
+    except OperationsPersistenceError:
+        raise IntegrationPersistenceError(
+            "customer_identity_unavailable"
+        ) from None
+
+    customer = resolution.customer
+    return customer.id if customer is not None else None
 
 
 def _record_health_change(

@@ -48,11 +48,16 @@ function optionalPrice(value: string) {
 export function validateCatalogItemDraft(
   draft: CatalogItemDraft,
 ): string | null {
-  if (!draft.name.trim()) return "Add a name to continue.";
+  if (!draft.name.trim()) {
+    return "Add a name to continue.";
+  }
+
   const price = draft.price.trim();
+
   if (price && !/^\d+(?:\.\d{1,2})?$/.test(price)) {
     return "Use a positive price with no more than two decimal places.";
   }
+
   return null;
 }
 
@@ -74,16 +79,36 @@ export function catalogUpdateFromDraft(
   draft: CatalogItemDraft,
 ): CatalogItemUpdate {
   const update: CatalogItemUpdate = {};
+
   const name = draft.name.trim();
   const description = optionalText(draft.description);
   const sku = optionalSku(draft.sku);
   const price = optionalPrice(draft.price);
-  if (draft.itemType !== item.item_type) update.item_type = draft.itemType;
-  if (name !== item.name) update.name = name;
-  if (description !== item.description) update.description = description;
-  if (sku !== item.sku) update.sku = sku;
-  if (price !== item.price) update.price = price;
-  if (draft.status !== item.status) update.status = draft.status;
+
+  if (draft.itemType !== item.item_type) {
+    update.item_type = draft.itemType;
+  }
+
+  if (name !== item.name) {
+    update.name = name;
+  }
+
+  if (description !== item.description) {
+    update.description = description;
+  }
+
+  if (sku !== item.sku) {
+    update.sku = sku;
+  }
+
+  if (price !== item.price) {
+    update.price = price;
+  }
+
+  if (draft.status !== item.status) {
+    update.status = draft.status;
+  }
+
   return update;
 }
 
@@ -104,9 +129,16 @@ export function formatCatalogPrice(
   currency: string,
   locale: string,
 ) {
-  if (price === null) return "No price";
+  if (price === null) {
+    return "No price";
+  }
+
   const numericPrice = Number(price);
-  if (!Number.isFinite(numericPrice)) return `${currency} ${price}`;
+
+  if (!Number.isFinite(numericPrice)) {
+    return `${currency} ${price}`;
+  }
+
   try {
     return new Intl.NumberFormat(locale || "en", {
       style: "currency",
@@ -121,12 +153,15 @@ export function formatCatalogPrice(
 
 export function catalogFileValidationMessage(file: File): string | null {
   const extension = file.name.split(".").pop()?.toLowerCase();
+
   if (extension !== "csv" && extension !== "xlsx") {
     return "Choose a .csv or .xlsx file. Legacy .xls files are not supported.";
   }
+
   if (file.size > CATALOG_IMPORT_MAX_BYTES) {
     return "Choose a file no larger than 10 MB.";
   }
+
   return null;
 }
 
@@ -141,17 +176,147 @@ function csvCell(value: string) {
   return `"${value.replaceAll('"', '""')}"`;
 }
 
+/**
+ * Detects the optional structured paste header:
+ *
+ * Name | Description | Price
+ *
+ * Header matching is intentionally case-insensitive.
+ */
+function isPasteHeader(line: string) {
+  const fields = line
+    .split("|")
+    .map((field) => field.trim().toLowerCase());
+
+  if (fields.length !== 3) {
+    return false;
+  }
+
+  const [name, description, price] = fields;
+
+  return (
+    (name === "name" || name === "product name" || name === "item name") &&
+    description === "description" &&
+    price === "price"
+  );
+}
+
+/**
+ * CatalogItem.price is represented as decimal text.
+ *
+ * PostgreSQL NUMERIC(14, 2) allows at most twelve integer digits and
+ * two fractional digits, so pasted values are validated before we generate
+ * the intermediate CSV.
+ */
+function normalizePastedPrice(
+  value: string,
+  lineNumber: number,
+): string | null {
+  const normalized = value.trim();
+
+  if (!normalized) {
+    return null;
+  }
+
+  if (!/^\d{1,12}(?:\.\d{1,2})?$/.test(normalized)) {
+    throw new Error(
+      `Line ${lineNumber}: price must be a number with up to 12 digits before the decimal and up to 2 decimal places.`,
+    );
+  }
+
+  return normalized;
+}
+
+/**
+ * Supports two safe paste formats.
+ *
+ * Simple:
+ * Premium Farm Eggs
+ *
+ * Structured:
+ * Premium Farm Eggs | 12-pack fresh premium eggs | 8.99
+ *
+ * We deliberately do not try to guess arbitrary column structures.
+ * CSV/XLSX upload remains the correct path for complex datasets.
+ */
+function parsePastedCatalogItem(
+  line: string,
+  itemType: CatalogItemType,
+  lineNumber: number,
+): CatalogItemCreate {
+  if (!line.includes("|")) {
+    const name = line.trim();
+
+    if (!name) {
+      throw new Error(`Line ${lineNumber}: product name is required.`);
+    }
+
+    return {
+      item_type: itemType,
+      name,
+    };
+  }
+
+  const fields = line
+    .split("|")
+    .map((field) => field.trim());
+
+  if (fields.length !== 3) {
+    throw new Error(
+      `Line ${lineNumber}: use the format "Name | Description | Price".`,
+    );
+  }
+
+  const [name, description, price] = fields;
+
+  if (!name) {
+    throw new Error(`Line ${lineNumber}: product name is required.`);
+  }
+
+  return {
+    item_type: itemType,
+    name,
+    description: description || null,
+    price: normalizePastedPrice(price, lineNumber),
+  };
+}
+
 export function createPasteCatalogFile(
   value: string,
   itemType: CatalogItemType,
 ) {
-  const lines = pasteListLines(value);
-  if (!lines.length) throw new Error("Paste at least one item name.");
+  const pastedLines = pasteListLines(value);
+
+  if (!pastedLines.length) {
+    throw new Error("Paste at least one item name.");
+  }
+
+  const hasHeader = isPasteHeader(pastedLines[0]);
+
+  const lines = hasHeader
+    ? pastedLines.slice(1)
+    : pastedLines;
+
+  if (!lines.length) {
+    throw new Error("Paste at least one item below the header.");
+  }
+
   if (lines.length > CATALOG_IMPORT_MAX_ROWS) {
     throw new Error("Paste no more than 2,000 items at a time.");
   }
+
+  const startingLineNumber = hasHeader ? 2 : 1;
+
+  const items = lines.map((line, index) =>
+    parsePastedCatalogItem(
+      line,
+      itemType,
+      startingLineNumber + index,
+    ),
+  );
+
   return createCatalogItemsFile(
-    lines.map((name) => ({ item_type: itemType, name })),
+    items,
     "pasted-catalog.csv",
   );
 }
@@ -160,11 +325,16 @@ export function createCatalogItemsFile(
   items: CatalogItemCreate[],
   filename = "catalog-items.csv",
 ) {
-  if (!items.length) throw new Error("Add at least one catalog item.");
+  if (!items.length) {
+    throw new Error("Add at least one catalog item.");
+  }
+
   if (items.length > CATALOG_IMPORT_MAX_ROWS) {
     throw new Error("Add no more than 2,000 items at a time.");
   }
+
   const header = "name,item_type,description,sku,price,status";
+
   const rows = items.map((item) =>
     [
       item.name,
@@ -177,15 +347,22 @@ export function createCatalogItemsFile(
       .map((value) => csvCell(value))
       .join(","),
   );
-  return new File([[header, ...rows].join("\n"), "\n"], filename, {
-    type: "text/csv",
-  });
+
+  return new File(
+    [[header, ...rows].join("\n"), "\n"],
+    filename,
+    {
+      type: "text/csv",
+    },
+  );
 }
 
 export function canImportCatalogPreview(
   preview: CatalogImportPreviewResponse | null,
 ) {
   return Boolean(
-    preview && preview.valid_rows > 0 && preview.invalid_rows === 0,
+    preview &&
+      preview.valid_rows > 0 &&
+      preview.invalid_rows === 0,
   );
 }

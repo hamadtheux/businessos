@@ -26,6 +26,7 @@ from app.integrations.contracts import (  # noqa: E402
 )
 from app.integrations.credentials import CredentialMaterial, InMemoryIntegrationCredentialStore  # noqa: E402
 from app.models.conversation import Conversation, ConversationMessage  # noqa: E402
+from app.models.customer import Customer  # noqa: E402
 from app.models.integration import IntegrationConnection, IntegrationEntityLink, IntegrationOAuthState, IntegrationWebhookEvent  # noqa: E402
 from app.models.marketing import MarketingPerformance  # noqa: E402
 from app.schemas.integration import ResourceSelectionRequest  # noqa: E402
@@ -301,6 +302,211 @@ class IntegrationWebhookServiceTests(unittest.IsolatedAsyncioTestCase):
             await service._record_inbound_message(session, connection, event, NOW)  # type: ignore[arg-type]
         self.assertFalse(any(isinstance(item, ConversationMessage) for item in session.added))
 
+    async def test_verified_whatsapp_sender_auto_creates_and_links_customer(self) -> None:
+        connection = _connection(connector_type="whatsapp_business")
+        event = IntegrationWebhookEvent(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            integration_connection_id=connection.id,
+            connector_type="whatsapp_business",
+            external_event_id="whatsapp-customer-event",
+            event_type="message_received",
+            status="received",
+            normalized_payload={
+                "external_conversation_reference": "wa-thread-customer-1",
+                "external_message_reference": "wa-message-customer-1",
+                "sender_display_name": "QA WhatsApp Customer",
+                "sender_phone": "+92 300 1234567",
+                "content": "I want to buy eggs.",
+            },
+            received_at=NOW,
+            processed_at=None,
+            failure_code=None,
+            created_at=NOW,
+        )
+
+        session = _InboundIdentitySession(
+            scalar_results=[None, None],
+            identity_matches=[],
+        )
+
+        await service._record_inbound_message(
+            session,  # type: ignore[arg-type]
+            connection,
+            event,
+            NOW,
+        )
+
+        customer = next(
+            item for item in session.added
+            if isinstance(item, Customer)
+        )
+        conversation = next(
+            item for item in session.added
+            if isinstance(item, Conversation)
+        )
+        message = next(
+            item for item in session.added
+            if isinstance(item, ConversationMessage)
+        )
+
+        self.assertEqual(customer.business_id, BUSINESS_ID)
+        self.assertEqual(customer.display_name, "QA WhatsApp Customer")
+        self.assertEqual(customer.phone, "+92 300 1234567")
+        self.assertEqual(customer.source, "whatsapp_business")
+        self.assertEqual(conversation.customer_id, customer.id)
+        self.assertEqual(message.conversation_id, conversation.id)
+
+    async def test_verified_gmail_sender_auto_creates_and_links_customer(self) -> None:
+        connection = _connection(connector_type="gmail")
+        event = IntegrationWebhookEvent(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            integration_connection_id=connection.id,
+            connector_type="gmail",
+            external_event_id="gmail-customer-event",
+            event_type="email_received",
+            status="received",
+            normalized_payload={
+                "external_conversation_reference": "gmail-thread-customer-1",
+                "external_message_reference": "gmail-message-customer-1",
+                "sender_display_name": "QA Email Customer",
+                "sender_email": "QA.Customer@Example.TEST",
+                "content": "Please send me your product list.",
+            },
+            received_at=NOW,
+            processed_at=None,
+            failure_code=None,
+            created_at=NOW,
+        )
+
+        session = _InboundIdentitySession(
+            scalar_results=[None, None],
+            identity_matches=[],
+        )
+
+        await service._record_inbound_message(
+            session,  # type: ignore[arg-type]
+            connection,
+            event,
+            NOW,
+        )
+
+        customer = next(
+            item for item in session.added
+            if isinstance(item, Customer)
+        )
+        conversation = next(
+            item for item in session.added
+            if isinstance(item, Conversation)
+        )
+
+        self.assertEqual(customer.business_id, BUSINESS_ID)
+        self.assertEqual(customer.display_name, "QA Email Customer")
+        self.assertEqual(customer.email, "qa.customer@example.test")
+        self.assertEqual(customer.source, "gmail")
+        self.assertEqual(conversation.customer_id, customer.id)
+
+    async def test_social_display_name_without_identity_remains_anonymous(self) -> None:
+        connection = _connection(connector_type="instagram")
+        event = IntegrationWebhookEvent(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            integration_connection_id=connection.id,
+            connector_type="instagram",
+            external_event_id="instagram-anonymous-event",
+            event_type="message_received",
+            status="received",
+            normalized_payload={
+                "external_conversation_reference": "ig-thread-1",
+                "external_message_reference": "ig-message-1",
+                "sender_display_name": "Ali",
+                "content": "What products do you have?",
+            },
+            received_at=NOW,
+            processed_at=None,
+            failure_code=None,
+            created_at=NOW,
+        )
+
+        session = _InboundIdentitySession(
+            scalar_results=[None, None],
+            identity_matches=[],
+        )
+
+        await service._record_inbound_message(
+            session,  # type: ignore[arg-type]
+            connection,
+            event,
+            NOW,
+        )
+
+        conversation = next(
+            item for item in session.added
+            if isinstance(item, Conversation)
+        )
+
+        self.assertIsNone(conversation.customer_id)
+        self.assertFalse(
+            any(isinstance(item, Customer) for item in session.added)
+        )
+
+    async def test_ambiguous_verified_sender_is_not_guessed(self) -> None:
+        connection = _connection(connector_type="whatsapp_business")
+
+        email_customer = _identity_customer(
+            email="qa@example.test",
+            phone=None,
+        )
+        phone_customer = _identity_customer(
+            email=None,
+            phone="+92 300 1234567",
+        )
+
+        event = IntegrationWebhookEvent(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            integration_connection_id=connection.id,
+            connector_type="whatsapp_business",
+            external_event_id="ambiguous-customer-event",
+            event_type="message_received",
+            status="received",
+            normalized_payload={
+                "external_conversation_reference": "ambiguous-thread",
+                "external_message_reference": "ambiguous-message",
+                "sender_display_name": "QA Customer",
+                "sender_email": "qa@example.test",
+                "sender_phone": "+92 300 1234567",
+                "content": "Hello",
+            },
+            received_at=NOW,
+            processed_at=None,
+            failure_code=None,
+            created_at=NOW,
+        )
+
+        session = _InboundIdentitySession(
+            scalar_results=[None, None],
+            identity_matches=[email_customer, phone_customer],
+        )
+
+        await service._record_inbound_message(
+            session,  # type: ignore[arg-type]
+            connection,
+            event,
+            NOW,
+        )
+
+        conversation = next(
+            item for item in session.added
+            if isinstance(item, Conversation)
+        )
+
+        self.assertIsNone(conversation.customer_id)
+        self.assertFalse(
+            any(isinstance(item, Customer) for item in session.added)
+        )
+
     async def test_worker_processing_marks_verified_event_and_emits_automation_event(self) -> None:
         connection = _connection(connector_type="gmail")
         event = IntegrationWebhookEvent(
@@ -337,6 +543,54 @@ class _Session:
         for value in self.added:
             if getattr(value, "id", None) is None:
                 value.id = uuid4()  # type: ignore[attr-defined]
+
+
+class _ScalarCollection:
+    def __init__(self, values: list[Customer]) -> None:
+        self.values = values
+
+    def all(self) -> list[Customer]:
+        return self.values
+
+
+class _InboundIdentitySession(_Session):
+    def __init__(
+        self,
+        *,
+        scalar_results: list[object] | None = None,
+        identity_matches: list[Customer] | None = None,
+    ) -> None:
+        super().__init__(scalar_results)
+        self.identity_matches = list(identity_matches or [])
+        self.identity_statements: list[object] = []
+
+    async def scalars(self, statement):
+        self.identity_statements.append(statement)
+        return _ScalarCollection(self.identity_matches)
+
+
+def _identity_customer(
+    *,
+    email: str | None,
+    phone: str | None,
+) -> Customer:
+    return Customer(
+        id=uuid4(),
+        business_id=BUSINESS_ID,
+        display_name="Existing QA Customer",
+        first_name=None,
+        last_name=None,
+        email=email,
+        phone=phone,
+        status="active",
+        source="manual",
+        tags=[],
+        company=None,
+        notes=None,
+        active=True,
+        created_at=NOW,
+        updated_at=NOW,
+    )
 
 
 class _Verifier:

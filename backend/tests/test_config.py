@@ -20,6 +20,12 @@ class SettingsValidationTests(unittest.TestCase):
 
         self.assertEqual(config.environment, "development")
 
+    def test_development_widget_urls_share_the_frontend_origin(self) -> None:
+        config = self._settings()
+
+        self.assertEqual(str(config.widget_loader_url), "http://localhost:5174/widget-loader.js")
+        self.assertEqual(str(config.widget_app_url), "http://localhost:5174/widget.html")
+
     def test_missing_database_url_fails(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(ValidationError):

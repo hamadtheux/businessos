@@ -140,6 +140,30 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(plan, "reasoning"))
         self.assertIn("trusted Business Brain", runtime.await_args.args[2])
 
+    async def test_plan_generation_bounds_and_deduplicates_ai_measurement_goals(self) -> None:
+        business = Business(id=BUSINESS_ID, name="Acme", slug="acme", business_type="retail", status="active", timezone="UTC", currency="USD", locale="en", created_at=NOW, updated_at=NOW)
+        session = _ScalarSession([business])
+        long_goal = "Measure qualified conversions against the campaign objective and report only observed results. " * 3
+        output = SimpleNamespace(
+            summary="Grounded positioning",
+            recommendations=[f"Strategy {index}" for index in range(8)] + [long_goal, long_goal],
+        )
+        with patch("app.services.marketing._run_cmo", new=AsyncMock(return_value=output)):
+            plan = await generate_plan(
+                session,
+                business_id=BUSINESS_ID,
+                actor_user_id=USER_ID,
+                data=PlanGenerateRequest(
+                    goal="Summer launch",
+                    target_audience="Existing customers",
+                    channels=["instagram"],
+                    budget_guidance="2000",
+                ),
+                provider=SimpleNamespace(),
+            )
+        self.assertEqual(len(plan.measurement_goals), 1)
+        self.assertLessEqual(len(plan.measurement_goals[0]), 160)
+
     async def test_cmo_generation_uses_existing_runtime_with_trusted_context_flags(self) -> None:
         output = SimpleNamespace(summary="Conclusion", recommendations=[], proposed_actions=[SimpleNamespace(action_type="launch_meta_campaign")])
         with patch("app.services.marketing.execute_ai_agent", new=AsyncMock(return_value=SimpleNamespace(output=output))) as runtime:
@@ -213,6 +237,11 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(opportunity, Opportunity)
         self.assertEqual(trend.status, "acted_on")
         self.assertEqual(trend.opportunity_id, opportunity.id)
+        self.assertEqual(opportunity.source_entity_type, "marketing_trend")
+        self.assertEqual(opportunity.source_entity_id, trend.id)
+        self.assertEqual(opportunity.confidence, trend.confidence)
+        self.assertEqual(opportunity.suggested_action, "generate_campaign_proposal")
+        self.assertEqual(opportunity.provenance[0]["source_id"], str(trend.id))
 
     async def test_marketing_learning_requires_sufficient_comparison_and_avoids_causal_claims(self) -> None:
         analytics = SimpleNamespace(impressions=5000, conversions=25, channels=[SimpleNamespace(label="email", roas=Decimal("3"), conversions=15, clicks=100), SimpleNamespace(label="instagram", roas=Decimal("2"), conversions=10, clicks=200)])

@@ -547,6 +547,25 @@ def _audit(session: AsyncSession, workflow: AutomationWorkflow, actor_user_id: U
     )
 
 
+def _audit_run(
+    session: AsyncSession,
+    run: AutomationWorkflowRun,
+    actor_user_id: UUID | None,
+    event: str,
+    summary: str,
+) -> None:
+    record_audit(
+        session,
+        business_id=run.business_id,
+        actor_user_id=actor_user_id,
+        event_type=event,
+        entity_type="automation_workflow_run",
+        entity_id=run.id,
+        summary=summary,
+        after_value=f"status={run.status}",
+    )
+
+
 def _columns(value: Any) -> dict[str, Any]:
     return {column.name: getattr(value, column.name) for column in value.__table__.columns}
 
@@ -633,7 +652,39 @@ async def list_workflow_runs(
         .where(*where).order_by(AutomationWorkflowRun.created_at.desc(), AutomationWorkflowRun.id.desc())
         .offset((page - 1) * page_size).limit(page_size)
     )).all()
-    return [{**_columns(run), "workflow_name": name, "version": version} for run, name, version in rows], total
+    return [
+        _workflow_run_response(run, workflow_name=name, version=version)
+        for run, name, version in rows
+    ], total
+
+
+def _workflow_run_response(
+    run: AutomationWorkflowRun,
+    *,
+    workflow_name: str,
+    version: int,
+) -> dict[str, Any]:
+    """Materialize only the fields in the public WorkflowRunResponse contract."""
+    return {
+        "id": run.id,
+        "business_id": run.business_id,
+        "workflow_id": run.workflow_id,
+        "workflow_version_id": run.workflow_version_id,
+        "trigger_event_id": run.trigger_event_id,
+        "trigger_type": run.trigger_type,
+        "status": run.status,
+        "context_payload": run.context_payload,
+        "current_node_key": run.current_node_key,
+        "waiting_reason": run.waiting_reason,
+        "started_at": run.started_at,
+        "completed_at": run.completed_at,
+        "failure_code": run.failure_code,
+        "requested_by_user_id": run.requested_by_user_id,
+        "created_at": run.created_at,
+        "updated_at": run.updated_at,
+        "workflow_name": workflow_name,
+        "version": version,
+    }
 
 
 async def list_node_runs(
@@ -651,7 +702,35 @@ async def list_node_runs(
         .where(*where).order_by(AutomationNodeRun.created_at, AutomationNodeRun.id)
         .offset((page - 1) * page_size).limit(page_size)
     )).all()
-    return [{**_columns(item), "node_name": name, "node_type": node_type} for item, name, node_type in rows], total
+    return [
+        _node_run_response(item, name=name, node_type=node_type)
+        for item, name, node_type in rows
+    ], total
+
+
+def _node_run_response(
+    item: AutomationNodeRun,
+    *,
+    name: str,
+    node_type: str,
+) -> dict[str, Any]:
+    """Materialize only the fields in the public NodeRunResponse contract."""
+    return {
+        "id": item.id,
+        "workflow_run_id": item.workflow_run_id,
+        "node_key": item.node_key,
+        "status": item.status,
+        "attempt": item.attempt,
+        "started_at": item.started_at,
+        "completed_at": item.completed_at,
+        "branch_outcome": item.branch_outcome,
+        "result_summary": item.result_summary,
+        "failure_code": item.failure_code,
+        "resume_at": item.resume_at,
+        "action_id": item.action_id,
+        "node_name": name,
+        "node_type": node_type,
+    }
 
 
 async def cancel_workflow_run(
@@ -755,6 +834,13 @@ async def advance_workflow_run(
             return run
         if node.node_type == "end":
             run.status, run.completed_at, run.current_node_key = "succeeded", instant, node.node_key
+            _audit_run(
+                session,
+                run,
+                actor_user_id,
+                "automation.workflow_run_succeeded",
+                "Workflow run completed successfully.",
+            )
             await _flush(session)
             return run
         run.current_node_key = next_node_key(node, edges, outcome=node_run.branch_outcome)
@@ -923,6 +1009,13 @@ async def _resume_waiting_node(
 
 async def _fail_run(session: AsyncSession, run: AutomationWorkflowRun, code: str, actor_user_id: UUID | None) -> AutomationWorkflowRun:
     run.status, run.failure_code, run.completed_at, run.waiting_reason = "failed", code[:64], datetime.now(UTC), None
+    _audit_run(
+        session,
+        run,
+        actor_user_id,
+        "automation.workflow_run_failed",
+        f"Workflow run stopped with safe failure code: {run.failure_code}.",
+    )
     await _workflow_notification(session, run, "Workflow failed", f"Workflow stopped with safe failure code: {run.failure_code}.", "high")
     await _flush(session)
     return run

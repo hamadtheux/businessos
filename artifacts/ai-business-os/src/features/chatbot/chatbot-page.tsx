@@ -25,6 +25,7 @@ import {
   chatbotApi,
   type ChatbotConfig,
   type ChatbotConfigUpdate,
+  type ChatbotDeploymentTarget,
   type PublicChatbotCapability,
 } from "@/services/chatbot";
 
@@ -74,6 +75,22 @@ function draftFromConfig(value: ChatbotConfig): ChatbotConfigUpdate {
     default_locale: value.default_locale,
     border_radius: value.border_radius,
   };
+}
+
+function deploymentState(target: ChatbotDeploymentTarget) {
+  if (target.state === "installed" || target.state === "connected") {
+    return { label: "Connected", tone: "success" as const };
+  }
+  if (target.state === "installation_supported") {
+    return { label: "Ready to install", tone: "info" as const };
+  }
+  if (target.state === "available") {
+    return { label: target.automatic_install ? "Connect" : "Manual installation", tone: "neutral" as const };
+  }
+  if (target.state === "connection_required") {
+    return { label: "Provider configuration required", tone: "neutral" as const };
+  }
+  return { label: "Manual installation", tone: "neutral" as const };
 }
 
 export function ChatbotPage() {
@@ -174,29 +191,33 @@ export function ChatbotPage() {
       <PageHeader
         eyebrow="Customer-facing AI"
         title="Website Chatbot"
-        subtitle="Choose a no-code deployment path, then configure one secure, branded assistant."
+        subtitle="Configure your assistant, preview the experience, then choose how to publish it."
         action={<Button variant="primary" onClick={() => save.mutate()} disabled={save.isPending}><Save />{save.isPending ? "Saving…" : "Save changes"}</Button>}
       />
 
       <div className="chatbot-status-strip">
-        <div><span className={`status-dot ${loadedConfig.lifecycle_status === "live" ? "is-live" : ""}`} /><strong>{loadedConfig.lifecycle_status.replaceAll("_", " ")}</strong><span>{loadedConfig.ai_runtime_status === "ready" ? "Hosted chat can answer from the safe Business Brain context." : "AI provider configuration required before AI answers can run."}</span></div>
-        <Badge tone={loadedConfig.lifecycle_status === "live" ? "success" : loadedConfig.lifecycle_status === "needs_ai_provider" ? "warning" : "neutral"}>{loadedConfig.ai_runtime_status === "ready" ? "AI runtime ready" : "Needs AI provider"}</Badge>
+        <div className="chatbot-status-primary">
+          <span className={`status-dot ${loadedConfig.lifecycle_status === "live" ? "is-live" : ""}`} />
+          <div>
+            <strong>Assistant {loadedConfig.lifecycle_status.replaceAll("_", " ")}</strong>
+            <span>{loadedConfig.enabled ? "Available to published visitor experiences" : "Visitor access is currently disabled"}</span>
+          </div>
+        </div>
+        <div className="chatbot-runtime-status">
+          <span>AI runtime</span>
+          <Badge tone={loadedConfig.ai_runtime_status === "ready" ? "success" : "warning"}>{loadedConfig.ai_runtime_status === "ready" ? "Ready" : "Configuration required"}</Badge>
+        </div>
       </div>
 
       {loadedConfig.ai_runtime_status === "configuration_required" && <div className="ai-banner"><AlertCircle />AI provider configuration required. Hosted deployment, assistant settings, and the safe embed remain available; visitor AI replies stay disabled until a server provider is configured.</div>}
 
-      <section className="card chatbot-deployment-card">
-        <div className="chatbot-section-head"><div><div className="eyebrow">Deployment</div><h3>Where is your website built?</h3><p>Automatic installation is shown only when a real authenticated provider exists.</p></div><Globe2 /></div>
-        {deployments.isError ? <p className="form-error">{humanizeApiError(deployments.error, "Deployment options could not be loaded.")}</p> : deployments.isLoading ? <p className="subtle">Loading truthful deployment options…</p> : <>
-          {deployments.data?.targets.filter((target) => target.target_type === "hosted").map((target) => { const hostedUrl = safeHttpUrl(target.hosted_url); const aiReady = deployments.data.ai_runtime_status === "ready"; return <div className="recommendation-strip" key={target.deployment_target_key ?? target.target_type}><Link2 /><div className="row-main"><div className="eyebrow">Recommended zero-code option</div><strong>Use hosted AI assistant</strong><p>{target.state === "installed" ? aiReady ? "Your secure, shareable hosted assistant is live." : "Hosted page installed. AI provider configuration is still required for replies." : "Create a platform-hosted chat page without changing website code or connecting a CMS."}</p>{hostedUrl && <a href={hostedUrl} target="_blank" rel="noreferrer">{hostedUrl} <ExternalLink /></a>}</div><div className="toolbar">{hostedUrl && <Button onClick={() => void navigator.clipboard.writeText(hostedUrl)}><Clipboard /> Copy link</Button>}<Button variant="primary" disabled={installHosted.isPending || target.state === "installed"} onClick={() => installHosted.mutate()}>{target.state === "installed" ? <Check /> : <Sparkles />}{target.state === "installed" ? aiReady ? "Live" : "Hosted installed" : installHosted.isPending ? "Installing…" : "Install hosted chat"}</Button></div></div>; })}
-          <div className="chatbot-section-head section-gap"><div><h3>Guided platform setup</h3><p>Connect a supported website provider to enable automatic installation. Without one, use the safe guided or advanced embed path.</p></div></div>
-          <div className="social-channel-strip">{deployments.data?.targets.filter((target) => !["hosted", "manual_embed"].includes(target.target_type)).map((target) => <Card className="social-channel" key={target.target_type}><Globe2 /><div className="row-main"><strong>{target.display_name}</strong><span>{target.instructions[0] || "No automatic installer is available."}</span></div><Badge tone={target.state === "installed" ? "success" : target.state === "unsupported" ? "neutral" : "warning"}>{target.state.replaceAll("_", " ")}</Badge></Card>)}</div>
-          <details className="section-gap"><summary><strong>Advanced · Manual installation</strong></summary><p className="subtle">Use the raw HTML snippet only when a hosted or guided method does not fit.</p><pre><code>{deployments.data?.advanced_embed_snippet || loadedConfig.embed_snippet}</code></pre><div className="embed-actions"><Button onClick={() => void navigator.clipboard.writeText(deployments.data?.advanced_embed_snippet || loadedConfig.embed_snippet).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1800); })}>{copied ? <Check /> : <Clipboard />}{copied ? "Copied" : "Copy advanced snippet"}</Button><Button onClick={() => rotate.mutate()} disabled={rotate.isPending}><RotateCcw />Rotate ID</Button></div><p className="safe-note"><ShieldCheck />The snippet contains an opaque public widget ID—never a business ID, API key, or employee session.</p></details>
-        </>}
-      </section>
-
-      <div className="chatbot-grid">
-        <section className="card chatbot-settings-card">
+      <section className="chatbot-journey-step">
+        <div className="chatbot-step-heading">
+          <span>1</span>
+          <div><h2>Assistant</h2><p>Set the public identity and see changes before they are published.</p></div>
+        </div>
+        <div className="chatbot-grid chatbot-assistant-grid">
+          <section className="card chatbot-settings-card">
           <div className="chatbot-section-head"><div><h3>Assistant identity</h3><p>Brand-safe public presentation and conversation tone.</p></div><label className="toggle-line"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} /><span>Enable chatbot</span></label></div>
           <div className="form-grid">
             <label className="field"><span>Chatbot name</span><input value={draft.display_name} maxLength={80} onChange={(event) => setDraft({ ...draft, display_name: event.target.value })} /></label>
@@ -208,32 +229,89 @@ export function ChatbotPage() {
             <label className="field"><span>Position</span><select value={draft.position} onChange={(event) => setDraft({ ...draft, position: event.target.value as ChatbotConfigUpdate["position"] })}><option value="bottom_right">Bottom right</option><option value="bottom_left">Bottom left</option></select></label>
             <label className="field"><span>Launcher</span><select value={draft.launcher_style} onChange={(event) => setDraft({ ...draft, launcher_style: event.target.value as ChatbotConfigUpdate["launcher_style"] })}><option value="bubble">Chat bubble</option><option value="pill">Message pill</option></select></label>
           </div>
+          </section>
+          <WidgetPreview config={{ ...loadedConfig, ...draft }} />
+        </div>
 
-          <div className="chatbot-section-head section-gap"><div><h3>Public capabilities</h3><p>Server-owned allowlist. The visitor cannot add capabilities through a prompt.</p></div><ShieldCheck /></div>
-          <div className="capability-list">
-            {capabilities.filter((item) => !item.scheduling || schedulingEnabled).map((item) => {
-              const available = loadedConfig.available_capabilities.includes(item.id);
-              const checked = available && draft.allowed_capabilities.includes(item.id);
-              return <label className={`capability-row ${available ? "" : "disabled"}`} key={item.id}><input type="checkbox" checked={checked} disabled={!available} onChange={(event) => toggleCapability(item.id, event.target.checked)} /><span><strong>{item.label}</strong><small>{item.description}</small></span></label>;
-            })}
-          </div>
-
-          <div className="chatbot-section-head section-gap"><div><h3>Standard embed domains</h3><p>Required only for website embeds. Hosted chat does not need a CMS connection or allowed hostname. Use exact hostnames—no URLs, paths, ports, or wildcards.</p></div><Globe2 /></div>
-          <label className="field"><span>Website domains</span><textarea value={domains} rows={4} placeholder={"example.com\nwww.example.com"} onChange={(event) => setDomains(event.target.value)} /></label>
-
-          <div className="chatbot-section-head section-gap"><div><h3>Privacy notice</h3><p>Provide your own reviewed copy. This setting does not claim legal compliance.</p></div></div>
-          <div className="form-grid">
-            <label className="field full"><span>Privacy policy URL</span><input type="url" value={draft.privacy_policy_url ?? ""} placeholder="https://example.com/privacy" onChange={(event) => setDraft({ ...draft, privacy_policy_url: event.target.value || null })} /></label>
-            <label className="field full"><span>Lead consent text</span><textarea value={draft.consent_text ?? ""} rows={3} maxLength={1000} onChange={(event) => setDraft({ ...draft, consent_text: event.target.value || null })} /></label>
-            <label className="toggle-line full"><input type="checkbox" checked={draft.require_lead_consent} onChange={(event) => setDraft({ ...draft, require_lead_consent: event.target.checked })} /><span>Require explicit consent before lead capture or booking</span></label>
+        <section className="card chatbot-safety-card">
+          <div className="chatbot-section-head"><div><h3>Behavior & safety</h3><p>Control the server-owned allowlist, website domains, and visitor consent copy.</p></div><ShieldCheck /></div>
+          <div className="chatbot-safety-grid">
+            <div>
+              <div className="chatbot-subheading"><strong>Public capabilities</strong><span>Visitors cannot add capabilities through a prompt.</span></div>
+              <div className="capability-list">
+                {capabilities.filter((item) => !item.scheduling || schedulingEnabled).map((item) => {
+                  const available = loadedConfig.available_capabilities.includes(item.id);
+                  const checked = available && draft.allowed_capabilities.includes(item.id);
+                  return <label className={`capability-row ${available ? "" : "disabled"}`} key={item.id}><input type="checkbox" checked={checked} disabled={!available} onChange={(event) => toggleCapability(item.id, event.target.checked)} /><span><strong>{item.label}</strong><small>{item.description}</small></span></label>;
+                })}
+              </div>
+            </div>
+            <div className="chatbot-privacy-settings">
+              <div className="chatbot-subheading"><strong>Website & privacy</strong><span>Hosted chat does not require an allowed hostname.</span></div>
+              <label className="field"><span>Website domains</span><textarea value={domains} rows={3} placeholder={"example.com\nwww.example.com"} onChange={(event) => setDomains(event.target.value)} /></label>
+              <label className="field"><span>Privacy policy URL</span><input type="url" value={draft.privacy_policy_url ?? ""} placeholder="https://example.com/privacy" onChange={(event) => setDraft({ ...draft, privacy_policy_url: event.target.value || null })} /></label>
+              <label className="field"><span>Lead consent text</span><textarea value={draft.consent_text ?? ""} rows={3} maxLength={1000} onChange={(event) => setDraft({ ...draft, consent_text: event.target.value || null })} /></label>
+              <label className="toggle-line"><input type="checkbox" checked={draft.require_lead_consent} onChange={(event) => setDraft({ ...draft, require_lead_consent: event.target.checked })} /><span>Require explicit consent before lead capture or booking</span></label>
+            </div>
           </div>
         </section>
+      </section>
 
-        <aside className="chatbot-side">
-          <WidgetPreview config={{ ...loadedConfig, ...draft }} />
-          <section className="card embed-card"><div className="chatbot-section-head"><div><h3>Deployment safety</h3><p>Hosted sessions retain opaque IDs, short-lived session tokens, rate limits, and server-owned capabilities.</p></div><Code2 /></div><p className="safe-note"><ShieldCheck />Automatic CMS installation requires a configured and authenticated website provider. Hosted chat remains independent.</p></section>
-        </aside>
-      </div>
+      <section className="chatbot-journey-step">
+        <div className="chatbot-step-heading">
+          <span>2</span>
+          <div><h2>Publish</h2><p>Launch the recommended hosted experience with no website changes.</p></div>
+        </div>
+        <section className="card chatbot-publish-card">
+          {deployments.isError ? <p className="form-error">{humanizeApiError(deployments.error, "Deployment options could not be loaded.")}</p> : deployments.isLoading ? <p className="subtle">Loading deployment options…</p> : deployments.data?.targets.filter((target) => target.target_type === "hosted").map((target) => {
+            const hostedUrl = safeHttpUrl(target.hosted_url);
+            const installed = target.state === "installed";
+            const aiReady = deployments.data.ai_runtime_status === "ready";
+            return <div className="hosted-assistant-card" key={target.deployment_target_key ?? target.target_type}>
+              <div className="hosted-assistant-icon"><Link2 /></div>
+              <div className="row-main">
+                <div className="eyebrow">Recommended · Use hosted AI assistant</div>
+                <h3>Hosted AI Assistant</h3>
+                <p>{installed ? aiReady ? "Your secure, shareable hosted assistant is live." : "Your hosted page is ready; AI replies wait for provider configuration." : "Launch instantly with a hosted chat page — no website changes required."}</p>
+                {hostedUrl && <a className="hosted-url" href={hostedUrl} target="_blank" rel="noreferrer">{hostedUrl} <ExternalLink /></a>}
+              </div>
+              <div className="hosted-actions">
+                {hostedUrl && <Button onClick={() => void navigator.clipboard.writeText(hostedUrl)}><Clipboard /> Copy link</Button>}
+                {installed && hostedUrl ? <a className="btn btn-primary" href={hostedUrl} target="_blank" rel="noreferrer"><ExternalLink /> Open hosted assistant</a> : <Button variant="primary" disabled={installHosted.isPending || installed} onClick={() => installHosted.mutate()}><Sparkles />{installHosted.isPending ? "Launching…" : installed ? "Hosted assistant ready" : "Launch hosted assistant"}</Button>}
+              </div>
+            </div>;
+          })}
+          <p className="safe-note"><ShieldCheck />Hosted sessions use opaque IDs, short-lived session tokens, rate limits, and server-owned capabilities.</p>
+        </section>
+      </section>
+
+      <section className="chatbot-journey-step">
+        <div className="chatbot-step-heading">
+          <span>3</span>
+          <div><h2>Add to website</h2><p>Connect your website or use the manual embed only when the hosted option does not fit.</p></div>
+        </div>
+        <section className="card chatbot-deployment-card">
+          <div className="chatbot-section-head"><div><div className="eyebrow">Guided platform setup</div><h3>Where is your website built?</h3><p>Automatic installation appears only when a real authenticated provider is available.</p></div><Globe2 /></div>
+          {deployments.isError ? <p className="form-error">{humanizeApiError(deployments.error, "Website options could not be loaded.")}</p> : deployments.isLoading ? <p className="subtle">Loading website options…</p> : <>
+            <div className="chatbot-provider-grid">{deployments.data?.targets.filter((target) => !["hosted", "manual_embed"].includes(target.target_type)).map((target) => {
+              const state = deploymentState(target);
+              return <div className="integration-tile" key={target.target_type}>
+                <div className="integration-tile-icon"><Globe2 /></div>
+                <div className="row-main"><strong>{target.display_name}</strong><span>{target.instructions[0] || "Use your website provider's custom-code settings."}</span></div>
+                <Badge tone={state.tone}>{state.label}</Badge>
+              </div>;
+            })}</div>
+            <details className="chatbot-advanced">
+              <summary><span><strong>Advanced · Manual installation</strong><small>Developer embed for custom websites and unsupported providers.</small></span><Code2 /></summary>
+              <div className="chatbot-code-panel">
+                <div className="chatbot-code-head"><div><span>Embed code</span><small>Place before the closing body tag.</small></div><Button className="btn-sm" onClick={() => void navigator.clipboard.writeText(deployments.data?.advanced_embed_snippet || loadedConfig.embed_snippet).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1800); })}>{copied ? <Check /> : <Clipboard />}{copied ? "Copied" : "Copy code"}</Button></div>
+                <pre><code>{deployments.data?.advanced_embed_snippet || loadedConfig.embed_snippet}</code></pre>
+                <div className="chatbot-code-foot"><p className="safe-note"><ShieldCheck />The snippet contains an opaque public widget ID—never a business ID, API key, or employee session.</p><Button variant="ghost" className="btn-sm" onClick={() => rotate.mutate()} disabled={rotate.isPending}><RotateCcw />Rotate widget ID</Button></div>
+              </div>
+            </details>
+          </>}
+        </section>
+      </section>
 
       <section className="card chatbot-analytics-card">
         <div className="chatbot-section-head"><div><h3>Last 30 days</h3><p>Real database aggregates. Empty activity remains zero.</p></div><Sparkles /></div>

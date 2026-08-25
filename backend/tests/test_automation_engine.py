@@ -14,6 +14,7 @@ os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 
 from app.exceptions.automation import AutomationValidationError  # noqa: E402
 from app.models.approval_request import ApprovalRequest  # noqa: E402
+from app.models.audit_log import AuditLog  # noqa: E402
 from app.models.automation import (  # noqa: E402
     AutomationEdge,
     AutomationEvent,
@@ -24,7 +25,12 @@ from app.models.automation import (  # noqa: E402
     AutomationWorkflowVersion,
 )
 from app.schemas.automation import ScheduleDefinition, SimulationRequest  # noqa: E402
-from app.services.automation import simulate_workflow  # noqa: E402
+from app.services.automation import (  # noqa: E402
+    _audit_run,
+    _node_run_response,
+    _workflow_run_response,
+    simulate_workflow,
+)
 from app.services.automation_graph import (  # noqa: E402
     evaluate_condition,
     validate_graph,
@@ -80,6 +86,58 @@ class AutomationModelTests(unittest.TestCase):
 
 
 class AutomationSchemaAndGraphTests(unittest.TestCase):
+    def test_terminal_workflow_run_audit_links_to_the_run(self) -> None:
+        session = SimpleNamespace(added=[])
+        session.add = session.added.append
+        run = SimpleNamespace(
+            id=uuid4(), business_id=BUSINESS_ID, status="succeeded"
+        )
+
+        _audit_run(
+            session,
+            run,
+            None,
+            "automation.workflow_run_succeeded",
+            "Workflow run completed successfully.",
+        )
+
+        audit = session.added[0]
+        self.assertIsInstance(audit, AuditLog)
+        self.assertEqual(audit.entity_type, "automation_workflow_run")
+        self.assertEqual(audit.entity_id, run.id)
+        self.assertEqual(audit.after_value, "status=succeeded")
+
+    def test_workflow_run_history_excludes_internal_idempotency_key(self) -> None:
+        run = SimpleNamespace(
+            id=uuid4(), business_id=BUSINESS_ID, workflow_id=WORKFLOW_ID,
+            workflow_version_id=VERSION_ID, trigger_event_id=None,
+            trigger_type="event", status="succeeded", context_payload={},
+            current_node_key=uuid4(), waiting_reason=None, started_at="started",
+            completed_at="completed", failure_code=None, requested_by_user_id=None,
+            created_at="created", updated_at="updated", idempotency_key="internal",
+        )
+
+        value = _workflow_run_response(run, workflow_name="Lead triage", version=1)
+
+        self.assertEqual(value["workflow_name"], "Lead triage")
+        self.assertNotIn("idempotency_key", value)
+
+    def test_node_run_history_exposes_only_the_public_response_contract(self) -> None:
+        item = SimpleNamespace(
+            id=uuid4(), business_id=BUSINESS_ID, workflow_version_id=VERSION_ID,
+            workflow_run_id=uuid4(), node_key=uuid4(), status="succeeded",
+            attempt=1, started_at="started", completed_at="completed",
+            branch_outcome=None, result_summary="Internal operation completed.",
+            failure_code=None, resume_at=None, action_id=None,
+            created_at="created", updated_at="updated",
+        )
+
+        value = _node_run_response(item, name="Notify owner", node_type="internal_operation")
+
+        self.assertEqual(value["node_name"], "Notify owner")
+        self.assertEqual(value["node_type"], "internal_operation")
+        self.assertTrue({"business_id", "workflow_version_id", "created_at", "updated_at"}.isdisjoint(value))
+
     def test_structured_schedules_require_frequency_specific_fields(self) -> None:
         self.assertEqual(ScheduleDefinition(frequency="weekday", at_time="09:00").frequency, "weekday")
         self.assertEqual(ScheduleDefinition(frequency="weekly", at_time="09:00", weekday=0).weekday, 0)

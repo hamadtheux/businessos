@@ -37,6 +37,11 @@ from app.exceptions.chatbot import (
     ChatbotPersistenceError,
     ChatbotValidationError,
 )
+from app.exceptions.operations import (
+    OperationsConflictError,
+    OperationsPersistenceError,
+    OperationsValidationError,
+)
 from app.exceptions.scheduling import (
     SchedulingConflictError,
     SchedulingNotFoundError,
@@ -83,6 +88,7 @@ from app.schemas.chatbot import (
 from app.integrations.automation_registry import website_deployment_provider
 from app.services.automation_events import record_automation_event
 from app.services.chatbot_rate_limit import ChatbotRateLimiter, chatbot_rate_limiter
+from app.services.customer_identity import resolve_customer_identity
 from app.services.operations import record_audit
 from app.services.scheduling import book_appointment, find_available_slots
 
@@ -1494,47 +1500,46 @@ async def _match_or_create_customer(
     email: str | None,
     phone: str | None,
 ) -> Customer:
-    conditions = []
-    if email:
-        conditions.append(Customer.email == email)
-    if phone:
-        phone_digits = "".join(character for character in phone if character.isdigit())
-        conditions.append(
-            func.regexp_replace(Customer.phone, "[^0-9]", "", "g") == phone_digits
+    """
+    Resolve or create a website-chatbot customer through the canonical
+    tenant-scoped Customer Identity Engine.
+
+    The chatbot owns public-domain error translation, while identity matching,
+    normalization, ambiguity protection, audit, and customer-created
+    automation events remain centralized in customer_identity.py.
+    """
+    try:
+        resolution = await resolve_customer_identity(
+            session,
+            business_id=context.business.id,
+            display_name=name,
+            email=email,
+            phone=phone,
+            source="website_chatbot",
+            create_if_missing=True,
+            actor_user_id=None,
+            tags=["Website chatbot"],
         )
-    try:
-        matches = list((await session.scalars(
-            select(Customer).where(
-                Customer.business_id == context.business.id,
-                or_(*conditions),
-            ).limit(3)
-        )).all()) if conditions else []
-    except SQLAlchemyError:
-        raise ChatbotPersistenceError("Unable to match customer") from None
-    unique = {item.id: item for item in matches}
-    if len(unique) > 1:
-        raise ChatbotConflictError("Customer identity is ambiguous")
-    if unique:
-        return next(iter(unique.values()))
-    customer = Customer(
-        business_id=context.business.id,
-        display_name=name,
-        first_name=None,
-        last_name=None,
-        email=email,
-        phone=phone,
-        status="active",
-        source="website_chatbot",
-        tags=["Website chatbot"],
-        company=None,
-        notes=None,
-        active=True,
-    )
-    session.add(customer)
-    try:
-        await session.flush()
-    except SQLAlchemyError:
-        raise ChatbotPersistenceError("Unable to create customer") from None
+    except OperationsConflictError:
+        raise ChatbotConflictError(
+            "Customer identity is ambiguous"
+        ) from None
+    except OperationsValidationError:
+        raise ChatbotValidationError(
+            "Customer identity is invalid"
+        ) from None
+    except OperationsPersistenceError:
+        raise ChatbotPersistenceError(
+            "Unable to match or create customer"
+        ) from None
+
+    customer = resolution.customer
+
+    if customer is None:
+        raise ChatbotPersistenceError(
+            "Unable to match or create customer"
+        )
+
     return customer
 
 

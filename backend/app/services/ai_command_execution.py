@@ -27,6 +27,7 @@ from app.services.ai_agent_execution import (
     create_running_ai_agent_execution,
     fail_ai_agent_execution,
     finalize_successful_ai_agent_execution,
+    get_ai_agent_execution,
 )
 from app.services.ai_capabilities import validate_proposed_action_capabilities, validate_role_capabilities
 from app.services.ai_workforce import (
@@ -115,8 +116,12 @@ async def execute_command(
         trigger_type="command",
         command_id=command.id,
     )
+    # Keep scalar identifiers across delegated calls. A specialist failure
+    # rolls back the session and expires every ORM instance in its identity map.
+    command_id = command.id
+    root_execution_id = root_execution.id
     command.status = "running"
-    command.execution_id = root_execution.id
+    command.execution_id = root_execution_id
     try:
         await session.commit()
     except SQLAlchemyError:
@@ -141,8 +146,8 @@ async def execute_command(
                 task=f"Provide bounded specialist analysis for this command: {request.command}",
                 provider_name=provider_name,
                 model_name=model_name,
-                command_id=command.id,
-                parent_execution_id=root_execution.id,
+                command_id=command_id,
+                parent_execution_id=root_execution_id,
                 sequence=sequence,
             )
             specialist_route = route_command({
@@ -178,6 +183,20 @@ async def execute_command(
             + "\n".join(specialist_summaries)
         )
 
+    try:
+        # A failed specialist deliberately rolls back before recording its safe
+        # failure. Reload both root records instead of reusing expired objects.
+        root_execution = await get_ai_agent_execution(
+            session,
+            business_id=business_id,
+            execution_id=root_execution_id,
+        )
+        root_config = await get_agent_config(
+            session, business_id=business_id, role=route.primary_role
+        )
+    except (AIAgentExecutionLedgerError, SQLAlchemyError):
+        raise AIWorkforcePersistenceError("Unable to resume AI command") from None
+
     outcome = await _complete_execution(
         session,
         business_id=business_id,
@@ -191,7 +210,9 @@ async def execute_command(
     if model_calls > MAX_MODEL_CALLS_PER_COMMAND:
         raise AIWorkforceValidationError("AI command exceeded its model-call limit")
 
-    command = await _reload_command(session, business_id=business_id, command_id=command.id)
+    command = await _reload_command(
+        session, business_id=business_id, command_id=command_id
+    )
     command.completed_at = _now()
     if outcome.result is None:
         command.status = "failed"
@@ -331,10 +352,14 @@ async def _fail_outcome(
     session: AsyncSession, business_id: UUID, execution: AIAgentExecution,
     code: str, started: int,
 ) -> ExecutionOutcome:
+    # A rollback expires ORM instances. Capture the durable identifier first so
+    # the safe-failure path can update the already-committed ledger record
+    # without triggering an async lazy load from an expired object.
+    execution_id = execution.id
     await _rollback(session)
     try:
         failed = await fail_ai_agent_execution(
-            session, business_id=business_id, execution_id=execution.id,
+            session, business_id=business_id, execution_id=execution_id,
             failure_code=code, duration_ms=_elapsed(started),
         )
         await session.commit()

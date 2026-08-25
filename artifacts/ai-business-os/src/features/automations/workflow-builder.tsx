@@ -27,6 +27,7 @@ import {
   Badge,
   Button,
   Card,
+  EmptyState,
   Modal,
   PageHeader,
   SectionTitle,
@@ -198,6 +199,25 @@ export function WorkflowBuilderPage() {
     refetchInterval: 15_000,
   });
   const selected = detail.data;
+  const processingState = processing.isError
+    ? "unavailable"
+    : (processing.data?.status ?? "checking");
+  const processingLabel =
+    processingState === "healthy"
+      ? "Healthy"
+      : processingState === "degraded"
+        ? "Degraded"
+        : processingState === "unavailable"
+          ? "Worker offline"
+          : "Checking";
+  const processingCopy =
+    processingState === "healthy"
+      ? "Active workflows resume automatically through durable PostgreSQL processing."
+      : processingState === "degraded"
+        ? "Durable processing is available, but one or more worker signals need attention."
+        : processingState === "unavailable"
+          ? "The background worker is not reporting healthy. Queued work will wait until processing recovers."
+          : "Checking the durable worker and scheduler health.";
   const orderedNodes = useMemo(
     () =>
       [...(selected?.nodes ?? [])].sort(
@@ -449,33 +469,30 @@ export function WorkflowBuilderPage() {
           </Button>
         </div>
       )}
-      <Card>
-        <SectionTitle
-          title="Processing"
-          action={
-            <Badge
-              tone={
-                processing.data?.status === "healthy"
-                  ? "success"
-                  : processing.data?.status === "degraded"
-                    ? "warning"
-                    : "danger"
-              }
-            >
-              {processing.data?.status ?? "checking"}
-            </Badge>
-          }
-        />
-        {processing.isError ? (
-          <p className="subtle">Processing health is temporarily unavailable.</p>
-        ) : (
-          <div className="analysis-grid">
-            <div className="stat-row"><span>Queued</span><strong>{processing.data?.counts.queued ?? "—"}</strong></div>
-            <div className="stat-row"><span>Running</span><strong>{processing.data?.counts.processing ?? "—"}</strong></div>
-            <div className="stat-row"><span>Delayed events</span><strong>{processing.data?.automation_event_backlog ?? "—"}</strong></div>
-            <div className="stat-row"><span>Needs attention</span><strong>{(processing.data?.counts.failed ?? 0) + (processing.data?.counts.dead_letter ?? 0)}</strong></div>
+      <Card className={`processing-card processing-${processingState}`}>
+        <div className="processing-card-head">
+          <div>
+            <div className="eyebrow">Durable workflow engine</div>
+            <h2>Processing status</h2>
           </div>
-        )}
+          <Badge
+            tone={
+              processingState === "healthy"
+                ? "success"
+                : processingState === "degraded" || processingState === "checking"
+                  ? "warning"
+                  : "danger"
+            }
+          >
+            {processingLabel}
+          </Badge>
+        </div>
+        <div className="processing-metrics">
+          <div><span>Queued</span><strong>{processing.data?.counts.queued ?? "—"}</strong></div>
+          <div><span>Running</span><strong>{processing.data?.counts.processing ?? "—"}</strong></div>
+          <div><span>Delayed</span><strong>{processing.data?.automation_event_backlog ?? "—"}</strong></div>
+          <div><span>Needs attention</span><strong>{(processing.data?.counts.failed ?? 0) + (processing.data?.counts.dead_letter ?? 0)}</strong></div>
+        </div>
         {recentJobs.data?.items.some((job) => job.status === "failed" || job.status === "dead_letter") && (
           <div className="approval-list" style={{ marginTop: 12 }}>
             {recentJobs.data.items
@@ -499,9 +516,10 @@ export function WorkflowBuilderPage() {
               ))}
           </div>
         )}
-        <p className="subtle" style={{ marginTop: 10 }}>
-          Active workflows resume automatically through durable PostgreSQL processing. External sending, publishing, and spend remain disabled.
-        </p>
+        <div className="processing-note">
+          <span>{processingCopy}</span>
+          <small>External sending, publishing, and spend remain disabled.</small>
+        </div>
       </Card>
       <div className="workflow-layout">
         <Card className="workflow-sidebar">
@@ -513,7 +531,7 @@ export function WorkflowBuilderPage() {
                 className="btn-sm"
                 onClick={() => setCreating(true)}
               >
-                <Plus />
+                <Plus /> New workflow
               </Button>
             }
           />
@@ -552,11 +570,13 @@ export function WorkflowBuilderPage() {
             </button>
           ))}
           {workflows.data && !workflows.data.items.length && (
-            <div className="empty">
-              <Zap />
-              <h3>No workflows yet</h3>
-              <p>Create a durable draft to begin.</p>
-            </div>
+            <EmptyState
+              compact
+              icon={<Zap />}
+              title="No workflows yet"
+              description="Create a durable draft to begin."
+              action={<Button variant="green" className="btn-sm" onClick={() => setCreating(true)}><Plus /> Create workflow</Button>}
+            />
           )}
         </Card>
         <div className="workflow-main">
@@ -858,12 +878,13 @@ export function WorkflowBuilderPage() {
               </Card>
             </>
           ) : (
-            <Card>
-              <div className="empty">
-                <Zap />
-                <h3>Select or create a workflow</h3>
-                <p>Workflow data is loaded from the active business.</p>
-              </div>
+            <Card className="workflow-welcome-card">
+              <EmptyState
+                icon={<Zap />}
+                title="Select or create a workflow"
+                description="Choose a workflow from the list, or create a durable draft for this business."
+                action={<Button variant="green" onClick={() => setCreating(true)}><Plus /> Create workflow</Button>}
+              />
             </Card>
           )}
         </div>

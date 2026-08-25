@@ -58,6 +58,43 @@ import { operationsApi } from "@/services/operations";
 type NavItem = { href: string; label: string; icon: LucideIcon; feature?: BusinessFeature };
 type NavGroup = { label: string; items: NavItem[] };
 
+type PageWidth = "standard" | "wide" | "extra-wide";
+
+function pageWidthForRoute(location: string): PageWidth {
+  if (
+    location.startsWith("/automations") ||
+    location.startsWith("/conversations") ||
+    location.startsWith("/analytics") ||
+    location.startsWith("/marketing") ||
+    location.startsWith("/campaigns") ||
+    location.startsWith("/social")
+  ) {
+    return "extra-wide";
+  }
+
+  if (
+    location.startsWith("/dashboard") ||
+    location.startsWith("/chatbot") ||
+    location.startsWith("/agents") ||
+    location.startsWith("/cmo") ||
+    location.startsWith("/crm") ||
+    location.startsWith("/orders") ||
+    location.startsWith("/customers") ||
+    location.startsWith("/scheduling") ||
+    location.startsWith("/products") ||
+    location.startsWith("/properties") ||
+    location.startsWith("/catalog") ||
+    location.startsWith("/integrations") ||
+    location.startsWith("/competitors") ||
+    location.startsWith("/trends") ||
+    location.startsWith("/billing")
+  ) {
+    return "wide";
+  }
+
+  return "standard";
+}
+
 const NAV_MODULE_BY_HREF: Readonly<Record<string, WorkspaceModule>> = {
   "/dashboard": "dashboard",
   "/command": "ai_command_center",
@@ -465,7 +502,10 @@ export function AppShell({ children }: { children: ReactNode }) {
             </Button>
           </div>
         </header>
-        <div className="page" key={activeBusinessId}>
+        <div
+          className={cx("page", `page-${pageWidthForRoute(location)}`)}
+          key={activeBusinessId}
+        >
           {children}
         </div>
       </main>

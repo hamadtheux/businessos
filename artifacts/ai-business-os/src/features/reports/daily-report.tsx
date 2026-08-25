@@ -534,7 +534,7 @@ export function DailyReportPage() {
             </div>
           )}
 
-          <Card>
+          <Card className="report-record-card">
             <SectionTitle
               title="Stored report record"
               action={<Package />}

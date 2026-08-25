@@ -228,6 +228,7 @@ async def generate_plan(session: AsyncSession, *, business_id: UUID, actor_user_
     )
     output = await _run_cmo(session, business_id, task, provider)
     recommendations = output.recommendations
+    measurement_goals = _bounded_unique_text(recommendations[8:18], max_length=160)
     create = MarketingPlanCreate(
         title=data.title or data.goal[:180], objective=data.goal,
         target_audience=data.target_audience, positioning=output.summary[:3000],
@@ -235,12 +236,28 @@ async def generate_plan(session: AsyncSession, *, business_id: UUID, actor_user_
         channels=data.channels, budget_guidance=data.budget_guidance,
         period_start=data.period_start, period_end=data.period_end,
         content_strategy="\n".join(recommendations[:8])[:5000] or None,
-        measurement_goals=recommendations[8:18] or ["Measure outcomes against the stated campaign objective."],
+        measurement_goals=measurement_goals or ["Measure outcomes against the stated campaign objective."],
     )
     value = await create_plan(session, business_id=business_id, actor_user_id=actor_user_id, data=create, generated_by="ai")
     value.status = "ready"
     _notify(session, business_id=business_id, category="campaign_review", title="AI CMO plan ready", message=f"Review the marketing plan “{value.title}”.", entity_type="marketing_plan", entity_id=value.id)
     return value
+
+
+def _bounded_unique_text(
+    values: list[str], *, max_length: int, max_items: int = 20
+) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = value.strip()[:max_length].rstrip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+        if len(result) >= max_items:
+            break
+    return result
 
 
 async def list_campaigns(session: AsyncSession, *, business_id: UUID, page: int, page_size: int, search: str | None, status: str | None):
@@ -926,6 +943,23 @@ async def competitor_analysis_to_opportunity(session: AsyncSession, *, business_
         description=data.description or recommendation[:3000], category="competitor_insight",
         source="competitor", priority=data.priority,
     ))
+    opportunity.source_entity_type = "competitor_analysis"
+    opportunity.source_entity_id = analysis.id
+    opportunity.reason = (
+        f"A source-grounded analysis based on {analysis.source_observation_count} "
+        f"stored observation(s) identified a campaign opportunity."
+    )
+    opportunity.recommendation = recommendation[:3000]
+    opportunity.suggested_action = "generate_campaign_proposal"
+    opportunity.provenance = [{
+        "source_type": "competitor_analysis",
+        "source_id": str(analysis.id),
+        "source_reference": f"competitor:{competitor.id}",
+        "observed_at": analysis.created_at.isoformat(),
+        "source_observation_count": analysis.source_observation_count,
+    }]
+    opportunity.dedupe_key = f"competitor-analysis-conversion:{analysis.id}"
+    await _flush(session)
     record_audit(session, business_id=business_id, actor_user_id=actor_user_id, event_type="marketing.competitor_analysis_converted", entity_type="competitor_analysis", entity_id=analysis.id, summary=f"Created opportunity from sourced analysis for {competitor.name}.", after_value=f"opportunity_id={opportunity.id}")
     return opportunity
 
@@ -968,6 +1002,19 @@ async def trend_to_opportunity(session: AsyncSession, *, business_id: UUID, tren
         description=data.description or trend.description[:3000], category="marketing_trend",
         source="trend", priority=data.priority,
     ))
+    opportunity.source_entity_type = "marketing_trend"
+    opportunity.source_entity_id = trend.id
+    opportunity.reason = "A reviewed, identified trend source is relevant to internal campaign planning."
+    opportunity.confidence = trend.confidence
+    opportunity.recommendation = "Ask the AI CMO to prepare an evidence-grounded campaign proposal for review."
+    opportunity.suggested_action = "generate_campaign_proposal"
+    opportunity.provenance = [{
+        "source_type": trend.source,
+        "source_id": str(trend.id),
+        "source_reference": trend.source_reference,
+        "observed_at": trend.observed_at.isoformat(),
+    }]
+    opportunity.dedupe_key = f"trend-conversion:{trend.id}"
     trend.status = "acted_on"
     trend.opportunity_id = opportunity.id
     await _flush(session)

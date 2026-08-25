@@ -142,8 +142,12 @@ class Settings(BaseSettings):
 
     # Public website chatbot / isolated widget deployment
     public_api_base_url: AnyHttpUrl = "http://localhost:8000"
-    widget_loader_url: AnyHttpUrl = "http://localhost:5173/widget-loader.js"
-    widget_app_url: AnyHttpUrl = "http://localhost:5173/widget.html"
+    # Keep the local public surfaces on the same origin as the development
+    # frontend.  The Vite app is served on 5174 throughout this repository
+    # (including the credentialed CORS defaults); pointing these URLs at 5173
+    # can silently send hosted-chat links to an unrelated local process.
+    widget_loader_url: AnyHttpUrl = "http://localhost:5174/widget-loader.js"
+    widget_app_url: AnyHttpUrl = "http://localhost:5174/widget.html"
     chatbot_session_ttl_minutes: int = Field(default=1_440, ge=15, le=10_080)
     chatbot_rate_limit_backend: ChatbotRateLimitBackend = "memory"
     chatbot_session_creations_per_minute: int = Field(default=10, ge=1, le=100)

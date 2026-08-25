@@ -26,34 +26,464 @@ function Pager({ page, pageSize, total, onPage }: { page: number; pageSize: numb
   return <div className="table-toolbar"><span className="subtle">Page {page} of {pages} · {total} records</span><div className="toolbar"><Button className="btn-sm" disabled={page <= 1} onClick={() => onPage(page - 1)}>Previous</Button><Button className="btn-sm" disabled={page >= pages} onClick={() => onPage(page + 1)}>Next</Button></div></div>;
 }
 
+function customerSourceLabel(source: string) {
+  const labels: Record<string, string> = {
+    website_chatbot: "Website chatbot",
+    whatsapp_business: "WhatsApp",
+    gmail: "Gmail",
+    microsoft_outlook: "Outlook",
+    facebook: "Facebook",
+    instagram: "Instagram",
+    website: "Website",
+    referral: "Referral",
+    manual: "Manual",
+  };
+
+  return (
+    labels[source] ??
+    source
+      .replaceAll("_", " ")
+      .replace(/\b\w/g, (character) => character.toUpperCase())
+  );
+}
+
+function isAutomatedCustomerSource(source: string) {
+  return source !== "manual";
+}
+
 export function CustomersPage() {
   const { activeBusinessId, activeBusiness } = useBusiness();
   const queryClient = useQueryClient();
+
   const terminology = getIndustryTerminology(activeBusiness?.industry);
   const customerSingular = terminology.customerSingular;
   const customerPlural = terminology.customerPlural;
   const customerSingularLower = customerSingular.toLowerCase();
   const customerPluralLower = customerPlural.toLowerCase();
-  const [search, setSearch] = useState(""); const [status, setStatus] = useState(""); const [page, setPage] = useState(1); const [creating, setCreating] = useState(false); const [selected, setSelected] = useState<Customer | null>(null); const [actionError, setActionError] = useState("");
-  const list = useQuery({ queryKey: ["operations", activeBusinessId, "customers", search, status, page], queryFn: ({ signal }) => operationsApi.customers.list(activeBusinessId, { search, status: status || undefined, page, pageSize: 25 }, signal), enabled: Boolean(activeBusinessId) });
-  const refresh = () => queryClient.invalidateQueries({ queryKey: ["operations", activeBusinessId, "customers"] });
-  const create = useMutation({ mutationFn: (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); return operationsApi.customers.create(activeBusinessId, { display_name: String(form.get("display_name")), email: String(form.get("email")) || null, phone: String(form.get("phone")) || null, company: String(form.get("company")) || null, source: "manual", status: "active", tags: String(form.get("tags") ?? "").split(",").map((tag) => tag.trim()).filter(Boolean), notes: String(form.get("notes")) || null }); }, onSuccess: (customer) => { setCreating(false); setSelected(customer); setActionError(""); void refresh(); }, onError: (error) => setActionError(humanizeApiError(error, "Customer could not be saved.")) });
-  const update = useMutation({ mutationFn: ({ id, status: next }: { id: string; status: Customer["status"] }) => operationsApi.customers.update(activeBusinessId, id, { status: next }), onSuccess: (customer) => { setSelected(customer); void refresh(); }, onError: (error) => setActionError(humanizeApiError(error, `${customerSingular} could not be updated.`)) });
-  return <>
-    <PageHeader
-      eyebrow={`${customerPlural} operations`}
-      title={`${customerSingular} database`}
-      subtitle={`Canonical ${customerPluralLower} records for the active business.`}
-      action={
-        <Button variant="primary" onClick={() => setCreating(true)}>
-          <Plus /> Add {customerSingularLower}
-        </Button>
-      }
-    />
-    {list.isError ? <ErrorState error={list.error} retry={() => void list.refetch()} /> : <Card className="table-card" pad={false}><div className="table-toolbar"><div className="search-box"><Search /><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Name, email, phone, or company" /></div><div className="filters">{["", "active", "inactive", "archived"].map((item) => <button key={item || "all"} className={`filter ${status === item ? "active" : ""}`} onClick={() => { setStatus(item); setPage(1); }}>{item || "All"}</button>)}</div></div><div className="table-scroll"><table><thead><tr><th>{customerSingular}</th><th>Contact</th><th>Company</th><th>Tags</th><th>Status</th><th>Updated</th><th /></tr></thead><tbody>{list.data?.items.map((customer) => <tr key={customer.id}><td><div className="actor-cell"><Avatar name={customer.display_name} /><strong>{customer.display_name}</strong></div></td><td>{customer.email || "—"}<div className="row-copy">{customer.phone || "No phone"}</div></td><td>{customer.company || "—"}</td><td>{customer.tags.join(", ") || "—"}</td><td><Badge tone={customer.status === "active" ? "success" : customer.status === "archived" ? "neutral" : "warning"}>{customer.status}</Badge></td><td>{when(customer.updated_at)}</td><td><button className="icon-btn" onClick={() => setSelected(customer)}><ChevronRight /></button></td></tr>)}</tbody></table>{list.isLoading && <div className="empty"><p>Loading {customerPluralLower}…</p></div>}{list.data && !list.data.items.length && <EmptyState icon={<Users />} title={`No ${customerPluralLower} yet`} copy={`Create the first canonical ${customerSingularLower} record.`} />}</div>{list.data && <Pager page={page} pageSize={list.data.page_size} total={list.data.total} onPage={setPage} />}</Card>}
-    {creating && <Modal title={`Add ${customerSingularLower}`} description={`Create a tenant-owned ${customerSingularLower} record.`} onClose={() => setCreating(false)}><form onSubmit={(event) => create.mutate(event)}><div className="form-grid"><div className="field full"><label>Display name</label><input name="display_name" required maxLength={160} /></div><div className="field"><label>Email</label><input name="email" type="email" /></div><div className="field"><label>Phone</label><input name="phone" /></div><div className="field"><label>Company</label><input name="company" /></div><div className="field"><label>Tags</label><input name="tags" placeholder="vip, wholesale" /></div><div className="field full"><label>Notes</label><textarea name="notes" maxLength={4000} /></div></div>{actionError && <p className="form-error">{actionError}</p>}<div className="modal-foot"><Button type="button" onClick={() => setCreating(false)}>Cancel</Button><Button variant="primary" type="submit" disabled={create.isPending}>{create.isPending ? "Saving…" : `Add ${customerSingularLower}`}</Button></div></form></Modal>}
-    {selected && <Modal title={selected.display_name} description={`${selected.email || "No email"} · ${selected.phone || "No phone"}`} onClose={() => setSelected(null)}><div className="grid split-grid"><Card><div className="eyebrow">Company</div><h2>{selected.company || `Individual ${customerSingularLower}`}</h2><p className="subtle">Source · {selected.source}</p></Card><Card><div className="eyebrow">Notes</div><p>{selected.notes || "No notes yet."}</p></Card></div><div className="field"><label>Status</label><select value={selected.status} disabled={update.isPending} onChange={(event) => update.mutate({ id: selected.id, status: event.target.value as Customer["status"] })}><option value="active">Active</option><option value="inactive">Inactive</option><option value="archived">Archived</option></select></div>{actionError && <p className="form-error">{actionError}</p>}</Modal>}
-  </>;
+
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState("");
+  const [page, setPage] = useState(1);
+  const [creating, setCreating] = useState(false);
+  const [selected, setSelected] = useState<Customer | null>(null);
+  const [actionError, setActionError] = useState("");
+
+  const list = useQuery({
+    queryKey: [
+      "operations",
+      activeBusinessId,
+      "customers",
+      search,
+      status,
+      page,
+    ],
+    queryFn: ({ signal }) =>
+      operationsApi.customers.list(
+        activeBusinessId,
+        {
+          search,
+          status: status || undefined,
+          page,
+          pageSize: 25,
+        },
+        signal,
+      ),
+    enabled: Boolean(activeBusinessId),
+  });
+
+  const refresh = () =>
+    queryClient.invalidateQueries({
+      queryKey: ["operations", activeBusinessId, "customers"],
+    });
+
+  const create = useMutation({
+    mutationFn: (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+
+      return operationsApi.customers.create(activeBusinessId, {
+        display_name: String(form.get("display_name")),
+        email: String(form.get("email")) || null,
+        phone: String(form.get("phone")) || null,
+        company: String(form.get("company")) || null,
+        source: "manual",
+        status: "active",
+        tags: String(form.get("tags") ?? "")
+          .split(",")
+          .map((tag) => tag.trim())
+          .filter(Boolean),
+        notes: String(form.get("notes")) || null,
+      });
+    },
+    onSuccess: (customer) => {
+      setCreating(false);
+      setSelected(customer);
+      setActionError("");
+      void refresh();
+    },
+    onError: (error) =>
+      setActionError(
+        humanizeApiError(
+          error,
+          `${customerSingular} could not be saved.`,
+        ),
+      ),
+  });
+
+  const update = useMutation({
+    mutationFn: ({
+      id,
+      status: next,
+    }: {
+      id: string;
+      status: Customer["status"];
+    }) =>
+      operationsApi.customers.update(activeBusinessId, id, {
+        status: next,
+      }),
+    onSuccess: (customer) => {
+      setSelected(customer);
+      setActionError("");
+      void refresh();
+    },
+    onError: (error) =>
+      setActionError(
+        humanizeApiError(
+          error,
+          `${customerSingular} could not be updated.`,
+        ),
+      ),
+  });
+
+  const openIntegrations = () => {
+    window.location.assign("/integrations");
+  };
+
+  return (
+    <>
+      <PageHeader
+        eyebrow={`${customerPlural} intelligence`}
+        title={customerPlural}
+        subtitle={`One trusted ${customerSingularLower} record across your connected channels, website assistant, and business activity.`}
+        action={
+          <Button onClick={() => setCreating(true)}>
+            <Plus />
+            Add manually
+          </Button>
+        }
+      />
+
+      <Card className="customer-source-card">
+        <div className="customer-source-head">
+          <div className="customer-source-copy">
+            <div className="customer-source-icon">
+              <Users />
+            </div>
+
+            <div>
+              <div className="row-title">Automatic customer capture</div>
+              <p className="subtle">
+                Verified contacts from your website assistant and connected
+                communication channels are matched or created automatically.
+              </p>
+            </div>
+          </div>
+
+          <Button variant="primary" onClick={openIntegrations}>
+            <MessageCircle />
+            Connect sources
+          </Button>
+        </div>
+
+        <div className="customer-source-list" aria-label="Automatic customer sources">
+          <Badge tone="success">Website chatbot</Badge>
+          <Badge tone="neutral">WhatsApp</Badge>
+          <Badge tone="neutral">Gmail</Badge>
+          <Badge tone="neutral">Outlook</Badge>
+          <Badge tone="neutral">Facebook</Badge>
+          <Badge tone="neutral">Instagram</Badge>
+        </div>
+      </Card>
+
+      {list.isError ? (
+        <ErrorState
+          error={list.error}
+          retry={() => void list.refetch()}
+        />
+      ) : (
+        <Card className="table-card customer-table-card" pad={false}>
+          <div className="table-toolbar">
+            <div className="search-box">
+              <Search />
+              <input
+                value={search}
+                onChange={(event) => {
+                  setSearch(event.target.value);
+                  setPage(1);
+                }}
+                placeholder="Name, email, phone, or company"
+              />
+            </div>
+
+            <div className="filters">
+              {["", "active", "inactive", "archived"].map((item) => (
+                <button
+                  key={item || "all"}
+                  className={`filter ${status === item ? "active" : ""}`}
+                  onClick={() => {
+                    setStatus(item);
+                    setPage(1);
+                  }}
+                >
+                  {item || "All"}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>{customerSingular}</th>
+                  <th>Contact</th>
+                  <th>Company</th>
+                  <th>Source</th>
+                  <th>Status</th>
+                  <th>Updated</th>
+                  <th />
+                </tr>
+              </thead>
+
+              <tbody>
+                {list.data?.items.map((customer) => (
+                  <tr key={customer.id}>
+                    <td>
+                      <div className="actor-cell">
+                        <Avatar name={customer.display_name} />
+                        <div>
+                          <strong>{customer.display_name}</strong>
+                          <div className="row-copy">
+                            {isAutomatedCustomerSource(customer.source)
+                              ? "Automatically captured"
+                              : "Added manually"}
+                          </div>
+                        </div>
+                      </div>
+                    </td>
+
+                    <td>
+                      {customer.email || "—"}
+                      <div className="row-copy">
+                        {customer.phone || "No phone"}
+                      </div>
+                    </td>
+
+                    <td>{customer.company || "—"}</td>
+
+                    <td>
+                      <Badge
+                        tone={
+                          isAutomatedCustomerSource(customer.source)
+                            ? "success"
+                            : "neutral"
+                        }
+                      >
+                        {customerSourceLabel(customer.source)}
+                      </Badge>
+                    </td>
+
+                    <td>
+                      <Badge
+                        tone={
+                          customer.status === "active"
+                            ? "success"
+                            : customer.status === "archived"
+                              ? "neutral"
+                              : "warning"
+                        }
+                      >
+                        {customer.status}
+                      </Badge>
+                    </td>
+
+                    <td>{when(customer.updated_at)}</td>
+
+                    <td>
+                      <button
+                        className="icon-btn"
+                        onClick={() => setSelected(customer)}
+                        aria-label={`Open ${customer.display_name}`}
+                      >
+                        <ChevronRight />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            {list.isLoading && (
+              <div className="empty customer-empty-state">
+                <p>Loading {customerPluralLower}…</p>
+              </div>
+            )}
+
+            {list.data && !list.data.items.length && (
+              <div className="empty customer-empty-state">
+                <Users />
+                <h3>Your {customerSingularLower} database builds itself</h3>
+                <p>
+                  Connect a communication source or activate your website
+                  assistant. Verified contacts will appear here automatically.
+                  Manual entry remains available for offline records.
+                </p>
+              </div>
+            )}
+          </div>
+
+          {list.data && (
+            <Pager
+              page={page}
+              pageSize={list.data.page_size}
+              total={list.data.total}
+              onPage={setPage}
+            />
+          )}
+        </Card>
+      )}
+
+      {creating && (
+        <Modal
+          title={`Add ${customerSingularLower} manually`}
+          description={`Use manual entry for offline ${customerPluralLower} or records that did not arrive through a connected source.`}
+          onClose={() => {
+            setCreating(false);
+            setActionError("");
+          }}
+        >
+          <form onSubmit={(event) => create.mutate(event)}>
+            <div className="form-grid">
+              <div className="field full">
+                <label>Display name</label>
+                <input name="display_name" required maxLength={160} />
+              </div>
+
+              <div className="field">
+                <label>Email</label>
+                <input name="email" type="email" />
+              </div>
+
+              <div className="field">
+                <label>Phone</label>
+                <input name="phone" />
+              </div>
+
+              <div className="field">
+                <label>Company</label>
+                <input name="company" />
+              </div>
+
+              <div className="field">
+                <label>Tags</label>
+                <input name="tags" placeholder="vip, wholesale" />
+              </div>
+
+              <div className="field full">
+                <label>Notes</label>
+                <textarea name="notes" maxLength={4000} />
+              </div>
+            </div>
+
+            {actionError && <p className="form-error">{actionError}</p>}
+
+            <div className="modal-foot">
+              <Button
+                type="button"
+                onClick={() => {
+                  setCreating(false);
+                  setActionError("");
+                }}
+              >
+                Cancel
+              </Button>
+
+              <Button
+                variant="primary"
+                type="submit"
+                disabled={create.isPending}
+              >
+                {create.isPending
+                  ? "Saving…"
+                  : `Add ${customerSingularLower}`}
+              </Button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {selected && (
+        <Modal
+          title={selected.display_name}
+          description={`${selected.email || "No email"} · ${
+            selected.phone || "No phone"
+          }`}
+          onClose={() => {
+            setSelected(null);
+            setActionError("");
+          }}
+        >
+          <div className="grid split-grid">
+            <Card>
+              <div className="eyebrow">Company</div>
+              <h2>
+                {selected.company ||
+                  `Individual ${customerSingularLower}`}
+              </h2>
+              <p className="subtle">
+                Source · {customerSourceLabel(selected.source)}
+              </p>
+              <p className="subtle">
+                {isAutomatedCustomerSource(selected.source)
+                  ? "Captured automatically from business activity."
+                  : "Created manually by your team."}
+              </p>
+            </Card>
+
+            <Card>
+              <div className="eyebrow">Notes</div>
+              <p>{selected.notes || "No notes yet."}</p>
+              {!!selected.tags.length && (
+                <p className="subtle">
+                  Tags · {selected.tags.join(", ")}
+                </p>
+              )}
+            </Card>
+          </div>
+
+          <div className="field">
+            <label>Status</label>
+            <select
+              value={selected.status}
+              disabled={update.isPending}
+              onChange={(event) =>
+                update.mutate({
+                  id: selected.id,
+                  status: event.target.value as Customer["status"],
+                })
+              }
+            >
+              <option value="active">Active</option>
+              <option value="inactive">Inactive</option>
+              <option value="archived">Archived</option>
+            </select>
+          </div>
+
+          {actionError && <p className="form-error">{actionError}</p>}
+        </Modal>
+      )}
+    </>
+  );
 }
 
 const orderTransitions: Record<OrderStatus, OrderStatus[]> = { draft: ["confirmed", "canceled"], confirmed: ["processing", "canceled"], processing: ["completed", "canceled"], completed: [], canceled: [] };

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "wouter";
 import {
   AlertCircle,
   Archive,
@@ -17,6 +18,7 @@ import {
   Badge,
   Button,
   Card,
+  EmptyState,
   Modal,
   PageHeader,
 } from "@/components/product-ui";
@@ -203,7 +205,7 @@ export function IndustryWorkspacePage() {
         eyebrow="Business catalog"
         title="Products & services"
         subtitle={`Build ${activeBusiness?.name ?? "this business"}'s catalog manually or in bulk.`}
-        action={
+        action={loadState === "success" && items.length > 0 ? (
           <>
             <Button variant="green" onClick={() => setImportMode("upload")}>
               <FileSpreadsheet /> Upload CSV / Excel
@@ -211,11 +213,11 @@ export function IndustryWorkspacePage() {
             <Button variant="soft" onClick={() => setImportMode("paste")}>
               <ClipboardPaste /> Paste a list
             </Button>
-            <Button variant="primary" onClick={() => setEditor("create")}>
+            <Button variant="tertiary" onClick={() => setEditor("create")}>
               <Plus /> Add manually
             </Button>
           </>
-        }
+        ) : undefined}
       />
 
       {notice && (
@@ -474,34 +476,46 @@ function CatalogEmptyState({
 }) {
   if (archived) {
     return (
-      <div className="empty catalog-state-panel">
-        <Archive />
-        <h3>No archived items</h3>
-        <p>Archived products and services will appear here.</p>
-      </div>
+      <EmptyState
+        className="catalog-state-panel"
+        icon={<Archive />}
+        title="No archived items"
+        description="Archived products and services will appear here."
+      />
     );
   }
   return (
-    <div className="empty catalog-empty-state">
-      <Package />
-      <h3>Add products &amp; services</h3>
-      <p>
-        Import hundreds at once, paste a simple list, or add a small catalog
-        manually.
-      </p>
-      <div className="catalog-empty-actions">
-        <Button variant="green" onClick={onUpload}>
-          <FileSpreadsheet /> Upload CSV / Excel
-        </Button>
-        <Button variant="soft" onClick={onPaste}>
-          <ClipboardPaste /> Paste a list
-        </Button>
-        <Button onClick={onManual}>
-          <Plus /> Add manually
-        </Button>
-      </div>
-      <div className="catalog-coming-soon">
-        Store connection <Badge>Provider configuration required</Badge>
+    <div className="catalog-empty-state">
+      <EmptyState
+        compact
+        icon={<Package />}
+        title="Add products & services"
+        description="Import hundreds at once, paste a simple list, or add a small catalog manually."
+        action={
+          <Button variant="green" onClick={onUpload}>
+            <FileSpreadsheet /> Upload CSV / Excel
+          </Button>
+        }
+        secondaryAction={
+          <>
+            <Button variant="soft" onClick={onPaste}>
+              <ClipboardPaste /> Paste a list
+            </Button>
+            <Button variant="tertiary" onClick={onManual}>
+              <Plus /> Add manually
+            </Button>
+          </>
+        }
+      />
+      <div className="catalog-integration-cta">
+        <div>
+          <strong>Want to sync a storefront?</strong>
+          <span>Provider setup is optional and does not block catalog import.</span>
+        </div>
+        <Badge>Provider configuration required</Badge>
+        <Link href="/integrations" className="btn btn-sm btn-secondary">
+          View integrations
+        </Link>
       </div>
     </div>
   );
