@@ -9,12 +9,19 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.domain.background_jobs import (
     initial_opportunity_analysis_job_key,

@@ -116,11 +116,16 @@ _CATEGORY_ROLE: Final[dict[str, AIAgentRole]] = {
     "advertising_inefficiency": "cmo",
     "refund_anomaly": "operations",
     "inventory_risk": "operations",
+    "repeat_purchase_due": "sales",
+    "high_value_customer_at_risk": "sales",
+    "customer_value_decline": "sales",
+    "product_affinity_cross_sell": "sales",
 }
 
 _ROLE_ANALYSIS_CAPABILITY: Final[dict[AIAgentRole, str]] = {
     "business_manager": "analyze_business",
     "cmo": "analyze_marketing",
+    "sales": "analyze_sales",
     "operations": "analyze_operations",
 }
 
@@ -147,7 +152,20 @@ _PROVENANCE_FIELDS: Final = frozenset({
     "known_inventory_quantity", "observed_units_sold", "observed_order_count",
     "observed_average_daily_units", "estimated_days_of_cover", "inventory_scope",
     "unknown_inventory_policy", "order_timestamp_policy", "eligible_payment_states",
-    "refund_treatment", "revenue_timestamp_policy",
+    "refund_treatment", "revenue_timestamp_policy", "purchase_count",
+    "purchase_interval_count", "median_purchase_interval_days",
+    "days_since_last_purchase", "purchase_overdue_ratio",
+    "observed_retained_revenue", "value_window_purchase_count",
+    "observed_value_percentile", "cohort_size", "value_lookback_days",
+    "customer_value_scope", "purchase_count_decline_ratio",
+    "comparison_window_days", "source_catalog_item_id",
+    "target_catalog_item_id", "eligible_order_count",
+    "source_order_count", "target_order_count",
+    "co_purchase_order_count", "directional_confidence",
+    "affinity_lift", "affinity_lookback_days",
+    "customer_source_purchase_count", "last_source_purchase_at",
+    "target_availability", "product_identity_scope",
+    "affinity_disclaimer",
 })
 
 _OPPORTUNITY_ANALYSIS_RULES: Final = (

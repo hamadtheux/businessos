@@ -5,10 +5,11 @@ from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, exists, func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 from pydantic import ValidationError
 
 from app.agents.provider import AIAgentProvider
@@ -24,6 +25,7 @@ from app.exceptions.marketing import MarketingAIError
 from app.models.automation_intelligence import MarketingAutomationRun
 from app.models.business import Business
 from app.models.catalog_item import CatalogItem
+from app.models.customer import Customer
 from app.models.integration import IntegrationConnection
 from app.models.marketing import (
     Campaign,
@@ -85,6 +87,33 @@ INVENTORY_MIN_ORDER_COUNT = 3
 INVENTORY_MIN_UNITS_SOLD = 7
 INVENTORY_MAX_DAYS_COVER = Decimal("7.00")
 
+REPEAT_PURCHASE_MIN_ORDERS = 3
+REPEAT_PURCHASE_MIN_INTERVALS = 2
+REPEAT_PURCHASE_MIN_CADENCE_DAYS = Decimal("1.00")
+REPEAT_PURCHASE_OVERDUE_RATIO = Decimal("1.50")
+REPEAT_PURCHASE_MAX_HISTORY_ORDERS = 50
+
+HIGH_VALUE_LOOKBACK_DAYS = 365
+HIGH_VALUE_MIN_COHORT_SIZE = 10
+HIGH_VALUE_MIN_PERCENTILE = Decimal("0.800")
+
+CUSTOMER_VALUE_COMPARISON_DAYS = 28
+CUSTOMER_VALUE_MIN_BASELINE_ORDERS = 3
+CUSTOMER_VALUE_MIN_ORDER_DECLINE = 1
+CUSTOMER_VALUE_REVENUE_DECLINE_RATIO = Decimal("0.40")
+CUSTOMER_VALUE_ORDER_DECLINE_RATIO = Decimal("0.34")
+
+AFFINITY_LOOKBACK_DAYS = 180
+AFFINITY_MIN_ELIGIBLE_ORDERS = 20
+AFFINITY_MIN_SOURCE_ORDERS = 5
+AFFINITY_MIN_TARGET_ORDERS = 3
+AFFINITY_MIN_PAIR_ORDERS = 3
+AFFINITY_MIN_DIRECTIONAL_CONFIDENCE = Decimal("0.30")
+AFFINITY_MIN_LIFT = Decimal("1.25")
+AFFINITY_MAX_DIRECTION_CANDIDATES = 12
+AFFINITY_CUSTOMERS_PER_DIRECTION = 5
+AFFINITY_SELLABLE_AVAILABILITY = ("in_stock", "preorder", "backorder")
+
 
 @dataclass(frozen=True, slots=True)
 class _ComparisonWindow:
@@ -110,6 +139,37 @@ class _GrowthSignal:
     provenance: list[dict[str, object]]
     priority: str = "medium"
     currency: str | None = None
+    customer_id: UUID | None = None
+    estimated_value: Decimal | None = None
+    rank_score: Decimal = Decimal("0.500")
+
+
+_GROWTH_PRIORITY_RANK = {
+    "low": 0,
+    "medium": 1,
+    "high": 2,
+    "urgent": 3,
+}
+
+
+def _rank_business_growth_signals(
+    detector_results: tuple[list[_GrowthSignal], ...],
+) -> list[_GrowthSignal]:
+    """Globally rank bounded detector signals without comparing raw currencies."""
+    candidates = [
+        signal
+        for detector_signals in detector_results
+        for signal in detector_signals[:MAX_OPPORTUNITIES_PER_DETECTOR]
+    ]
+    candidates.sort(
+        key=lambda signal: (
+            -_GROWTH_PRIORITY_RANK.get(signal.priority, 0),
+            -signal.rank_score,
+            -signal.confidence,
+            signal.dedupe_key,
+        )
+    )
+    return candidates[:MAX_BUSINESS_GROWTH_OPPORTUNITIES]
 
 
 async def generate_bounded_content_plan(
@@ -469,33 +529,73 @@ async def _analyze_bounded_business_growth(
 
     window = _business_growth_comparison_window(run)
     try:
+        revenue_signals = await _detect_revenue_declines(
+            session, business_id=business_id, window=window
+        )
+        product_signals = await _detect_product_demand_declines(
+            session, business_id=business_id, window=window
+        )
+        advertising_signals = await _detect_advertising_inefficiency(
+            session, business_id=business_id, window=window
+        )
+        refund_signals = await _detect_refund_anomalies(
+            session, business_id=business_id, window=window
+        )
+        inventory_signals = await _detect_inventory_risks(
+            session, business_id=business_id, window=window
+        )
+
+        repeat_candidates = await _detect_repeat_purchase_due(
+            session,
+            business_id=business_id,
+            window=window,
+            limit=MAX_DETECTOR_CANDIDATES,
+        )
+        high_value_signals = await _detect_high_value_customer_at_risk(
+            session,
+            business_id=business_id,
+            window=window,
+            cadence_candidates=repeat_candidates,
+        )
+        customer_value_signals = await _detect_customer_value_declines(
+            session,
+            business_id=business_id,
+            window=window,
+        )
+        product_affinity_signals = await _detect_product_affinity_cross_sell(
+            session,
+            business_id=business_id,
+            window=window,
+        )
+
+        promoted_pairs = {
+            (signal.customer_id, signal.currency)
+            for signal in high_value_signals
+            if signal.customer_id is not None
+        }
+        repeat_signals = [
+            signal
+            for signal in repeat_candidates
+            if (signal.customer_id, signal.currency) not in promoted_pairs
+        ][:MAX_OPPORTUNITIES_PER_DETECTOR]
+
         detector_results = (
-            await _detect_revenue_declines(
-                session, business_id=business_id, window=window
-            ),
-            await _detect_product_demand_declines(
-                session, business_id=business_id, window=window
-            ),
-            await _detect_advertising_inefficiency(
-                session, business_id=business_id, window=window
-            ),
-            await _detect_refund_anomalies(
-                session, business_id=business_id, window=window
-            ),
-            await _detect_inventory_risks(
-                session, business_id=business_id, window=window
-            ),
+            revenue_signals,
+            product_signals,
+            advertising_signals,
+            refund_signals,
+            inventory_signals,
+            repeat_signals,
+            high_value_signals,
+            customer_value_signals,
+            product_affinity_signals,
         )
     except SQLAlchemyError:
         raise AutomationIntelligencePersistenceError(
             "business_growth_context_failed"
         ) from None
 
-    signals = [
-        signal
-        for detector_signals in detector_results
-        for signal in detector_signals[:MAX_OPPORTUNITIES_PER_DETECTOR]
-    ][:MAX_BUSINESS_GROWTH_OPPORTUNITIES]
+    signals = _rank_business_growth_signals(detector_results)
     created = 0
     for signal in signals:
         created += int(await _create_opportunity_if_missing(
@@ -514,6 +614,8 @@ async def _analyze_bounded_business_growth(
             provenance=signal.provenance,
             priority=signal.priority,
             currency=signal.currency,
+            customer_id=signal.customer_id,
+            estimated_value=signal.estimated_value,
             suggested_action="analyze_business_opportunity",
             enqueue_initial_analysis=True,
         ))
@@ -1488,6 +1590,1499 @@ async def _detect_inventory_risks(
     return [item[2] for item in ranked[:MAX_OPPORTUNITIES_PER_DETECTOR]]
 
 
+
+def _median_decimal(values: list[Decimal]) -> Decimal:
+    if not values:
+        raise ValueError("median_requires_values")
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / Decimal("2")
+
+
+async def _detect_repeat_purchase_due(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    window: _ComparisonWindow,
+    limit: int = MAX_OPPORTUNITIES_PER_DETECTOR,
+) -> list[_GrowthSignal]:
+    """
+    Detect customers materially beyond their own observed repeat-purchase cadence.
+
+    This is deterministic first-party purchase intelligence, not churn prediction.
+    Fully refunded / zero-retained-revenue orders do not establish purchase cadence.
+
+    ``limit`` exists so other deterministic customer-intelligence detectors can
+    reuse the bounded cadence result set without issuing a second cadence query.
+    Normal detector execution remains capped to MAX_OPPORTUNITIES_PER_DETECTOR.
+    """
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        raise ValueError("repeat_purchase_limit_invalid")
+    if limit < 1 or limit > MAX_DETECTOR_CANDIDATES:
+        raise ValueError("repeat_purchase_limit_invalid")
+
+    occurred_at = _authoritative_order_occurred_at()
+    retained_revenue = _retained_order_revenue()
+
+    purchase_count = func.count(Order.id).label("purchase_count")
+    last_purchase_at = func.max(occurred_at).label("last_purchase_at")
+    observed_retained_revenue = func.coalesce(
+        func.sum(retained_revenue),
+        Decimal("0.00"),
+    ).label("observed_retained_revenue")
+
+    candidate_rows = (await session.execute(
+        select(
+            Order.customer_id,
+            Order.currency,
+            purchase_count,
+            last_purchase_at,
+            observed_retained_revenue,
+        )
+        .join(
+            Customer,
+            (Customer.id == Order.customer_id)
+            & (Customer.business_id == Order.business_id),
+        )
+        .where(
+            Order.business_id == business_id,
+            Customer.business_id == business_id,
+            Customer.active.is_(True),
+            Customer.status == "active",
+            Order.customer_id.is_not(None),
+            Order.status != "canceled",
+            Order.payment_status.in_(REALIZED_PAYMENT_STATES),
+            occurred_at.is_not(None),
+            occurred_at < window.recent_end,
+            retained_revenue > Decimal("0.00"),
+        )
+        .group_by(
+            Order.customer_id,
+            Order.currency,
+        )
+        .having(
+            purchase_count >= REPEAT_PURCHASE_MIN_ORDERS,
+        )
+        .order_by(
+            last_purchase_at.asc(),
+            purchase_count.desc(),
+            Order.customer_id,
+            Order.currency,
+        )
+        .limit(MAX_DETECTOR_CANDIDATES)
+    )).all()
+
+    candidate_pairs = {
+        (row.customer_id, str(row.currency))
+        for row in candidate_rows
+        if row.customer_id is not None
+    }
+    if not candidate_pairs:
+        return []
+
+    history_rank = func.row_number().over(
+        partition_by=(Order.customer_id, Order.currency),
+        order_by=(occurred_at.desc(), Order.id.desc()),
+    ).label("history_rank")
+
+    history_subquery = (
+        select(
+            Order.id.label("order_id"),
+            Order.customer_id.label("customer_id"),
+            Order.currency.label("currency"),
+            occurred_at.label("occurred_at"),
+            retained_revenue.label("retained_revenue"),
+            history_rank,
+        )
+        .where(
+            Order.business_id == business_id,
+            Order.customer_id.is_not(None),
+            tuple_(Order.customer_id, Order.currency).in_(tuple(candidate_pairs)),
+            Order.status != "canceled",
+            Order.payment_status.in_(REALIZED_PAYMENT_STATES),
+            occurred_at.is_not(None),
+            occurred_at < window.recent_end,
+            retained_revenue > Decimal("0.00"),
+        )
+        .subquery()
+    )
+
+    history_rows = (await session.execute(
+        select(
+            history_subquery.c.order_id,
+            history_subquery.c.customer_id,
+            history_subquery.c.currency,
+            history_subquery.c.occurred_at,
+            history_subquery.c.retained_revenue,
+        )
+        .where(
+            history_subquery.c.history_rank
+            <= REPEAT_PURCHASE_MAX_HISTORY_ORDERS
+        )
+        .order_by(
+            history_subquery.c.customer_id,
+            history_subquery.c.currency,
+            history_subquery.c.occurred_at,
+            history_subquery.c.order_id,
+        )
+    )).all()
+
+    history_by_pair: dict[tuple[UUID, str], list[object]] = {}
+    for row in history_rows:
+        if row.customer_id is None:
+            continue
+        pair = (row.customer_id, str(row.currency))
+        if pair not in candidate_pairs:
+            continue
+        history_by_pair.setdefault(pair, []).append(row)
+
+    candidate_by_pair = {
+        (row.customer_id, str(row.currency)): row
+        for row in candidate_rows
+        if row.customer_id is not None
+    }
+
+    ranked: list[tuple[Decimal, Decimal, _GrowthSignal]] = []
+
+    for pair in sorted(
+        candidate_pairs,
+        key=lambda item: (str(item[0]), item[1]),
+    ):
+        customer_id, currency = pair
+        rows = history_by_pair.get(pair, [])
+        candidate = candidate_by_pair.get(pair)
+
+        if candidate is None or len(rows) < REPEAT_PURCHASE_MIN_ORDERS:
+            continue
+
+        purchase_count_value = int(candidate.purchase_count or 0)
+        if purchase_count_value < REPEAT_PURCHASE_MIN_ORDERS:
+            continue
+
+        intervals: list[Decimal] = []
+        for previous, current in zip(rows, rows[1:]):
+            previous_at = previous.occurred_at
+            current_at = current.occurred_at
+            if previous_at is None or current_at is None:
+                continue
+            seconds = Decimal(str(
+                (current_at - previous_at).total_seconds()
+            ))
+            if seconds <= 0:
+                continue
+            intervals.append(seconds / Decimal("86400"))
+
+        if len(intervals) < REPEAT_PURCHASE_MIN_INTERVALS:
+            continue
+
+        median_cadence_days = _median_decimal(intervals)
+        if median_cadence_days < REPEAT_PURCHASE_MIN_CADENCE_DAYS:
+            continue
+
+        last_row = rows[-1]
+        last_purchase = last_row.occurred_at
+        if last_purchase is None:
+            continue
+
+        days_since_last_purchase = (
+            Decimal(str(
+                (window.recent_end - last_purchase).total_seconds()
+            ))
+            / Decimal("86400")
+        )
+        if days_since_last_purchase <= 0:
+            continue
+
+        overdue_ratio = days_since_last_purchase / median_cadence_days
+        if overdue_ratio < REPEAT_PURCHASE_OVERDUE_RATIO:
+            continue
+
+        observed_value = _as_decimal(
+            candidate.observed_retained_revenue
+        )
+
+        evidence_boost = min(
+            Decimal("0.140"),
+            Decimal(
+                max(
+                    0,
+                    len(intervals) - REPEAT_PURCHASE_MIN_INTERVALS,
+                )
+            )
+            * Decimal("0.020"),
+        )
+        severity_boost = min(
+            Decimal("0.170"),
+            (
+                overdue_ratio - REPEAT_PURCHASE_OVERDUE_RATIO
+            )
+            * Decimal("0.100"),
+        )
+
+        confidence = _confidence(
+            base=Decimal("0.680"),
+            evidence=evidence_boost,
+            severity=severity_boost,
+        )
+
+        rank_score = min(
+            Decimal("0.990"),
+            Decimal("0.560")
+            + min(
+                Decimal("0.180"),
+                Decimal(
+                    max(
+                        0,
+                        purchase_count_value - REPEAT_PURCHASE_MIN_ORDERS,
+                    )
+                )
+                * Decimal("0.025"),
+            )
+            + min(
+                Decimal("0.220"),
+                (
+                    overdue_ratio - REPEAT_PURCHASE_OVERDUE_RATIO
+                )
+                * Decimal("0.120"),
+            ),
+        ).quantize(Decimal("0.001"))
+
+        signal = _GrowthSignal(
+            dedupe_key=(
+                "business-growth:repeat-purchase-due:"
+                f"{customer_id}:{currency}:{last_row.order_id}"
+            ),
+            title="Repeat purchase cadence exceeded",
+            description=(
+                "Observed time since the customer's latest retained-revenue "
+                f"purchase is {overdue_ratio:.2f}x that customer's median "
+                "purchase interval across recent eligible purchases. This is "
+                "an observed cadence signal, not a churn prediction."
+            )[:3000],
+            category="repeat_purchase_due",
+            source="commerce",
+            source_entity_type="customer",
+            source_entity_id=customer_id,
+            customer_id=customer_id,
+            reason=(
+                f"{purchase_count_value} eligible purchases in {currency} "
+                f"establish {len(intervals)} positive purchase intervals; "
+                f"median cadence is {median_cadence_days:.2f} days and "
+                f"{days_since_last_purchase:.2f} days have elapsed since the "
+                "latest eligible purchase."
+            )[:3000],
+            confidence=confidence,
+            recommendation=(
+                "Ask the Sales Copilot to review the observed purchase history "
+                "and relevant customer context before proposing a retention or "
+                "reorder follow-up."
+            ),
+            provenance=[{
+                "classification": "first_party_observed",
+                "detector": "repeat_purchase_due",
+                "source_type": "orders",
+                "source_id": str(last_row.order_id),
+                "observed_at": last_purchase.isoformat(),
+                "currency": currency,
+                "purchase_count": purchase_count_value,
+                "purchase_interval_count": len(intervals),
+                "median_purchase_interval_days": str(
+                    median_cadence_days.quantize(Decimal("0.001"))
+                ),
+                "days_since_last_purchase": str(
+                    days_since_last_purchase.quantize(Decimal("0.001"))
+                ),
+                "purchase_overdue_ratio": str(
+                    overdue_ratio.quantize(Decimal("0.001"))
+                ),
+                "observed_retained_revenue": str(observed_value),
+                "order_timestamp_policy": (
+                    "manual_created_at_else_provider_created_at_required"
+                ),
+                "eligible_payment_states": list(REALIZED_PAYMENT_STATES),
+                "refund_treatment": (
+                    "positive_retained_revenue_only;"
+                    "refunded_orders_zero_else_total_minus_refunded_amount"
+                ),
+            }],
+            priority=(
+                "high"
+                if overdue_ratio >= Decimal("2.50")
+                and purchase_count_value >= 4
+                else "medium"
+            ),
+            currency=currency,
+            rank_score=rank_score,
+        )
+        ranked.append((rank_score, confidence, signal))
+
+    ranked.sort(
+        key=lambda item: (
+            -item[0],
+            -item[1],
+            item[2].dedupe_key,
+        )
+    )
+    return [
+        item[2]
+        for item in ranked[:limit]
+    ]
+
+
+
+
+async def _detect_customer_value_declines(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    window: _ComparisonWindow,
+) -> list[_GrowthSignal]:
+    """
+    Detect material customer purchase-value decline using two comparable
+    same-currency 28-day first-party retained-revenue windows.
+
+    This is observed purchase behavior, not predicted CLV or churn.
+    Revenue decline alone is insufficient; purchase frequency must also decline.
+    """
+    occurred_at = _authoritative_order_occurred_at()
+    retained_revenue = _retained_order_revenue()
+
+    recent_end = window.recent_end
+    recent_start = recent_end - timedelta(
+        days=CUSTOMER_VALUE_COMPARISON_DAYS
+    )
+    baseline_end = recent_start
+    baseline_start = baseline_end - timedelta(
+        days=CUSTOMER_VALUE_COMPARISON_DAYS
+    )
+
+    recent = and_(
+        occurred_at >= recent_start,
+        occurred_at < recent_end,
+    )
+    baseline = and_(
+        occurred_at >= baseline_start,
+        occurred_at < baseline_end,
+    )
+
+    recent_order_count = func.count(Order.id).filter(recent).label(
+        "recent_order_count"
+    )
+    baseline_order_count = func.count(Order.id).filter(baseline).label(
+        "baseline_order_count"
+    )
+
+    recent_net_revenue = func.coalesce(
+        func.sum(retained_revenue).filter(recent),
+        Decimal("0.00"),
+    ).label("recent_net_revenue")
+    baseline_net_revenue = func.coalesce(
+        func.sum(retained_revenue).filter(baseline),
+        Decimal("0.00"),
+    ).label("baseline_net_revenue")
+
+    revenue_decline_ratio_expression = (
+        (baseline_net_revenue - recent_net_revenue)
+        / func.nullif(baseline_net_revenue, Decimal("0.00"))
+    )
+    order_decline_ratio_expression = (
+        (baseline_order_count - recent_order_count) * Decimal("1.0")
+        / func.nullif(baseline_order_count, 0)
+    )
+
+    rows = (await session.execute(
+        select(
+            Order.customer_id,
+            Order.currency,
+            recent_order_count,
+            baseline_order_count,
+            recent_net_revenue,
+            baseline_net_revenue,
+        )
+        .join(
+            Customer,
+            (Customer.id == Order.customer_id)
+            & (Customer.business_id == Order.business_id),
+        )
+        .where(
+            Order.business_id == business_id,
+            Customer.business_id == business_id,
+            Customer.active.is_(True),
+            Customer.status == "active",
+            Order.customer_id.is_not(None),
+            Order.status != "canceled",
+            Order.payment_status.in_(REALIZED_PAYMENT_STATES),
+            occurred_at.is_not(None),
+            occurred_at >= baseline_start,
+            occurred_at < recent_end,
+            retained_revenue > Decimal("0.00"),
+        )
+        .group_by(
+            Order.customer_id,
+            Order.currency,
+        )
+        .having(
+            baseline_order_count >= CUSTOMER_VALUE_MIN_BASELINE_ORDERS,
+        )
+        .order_by(
+            revenue_decline_ratio_expression.desc(),
+            order_decline_ratio_expression.desc(),
+            baseline_order_count.desc(),
+            Order.customer_id,
+            Order.currency,
+        )
+        .limit(MAX_DETECTOR_CANDIDATES)
+    )).all()
+
+    ranked: list[tuple[Decimal, Decimal, _GrowthSignal]] = []
+
+    for row in rows:
+        customer_id = row.customer_id
+        if customer_id is None:
+            continue
+
+        currency = str(row.currency)
+        recent_orders = int(row.recent_order_count or 0)
+        baseline_orders = int(row.baseline_order_count or 0)
+
+        recent_net = _as_decimal(row.recent_net_revenue)
+        baseline_net = _as_decimal(row.baseline_net_revenue)
+
+        if (
+            baseline_orders < CUSTOMER_VALUE_MIN_BASELINE_ORDERS
+            or baseline_net <= 0
+            or recent_orders >= baseline_orders
+            or recent_net >= baseline_net
+        ):
+            continue
+
+        order_decline = baseline_orders - recent_orders
+        order_decline_ratio = (
+            Decimal(order_decline) / Decimal(baseline_orders)
+        )
+
+        revenue_decline = baseline_net - recent_net
+        revenue_decline_ratio = revenue_decline / baseline_net
+
+        if (
+            order_decline < CUSTOMER_VALUE_MIN_ORDER_DECLINE
+            or order_decline_ratio < CUSTOMER_VALUE_ORDER_DECLINE_RATIO
+            or revenue_decline_ratio < CUSTOMER_VALUE_REVENUE_DECLINE_RATIO
+        ):
+            continue
+
+        evidence_boost = min(
+            Decimal("0.150"),
+            Decimal(
+                max(
+                    0,
+                    baseline_orders - CUSTOMER_VALUE_MIN_BASELINE_ORDERS,
+                )
+            )
+            * Decimal("0.025"),
+        )
+
+        severity_boost = min(
+            Decimal("0.180"),
+            (
+                revenue_decline_ratio
+                - CUSTOMER_VALUE_REVENUE_DECLINE_RATIO
+            )
+            * Decimal("0.220")
+            + (
+                order_decline_ratio
+                - CUSTOMER_VALUE_ORDER_DECLINE_RATIO
+            )
+            * Decimal("0.160"),
+        )
+
+        confidence = _confidence(
+            base=Decimal("0.660"),
+            evidence=evidence_boost,
+            severity=severity_boost,
+        )
+
+        rank_score = min(
+            Decimal("0.990"),
+            Decimal("0.560")
+            + min(
+                Decimal("0.230"),
+                (
+                    revenue_decline_ratio
+                    - CUSTOMER_VALUE_REVENUE_DECLINE_RATIO
+                )
+                * Decimal("0.380"),
+            )
+            + min(
+                Decimal("0.160"),
+                (
+                    order_decline_ratio
+                    - CUSTOMER_VALUE_ORDER_DECLINE_RATIO
+                )
+                * Decimal("0.250"),
+            )
+            + min(
+                Decimal("0.040"),
+                Decimal(
+                    max(
+                        0,
+                        baseline_orders
+                        - CUSTOMER_VALUE_MIN_BASELINE_ORDERS,
+                    )
+                )
+                * Decimal("0.010"),
+            ),
+        ).quantize(Decimal("0.001"))
+
+        signal = _GrowthSignal(
+            dedupe_key=(
+                "business-growth:customer-value-decline:"
+                f"{customer_id}:{currency}:{window.window_key}"
+            ),
+            title="Customer purchase value decline detected",
+            description=(
+                "Observed retained purchase revenue and purchase frequency for "
+                "a customer both declined materially versus the immediately "
+                f"preceding {CUSTOMER_VALUE_COMPARISON_DAYS}-day period in the "
+                "same currency. This is observed purchase behavior, not "
+                "predicted customer lifetime value or a churn prediction."
+            )[:3000],
+            category="customer_value_decline",
+            source="commerce",
+            source_entity_type="customer",
+            source_entity_id=customer_id,
+            customer_id=customer_id,
+            reason=(
+                f"Eligible retained-revenue purchases declined from "
+                f"{baseline_orders} to {recent_orders}; observed retained "
+                f"revenue declined from {baseline_net:.2f} to "
+                f"{recent_net:.2f} {currency}."
+            )[:3000],
+            confidence=confidence,
+            recommendation=(
+                "Ask the Sales Copilot to review purchase history, product "
+                "context, customer interactions, and business policy before "
+                "proposing a retention or re-engagement response."
+            ),
+            provenance=[{
+                "classification": "first_party_observed",
+                "detector": "customer_value_decline",
+                "source_type": "orders",
+                "window_start": recent_start.isoformat(),
+                "window_end": recent_end.isoformat(),
+                "window_end_inclusive": False,
+                "baseline_start": baseline_start.isoformat(),
+                "baseline_end": baseline_end.isoformat(),
+                "baseline_end_inclusive": False,
+                "currency": currency,
+                "recent_order_count": recent_orders,
+                "baseline_order_count": baseline_orders,
+                "recent_net_revenue": str(recent_net),
+                "baseline_net_revenue": str(baseline_net),
+                "absolute_decline": str(revenue_decline),
+                "decline_ratio": str(
+                    revenue_decline_ratio.quantize(Decimal("0.001"))
+                ),
+                "purchase_count_decline_ratio": str(
+                    order_decline_ratio.quantize(Decimal("0.001"))
+                ),
+                "comparison_window_days": CUSTOMER_VALUE_COMPARISON_DAYS,
+                "order_timestamp_policy": (
+                    "manual_created_at_else_provider_created_at_required"
+                ),
+                "eligible_payment_states": list(REALIZED_PAYMENT_STATES),
+                "refund_treatment": (
+                    "positive_retained_revenue_only;"
+                    "refunded_orders_zero_else_total_minus_refunded_amount"
+                ),
+                "customer_value_scope": (
+                    "observed_comparable_retained_revenue_not_predicted_clv"
+                ),
+            }],
+            priority=(
+                "high"
+                if (
+                    revenue_decline_ratio >= Decimal("0.60")
+                    and order_decline_ratio >= Decimal("0.50")
+                )
+                else "medium"
+            ),
+            currency=currency,
+            rank_score=rank_score,
+        )
+
+        ranked.append((rank_score, confidence, signal))
+
+    ranked.sort(
+        key=lambda item: (
+            -item[0],
+            -item[1],
+            item[2].dedupe_key,
+        )
+    )
+
+    return [
+        item[2]
+        for item in ranked[:MAX_OPPORTUNITIES_PER_DETECTOR]
+    ]
+
+
+async def _detect_high_value_customer_at_risk(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    window: _ComparisonWindow,
+    cadence_candidates: list[_GrowthSignal],
+) -> list[_GrowthSignal]:
+    """
+    Promote materially overdue repeat customers whose observed retained revenue
+    ranks in the upper portion of a meaningful same-currency business cohort.
+
+    This detector uses observed first-party value only. It does not calculate or
+    claim predicted customer lifetime value.
+    """
+    cadence_by_pair = {
+        (signal.customer_id, signal.currency): signal
+        for signal in cadence_candidates
+        if (
+            signal.category == "repeat_purchase_due"
+            and signal.customer_id is not None
+            and signal.currency is not None
+        )
+    }
+    if not cadence_by_pair:
+        return []
+
+    occurred_at = _authoritative_order_occurred_at()
+    retained_revenue = _retained_order_revenue()
+    value_start = window.recent_end - timedelta(days=HIGH_VALUE_LOOKBACK_DAYS)
+
+    customer_values = (
+        select(
+            Order.customer_id.label("customer_id"),
+            Order.currency.label("currency"),
+            func.count(Order.id).label("value_window_purchase_count"),
+            func.coalesce(
+                func.sum(retained_revenue),
+                Decimal("0.00"),
+            ).label("observed_retained_revenue"),
+        )
+        .join(
+            Customer,
+            (Customer.id == Order.customer_id)
+            & (Customer.business_id == Order.business_id),
+        )
+        .where(
+            Order.business_id == business_id,
+            Customer.business_id == business_id,
+            Customer.active.is_(True),
+            Customer.status == "active",
+            Order.customer_id.is_not(None),
+            Order.status != "canceled",
+            Order.payment_status.in_(REALIZED_PAYMENT_STATES),
+            occurred_at.is_not(None),
+            occurred_at >= value_start,
+            occurred_at < window.recent_end,
+            retained_revenue > Decimal("0.00"),
+        )
+        .group_by(
+            Order.customer_id,
+            Order.currency,
+        )
+        .subquery()
+    )
+
+    ranked_values = (
+        select(
+            customer_values.c.customer_id,
+            customer_values.c.currency,
+            customer_values.c.value_window_purchase_count,
+            customer_values.c.observed_retained_revenue,
+            func.count().over(
+                partition_by=customer_values.c.currency
+            ).label("cohort_size"),
+            func.percent_rank().over(
+                partition_by=customer_values.c.currency,
+                order_by=customer_values.c.observed_retained_revenue,
+            ).label("observed_value_percentile"),
+        )
+        .subquery()
+    )
+
+    candidate_pairs = tuple(
+        sorted(
+            (
+                (customer_id, currency)
+                for customer_id, currency in cadence_by_pair
+                if customer_id is not None and currency is not None
+            ),
+            key=lambda item: (str(item[0]), item[1]),
+        )
+    )
+    if not candidate_pairs:
+        return []
+
+    rows = (await session.execute(
+        select(
+            ranked_values.c.customer_id,
+            ranked_values.c.currency,
+            ranked_values.c.value_window_purchase_count,
+            ranked_values.c.observed_retained_revenue,
+            ranked_values.c.cohort_size,
+            ranked_values.c.observed_value_percentile,
+        )
+        .where(
+            tuple_(
+                ranked_values.c.customer_id,
+                ranked_values.c.currency,
+            ).in_(candidate_pairs),
+            ranked_values.c.cohort_size >= HIGH_VALUE_MIN_COHORT_SIZE,
+            ranked_values.c.observed_value_percentile
+            >= HIGH_VALUE_MIN_PERCENTILE,
+        )
+        .order_by(
+            ranked_values.c.observed_value_percentile.desc(),
+            ranked_values.c.observed_retained_revenue.desc(),
+            ranked_values.c.customer_id,
+            ranked_values.c.currency,
+        )
+        .limit(MAX_DETECTOR_CANDIDATES)
+    )).all()
+
+    ranked: list[tuple[Decimal, Decimal, _GrowthSignal]] = []
+
+    for row in rows:
+        customer_id = row.customer_id
+        currency = str(row.currency)
+
+        if customer_id is None:
+            continue
+
+        repeat_signal = cadence_by_pair.get((customer_id, currency))
+        if repeat_signal is None or not repeat_signal.provenance:
+            continue
+
+        cohort_size = int(row.cohort_size or 0)
+        percentile = _as_decimal(row.observed_value_percentile)
+        observed_value = _as_decimal(row.observed_retained_revenue)
+        value_window_purchase_count = int(
+            row.value_window_purchase_count or 0
+        )
+
+        if (
+            cohort_size < HIGH_VALUE_MIN_COHORT_SIZE
+            or percentile < HIGH_VALUE_MIN_PERCENTILE
+            or observed_value <= 0
+        ):
+            continue
+
+        cadence_evidence = repeat_signal.provenance[0]
+
+        try:
+            purchase_count = int(cadence_evidence["purchase_count"])
+            overdue_ratio = Decimal(
+                str(cadence_evidence["purchase_overdue_ratio"])
+            )
+            source_id = str(cadence_evidence["source_id"])
+            observed_at = str(cadence_evidence["observed_at"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if (
+            purchase_count < REPEAT_PURCHASE_MIN_ORDERS
+            or overdue_ratio < REPEAT_PURCHASE_OVERDUE_RATIO
+            or not source_id
+        ):
+            continue
+
+        cohort_evidence = min(
+            Decimal("0.120"),
+            Decimal(max(0, cohort_size - HIGH_VALUE_MIN_COHORT_SIZE))
+            * Decimal("0.005"),
+        )
+        value_severity = min(
+            Decimal("0.100"),
+            (percentile - HIGH_VALUE_MIN_PERCENTILE)
+            * Decimal("0.500"),
+        )
+        cadence_severity = min(
+            Decimal("0.080"),
+            (overdue_ratio - REPEAT_PURCHASE_OVERDUE_RATIO)
+            * Decimal("0.060"),
+        )
+
+        confidence = _confidence(
+            base=Decimal("0.700"),
+            evidence=cohort_evidence,
+            severity=value_severity + cadence_severity,
+        )
+
+        rank_score = min(
+            Decimal("0.990"),
+            Decimal("0.700")
+            + min(
+                Decimal("0.170"),
+                (percentile - HIGH_VALUE_MIN_PERCENTILE)
+                * Decimal("0.850"),
+            )
+            + min(
+                Decimal("0.120"),
+                (overdue_ratio - REPEAT_PURCHASE_OVERDUE_RATIO)
+                * Decimal("0.080"),
+            ),
+        ).quantize(Decimal("0.001"))
+
+        signal = _GrowthSignal(
+            dedupe_key=(
+                "business-growth:high-value-customer-at-risk:"
+                f"{customer_id}:{currency}:{source_id}"
+            ),
+            title="High-value repeat customer cadence risk",
+            description=(
+                "A repeat customer who is materially beyond their own observed "
+                "purchase cadence also ranks in the upper portion of the "
+                f"business's same-currency {HIGH_VALUE_LOOKBACK_DAYS}-day "
+                "observed retained-revenue cohort. This is observed customer "
+                "value, not predicted lifetime value or a churn prediction."
+            )[:3000],
+            category="high_value_customer_at_risk",
+            source="commerce",
+            source_entity_type="customer",
+            source_entity_id=customer_id,
+            customer_id=customer_id,
+            reason=(
+                f"The customer ranks at observed value percentile "
+                f"{percentile:.3f} among {cohort_size} customers in {currency}; "
+                f"observed retained revenue over the trailing "
+                f"{HIGH_VALUE_LOOKBACK_DAYS} days is "
+                f"{observed_value:.2f} {currency}, and the customer's purchase "
+                f"cadence is overdue by {overdue_ratio:.2f}x."
+            )[:3000],
+            confidence=confidence,
+            recommendation=(
+                "Ask the Sales Copilot to review customer history, recent "
+                "interactions, product context, and business policy before "
+                "proposing a retention or reorder follow-up."
+            ),
+            provenance=[{
+                "classification": "first_party_observed",
+                "detector": "high_value_customer_at_risk",
+                "source_type": "orders",
+                "source_id": source_id,
+                "observed_at": observed_at,
+                "currency": currency,
+                "purchase_count": purchase_count,
+                "value_window_purchase_count": value_window_purchase_count,
+                "purchase_overdue_ratio": str(
+                    overdue_ratio.quantize(Decimal("0.001"))
+                ),
+                "observed_retained_revenue": str(observed_value),
+                "observed_value_percentile": str(
+                    percentile.quantize(Decimal("0.001"))
+                ),
+                "cohort_size": cohort_size,
+                "value_lookback_days": HIGH_VALUE_LOOKBACK_DAYS,
+                "order_timestamp_policy": (
+                    "manual_created_at_else_provider_created_at_required"
+                ),
+                "eligible_payment_states": list(REALIZED_PAYMENT_STATES),
+                "refund_treatment": (
+                    "positive_retained_revenue_only;"
+                    "refunded_orders_zero_else_total_minus_refunded_amount"
+                ),
+                "customer_value_scope": (
+                    "observed_trailing_retained_revenue_not_predicted_clv"
+                ),
+            }],
+            priority=(
+                "high"
+                if (
+                    percentile >= Decimal("0.900")
+                    or overdue_ratio >= Decimal("2.500")
+                )
+                else "medium"
+            ),
+            currency=currency,
+            rank_score=rank_score,
+        )
+
+        ranked.append((rank_score, confidence, signal))
+
+    ranked.sort(
+        key=lambda item: (
+            -item[0],
+            -item[1],
+            item[2].dedupe_key,
+        )
+    )
+    return [
+        item[2]
+        for item in ranked[:MAX_OPPORTUNITIES_PER_DETECTOR]
+    ]
+
+
+
+async def _detect_product_affinity_cross_sell(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    window: _ComparisonWindow,
+) -> list[_GrowthSignal]:
+    """
+    Detect bounded directional product affinity from first-party paid orders.
+
+    Product identity uses only tenant-owned OrderLineItem.catalog_item_id.
+    Variant/external IDs are intentionally excluded because they do not provide
+    a safe standalone provider/account identity for cross-order matching.
+
+    Co-purchase is an observed association only, never proof of causation.
+    """
+    occurred_at = _authoritative_order_occurred_at()
+    retained_revenue = _retained_order_revenue()
+    affinity_start = window.recent_end - timedelta(days=AFFINITY_LOOKBACK_DAYS)
+
+    # One row per eligible order/product prevents duplicate line items for the
+    # same catalog product from inflating pair support.
+    order_products = (
+        select(
+            Order.id.label("order_id"),
+            OrderLineItem.catalog_item_id.label("catalog_item_id"),
+        )
+        .join(
+            OrderLineItem,
+            (OrderLineItem.order_id == Order.id)
+            & (OrderLineItem.business_id == Order.business_id),
+        )
+        .where(
+            Order.business_id == business_id,
+            OrderLineItem.business_id == business_id,
+            OrderLineItem.catalog_item_id.is_not(None),
+            Order.status != "canceled",
+            Order.payment_status.in_(REALIZED_PAYMENT_STATES),
+            occurred_at.is_not(None),
+            occurred_at >= affinity_start,
+            occurred_at < window.recent_end,
+            retained_revenue > Decimal("0.00"),
+        )
+        .group_by(
+            Order.id,
+            OrderLineItem.catalog_item_id,
+        )
+        .subquery("affinity_order_products")
+    )
+
+    source_products = order_products.alias("affinity_source_products")
+    target_products = order_products.alias("affinity_target_products")
+
+    product_order_counts = (
+        select(
+            order_products.c.catalog_item_id,
+            func.count(
+                func.distinct(order_products.c.order_id)
+            ).label("product_order_count"),
+        )
+        .group_by(order_products.c.catalog_item_id)
+        .subquery("affinity_product_order_counts")
+    )
+
+    source_counts = product_order_counts.alias("affinity_source_counts")
+    target_counts = product_order_counts.alias("affinity_target_counts")
+
+    eligible_order_count = (
+        select(
+            func.count(func.distinct(order_products.c.order_id))
+        )
+        .scalar_subquery()
+    )
+
+    target_item = aliased(CatalogItem)
+    pair_support = func.count(
+        func.distinct(source_products.c.order_id)
+    ).label("co_purchase_order_count")
+
+    pair_rows = (await session.execute(
+        select(
+            source_products.c.catalog_item_id.label(
+                "source_catalog_item_id"
+            ),
+            target_products.c.catalog_item_id.label(
+                "target_catalog_item_id"
+            ),
+            target_item.name.label("target_catalog_item_name"),
+            target_item.availability.label("target_availability"),
+            pair_support,
+            source_counts.c.product_order_count.label(
+                "source_order_count"
+            ),
+            target_counts.c.product_order_count.label(
+                "target_order_count"
+            ),
+            eligible_order_count.label("eligible_order_count"),
+        )
+        .join(
+            target_products,
+            (target_products.c.order_id == source_products.c.order_id)
+            & (
+                target_products.c.catalog_item_id
+                != source_products.c.catalog_item_id
+            ),
+        )
+        .join(
+            source_counts,
+            source_counts.c.catalog_item_id
+            == source_products.c.catalog_item_id,
+        )
+        .join(
+            target_counts,
+            target_counts.c.catalog_item_id
+            == target_products.c.catalog_item_id,
+        )
+        .join(
+            target_item,
+            (target_item.id == target_products.c.catalog_item_id)
+            & (target_item.business_id == business_id),
+        )
+        .where(
+            target_item.business_id == business_id,
+            target_item.item_type == "product",
+            target_item.status == "active",
+            target_item.published.is_(True),
+            target_item.availability.in_(AFFINITY_SELLABLE_AVAILABILITY),
+            or_(
+                target_item.availability.in_(("preorder", "backorder")),
+                target_item.inventory_quantity.is_(None),
+                target_item.inventory_quantity > 0,
+            ),
+        )
+        .group_by(
+            source_products.c.catalog_item_id,
+            target_products.c.catalog_item_id,
+            target_item.name,
+            target_item.availability,
+            source_counts.c.product_order_count,
+            target_counts.c.product_order_count,
+        )
+        .order_by(
+            pair_support.desc(),
+            source_products.c.catalog_item_id,
+            target_products.c.catalog_item_id,
+        )
+        .limit(MAX_DETECTOR_CANDIDATES)
+    )).all()
+
+    qualified_pairs: list[
+        tuple[
+            Decimal,
+            Decimal,
+            int,
+            UUID,
+            UUID,
+            str,
+            str,
+            int,
+            int,
+            int,
+        ]
+    ] = []
+
+    for row in pair_rows:
+        source_item_id = row.source_catalog_item_id
+        target_item_id = row.target_catalog_item_id
+
+        if source_item_id is None or target_item_id is None:
+            continue
+        if source_item_id == target_item_id:
+            continue
+
+        total_orders = int(row.eligible_order_count or 0)
+        source_orders = int(row.source_order_count or 0)
+        target_orders = int(row.target_order_count or 0)
+        co_purchase_orders = int(row.co_purchase_order_count or 0)
+
+        if (
+            total_orders < AFFINITY_MIN_ELIGIBLE_ORDERS
+            or source_orders < AFFINITY_MIN_SOURCE_ORDERS
+            or target_orders < AFFINITY_MIN_TARGET_ORDERS
+            or co_purchase_orders < AFFINITY_MIN_PAIR_ORDERS
+        ):
+            continue
+
+        directional_confidence = (
+            Decimal(co_purchase_orders) / Decimal(source_orders)
+        )
+        target_base_rate = (
+            Decimal(target_orders) / Decimal(total_orders)
+        )
+
+        if target_base_rate <= 0:
+            continue
+
+        lift = directional_confidence / target_base_rate
+
+        if (
+            directional_confidence
+            < AFFINITY_MIN_DIRECTIONAL_CONFIDENCE
+            or lift < AFFINITY_MIN_LIFT
+        ):
+            continue
+
+        qualified_pairs.append((
+            lift,
+            directional_confidence,
+            co_purchase_orders,
+            source_item_id,
+            target_item_id,
+            str(row.target_catalog_item_name),
+            str(row.target_availability),
+            total_orders,
+            source_orders,
+            target_orders,
+        ))
+
+    qualified_pairs.sort(
+        key=lambda item: (
+            -item[0],
+            -item[1],
+            -item[2],
+            str(item[3]),
+            str(item[4]),
+        )
+    )
+    qualified_pairs = qualified_pairs[:AFFINITY_MAX_DIRECTION_CANDIDATES]
+
+    if not qualified_pairs:
+        return []
+
+    ranked: list[
+        tuple[Decimal, Decimal, float, int, _GrowthSignal]
+    ] = []
+
+    for (
+        lift,
+        directional_confidence,
+        co_purchase_orders,
+        source_item_id,
+        target_item_id,
+        target_item_name,
+        target_availability,
+        total_orders,
+        source_orders,
+        target_orders,
+    ) in qualified_pairs:
+        source_line = aliased(OrderLineItem)
+        target_order = aliased(Order)
+        target_line = aliased(OrderLineItem)
+
+        target_occurred_at = case(
+            (target_order.source == "manual", target_order.created_at),
+            else_=target_order.provider_created_at,
+        )
+        target_retained_revenue = case(
+            (
+                target_order.payment_status == "refunded",
+                Decimal("0.00"),
+            ),
+            else_=func.greatest(
+                target_order.total - target_order.refunded_amount,
+                Decimal("0.00"),
+            ),
+        )
+
+        target_purchase_exists = exists(
+            select(target_order.id)
+            .join(
+                target_line,
+                (target_line.order_id == target_order.id)
+                & (
+                    target_line.business_id
+                    == target_order.business_id
+                ),
+            )
+            .where(
+                target_order.business_id == business_id,
+                target_line.business_id == business_id,
+                target_order.customer_id == Order.customer_id,
+                target_line.catalog_item_id == target_item_id,
+                target_order.status != "canceled",
+                target_order.payment_status.in_(REALIZED_PAYMENT_STATES),
+                target_occurred_at.is_not(None),
+                target_occurred_at < window.recent_end,
+                target_retained_revenue > Decimal("0.00"),
+            )
+        )
+
+        source_purchase_count = func.count(
+            func.distinct(Order.id)
+        ).label("source_purchase_count")
+        last_source_purchase_at = func.max(occurred_at).label(
+            "last_source_purchase_at"
+        )
+
+        customer_rows = (await session.execute(
+            select(
+                Order.customer_id,
+                source_purchase_count,
+                last_source_purchase_at,
+            )
+            .join(
+                source_line,
+                (source_line.order_id == Order.id)
+                & (source_line.business_id == Order.business_id),
+            )
+            .join(
+                Customer,
+                (Customer.id == Order.customer_id)
+                & (Customer.business_id == Order.business_id),
+            )
+            .where(
+                Order.business_id == business_id,
+                source_line.business_id == business_id,
+                Customer.business_id == business_id,
+                Customer.active.is_(True),
+                Customer.status == "active",
+                Order.customer_id.is_not(None),
+                source_line.catalog_item_id == source_item_id,
+                Order.status != "canceled",
+                Order.payment_status.in_(REALIZED_PAYMENT_STATES),
+                occurred_at.is_not(None),
+                occurred_at >= affinity_start,
+                occurred_at < window.recent_end,
+                retained_revenue > Decimal("0.00"),
+                ~target_purchase_exists,
+            )
+            .group_by(Order.customer_id)
+            .order_by(
+                last_source_purchase_at.desc(),
+                source_purchase_count.desc(),
+                Order.customer_id,
+            )
+            .limit(AFFINITY_CUSTOMERS_PER_DIRECTION)
+        )).all()
+
+        for customer_row in customer_rows:
+            customer_id = customer_row.customer_id
+            last_source_purchase = customer_row.last_source_purchase_at
+            customer_source_purchases = int(
+                customer_row.source_purchase_count or 0
+            )
+
+            if (
+                customer_id is None
+                or last_source_purchase is None
+                or customer_source_purchases < 1
+            ):
+                continue
+
+            evidence_boost = min(
+                Decimal("0.150"),
+                Decimal(
+                    max(
+                        0,
+                        co_purchase_orders - AFFINITY_MIN_PAIR_ORDERS,
+                    )
+                )
+                * Decimal("0.025"),
+            )
+
+            severity_boost = min(
+                Decimal("0.170"),
+                (
+                    directional_confidence
+                    - AFFINITY_MIN_DIRECTIONAL_CONFIDENCE
+                )
+                * Decimal("0.240")
+                + (
+                    lift - AFFINITY_MIN_LIFT
+                )
+                * Decimal("0.035"),
+            )
+
+            confidence = _confidence(
+                base=Decimal("0.650"),
+                evidence=evidence_boost,
+                severity=severity_boost,
+            )
+
+            rank_score = min(
+                Decimal("0.990"),
+                Decimal("0.560")
+                + min(
+                    Decimal("0.160"),
+                    Decimal(
+                        max(
+                            0,
+                            co_purchase_orders
+                            - AFFINITY_MIN_PAIR_ORDERS,
+                        )
+                    )
+                    * Decimal("0.025"),
+                )
+                + min(
+                    Decimal("0.160"),
+                    (
+                        directional_confidence
+                        - AFFINITY_MIN_DIRECTIONAL_CONFIDENCE
+                    )
+                    * Decimal("0.300"),
+                )
+                + min(
+                    Decimal("0.110"),
+                    (
+                        lift - AFFINITY_MIN_LIFT
+                    )
+                    * Decimal("0.050"),
+                ),
+            ).quantize(Decimal("0.001"))
+
+            source_purchase_key = (
+                last_source_purchase.astimezone(UTC)
+                .strftime("%Y%m%dT%H%M%S")
+            )
+
+            signal = _GrowthSignal(
+                dedupe_key=(
+                    "business-growth:product-affinity-cross-sell:"
+                    f"{customer_id}:{source_item_id}:"
+                    f"{target_item_id}:{source_purchase_key}"
+                ),
+                title=(
+                    f"Observed cross-sell affinity: {target_item_name}"
+                )[:180],
+                description=(
+                    "First-party paid-order history shows a directional "
+                    "association between two catalog products. Customers who "
+                    "purchased the source product also purchased the target "
+                    f"product in {directional_confidence:.1%} of eligible "
+                    "source-product orders, with observed lift "
+                    f"{lift:.2f}x above the target product's base purchase "
+                    "rate. This is an association, not proof of causation."
+                )[:3000],
+                category="product_affinity_cross_sell",
+                source="commerce",
+                source_entity_type="catalog_item",
+                source_entity_id=target_item_id,
+                customer_id=customer_id,
+                reason=(
+                    f"The product pair appeared together in "
+                    f"{co_purchase_orders} eligible orders. The source "
+                    f"product appeared in {source_orders} orders, the target "
+                    f"product appeared in {target_orders} orders, and the "
+                    f"customer has {customer_source_purchases} observed "
+                    "source-product purchases with no recorded eligible "
+                    "purchase of the target product."
+                )[:3000],
+                confidence=confidence,
+                recommendation=(
+                    "Ask the Sales Copilot to review the customer's current "
+                    "order history, product relevance, business policy, and "
+                    "current product availability before proposing a "
+                    "cross-sell follow-up."
+                ),
+                provenance=[{
+                    "classification": "first_party_observed",
+                    "detector": "product_affinity_cross_sell",
+                    "source_type": "order_line_items",
+                    "source_id": str(target_item_id),
+                    "observed_at": last_source_purchase.isoformat(),
+                    "source_catalog_item_id": str(source_item_id),
+                    "target_catalog_item_id": str(target_item_id),
+                    "eligible_order_count": total_orders,
+                    "source_order_count": source_orders,
+                    "target_order_count": target_orders,
+                    "co_purchase_order_count": co_purchase_orders,
+                    "directional_confidence": str(
+                        directional_confidence.quantize(
+                            Decimal("0.001")
+                        )
+                    ),
+                    "affinity_lift": str(
+                        lift.quantize(Decimal("0.001"))
+                    ),
+                    "affinity_lookback_days": AFFINITY_LOOKBACK_DAYS,
+                    "customer_source_purchase_count": (
+                        customer_source_purchases
+                    ),
+                    "last_source_purchase_at": (
+                        last_source_purchase.isoformat()
+                    ),
+                    "target_availability": target_availability,
+                    "product_identity_scope": (
+                        "tenant_catalog_item_id_only;"
+                        "external_variant_identity_excluded"
+                    ),
+                    "affinity_disclaimer": (
+                        "Observed co-purchase association only; "
+                        "no causal claim."
+                    ),
+                    "order_timestamp_policy": (
+                        "manual_created_at_else_provider_created_at_required"
+                    ),
+                    "eligible_payment_states": list(
+                        REALIZED_PAYMENT_STATES
+                    ),
+                    "refund_treatment": (
+                        "positive_retained_revenue_orders_only"
+                    ),
+                }],
+                priority=(
+                    "high"
+                    if (
+                        directional_confidence >= Decimal("0.500")
+                        and lift >= Decimal("2.000")
+                        and co_purchase_orders >= 5
+                    )
+                    else "medium"
+                ),
+                currency=None,
+                rank_score=rank_score,
+            )
+
+            ranked.append((
+                rank_score,
+                confidence,
+                last_source_purchase.astimezone(UTC).timestamp(),
+                customer_source_purchases,
+                signal,
+            ))
+
+    ranked.sort(
+        key=lambda item: (
+            -item[0],
+            -item[1],
+            -item[2],
+            -item[3],
+            item[4].dedupe_key,
+        )
+    )
+
+    # Prevent one customer from receiving several competing affinity
+    # Opportunities in the same detector run.
+    selected: list[_GrowthSignal] = []
+    seen_customers: set[UUID] = set()
+
+    for (
+        _rank_score,
+        _confidence_value,
+        _last_source_purchase,
+        _customer_source_purchases,
+        signal,
+    ) in ranked:
+        if signal.customer_id is None:
+            continue
+        if signal.customer_id in seen_customers:
+            continue
+
+        seen_customers.add(signal.customer_id)
+        selected.append(signal)
+
+        if len(selected) >= MAX_OPPORTUNITIES_PER_DETECTOR:
+            break
+
+    return selected
+
+
 async def _create_opportunity_if_missing(
     session: AsyncSession,
     *,
@@ -1507,6 +3102,7 @@ async def _create_opportunity_if_missing(
     priority: str = "medium",
     estimated_value: Decimal | None = None,
     currency: str | None = None,
+    customer_id: UUID | None = None,
     enqueue_initial_analysis: bool = False,
 ) -> bool:
     """
@@ -1531,7 +3127,7 @@ async def _create_opportunity_if_missing(
                 estimated_value=estimated_value,
                 currency=currency,
                 status="open",
-                customer_id=None,
+                customer_id=customer_id,
                 lead_id=None,
                 source_entity_type=source_entity_type,
                 source_entity_id=source_entity_id,

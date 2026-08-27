@@ -75,6 +75,10 @@ class OpportunityAnalysisTests(unittest.IsolatedAsyncioTestCase):
             "advertising_inefficiency": "cmo",
             "refund_anomaly": "operations",
             "inventory_risk": "operations",
+            "repeat_purchase_due": "sales",
+            "high_value_customer_at_risk": "sales",
+            "customer_value_decline": "sales",
+            "product_affinity_cross_sell": "sales",
             "future_category": "business_manager",
         }
         for category, role in expected.items():
