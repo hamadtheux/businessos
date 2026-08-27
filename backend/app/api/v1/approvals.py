@@ -326,7 +326,11 @@ async def _approval_responses(session: AsyncSession, approvals: list[ApprovalReq
     workflows = {}
     if not hasattr(session, "scalars") or not hasattr(session, "execute"):
         return [{
-            **{column.name: getattr(item, column.name) for column in item.__table__.columns},
+            **{
+                name: getattr(item, name)
+                for name in ApprovalRequestResponse.model_fields
+                if name not in {"target_type", "action", "workflow"}
+            },
             "target_type": "ai_action" if item.action_id is not None else "workflow_node",
             "action": None, "workflow": None,
         } for item in approvals]
@@ -357,7 +361,11 @@ async def _approval_responses(session: AsyncSession, approvals: list[ApprovalReq
             "node_name": node.name, "run_status": run.status,
         } for node_run, run, workflow, node in rows}
     return [{
-        **{column.name: getattr(item, column.name) for column in item.__table__.columns},
+        **{
+                name: getattr(item, name)
+                for name in ApprovalRequestResponse.model_fields
+                if name not in {"target_type", "action", "workflow"}
+            },
         "target_type": "ai_action" if item.action_id is not None else "workflow_node",
         "action": actions.get(item.action_id),
         "workflow": workflows.get(item.workflow_node_run_id),

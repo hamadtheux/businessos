@@ -57,6 +57,15 @@ class ApprovalModelTests(unittest.TestCase):
             if isinstance(constraint, CheckConstraint)
         }
         self.assertIn("ck_approval_requests_consistent_lifecycle", checks)
+        self.assertIn(
+            "ck_approval_requests_consistent_action_authorization_snapshot",
+            checks,
+        )
+        self.assertIn("action_type_snapshot", ApprovalRequest.__table__.columns)
+        self.assertIn(
+            "authorized_payload_hash_snapshot",
+            ApprovalRequest.__table__.columns,
+        )
 
         pending_index = next(
             item

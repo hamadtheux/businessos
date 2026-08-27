@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import inspect
 import unittest
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -13,9 +14,17 @@ os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 from app.models.action_execution_attempt import ActionExecutionAttempt  # noqa: E402
 from app.models.automation import AutomationNodeRun, AutomationWorkflow  # noqa: E402
 from app.models.background_job import BackgroundJob  # noqa: E402
+from app.exceptions.ai_agent import AIAgentProviderError  # noqa: E402
+from app.exceptions.ai_workforce import (  # noqa: E402
+    AIWorkforceConflictError,
+    AIWorkforceNotFoundError,
+    AIWorkforcePersistenceError,
+)
+from app.services.billing import BillingEntitlementError  # noqa: E402
 from app.services.approval import _enqueue_workflow_resume  # noqa: E402
 from app.services.job_handlers import (  # noqa: E402
     JOB_HANDLERS,
+    handle_analyze_business_opportunity,
     handle_process_automation_event,
     handle_process_integration_event,
     handle_process_scheduled_workflow,
@@ -37,12 +46,175 @@ class JobHandlerTests(unittest.IsolatedAsyncioTestCase):
             "dispatch_action_execution",
             "maintain_subscription",
             "discover_competitors", "generate_content_plan", "analyze_campaign_opportunities",
+            "analyze_business_opportunity",
             "commerce_initial_sync", "commerce_incremental_sync", "commerce_webhook_reconcile",
             "google_merchant_status_sync", "meta_catalog_status_sync",
             "google_ads_performance_sync", "meta_ads_performance_sync",
         })
         with self.assertRaises(TypeError):
             JOB_HANDLERS["dynamic"] = AsyncMock()  # type: ignore[index]
+
+    async def test_opportunity_analysis_resolves_server_provider_and_delegates(self) -> None:
+        opportunity_id = uuid4()
+        job = _job(
+            job_type="analyze_business_opportunity",
+            opportunity_id=opportunity_id,
+        )
+        provider = SimpleNamespace(provider_name="server-provider")
+        analyze = AsyncMock(return_value=SimpleNamespace(
+            execution=SimpleNamespace(status="completed"), failure_code=None
+        ))
+        session = _Session()
+        with patch(
+            "app.services.job_handlers.create_openai_provider",
+            return_value=provider,
+        ) as resolve_provider, patch(
+            "app.services.job_handlers.analyze_business_opportunity",
+            new=analyze,
+        ):
+            outcome = await handle_analyze_business_opportunity(session, job)  # type: ignore[arg-type]
+
+        self.assertTrue(outcome.succeeded)
+        resolve_provider.assert_called_once()
+        self.assertIs(analyze.await_args.kwargs["provider"], provider)
+        self.assertEqual(analyze.await_args.kwargs["business_id"], BUSINESS_ID)
+        self.assertEqual(analyze.await_args.kwargs["opportunity_id"], opportunity_id)
+        self.assertEqual(
+            analyze.await_args.kwargs["analysis_request_key"],
+            f"business-growth:{opportunity_id}:initial",
+        )
+        self.assertEqual(analyze.await_args.kwargs["trigger_type"], "automation")
+        self.assertIsNone(analyze.await_args.kwargs["requested_by_user_id"])
+        self.assertEqual(session.added, [])
+
+    async def test_opportunity_analysis_requires_typed_reference(self) -> None:
+        outcome = await handle_analyze_business_opportunity(
+            _Session(),  # type: ignore[arg-type]
+            _job(job_type="analyze_business_opportunity"),
+        )
+        self.assertFalse(outcome.succeeded)
+        self.assertEqual(outcome.failure_code, "invalid_job_state")
+        self.assertFalse(outcome.retryable)
+
+    async def test_provider_configuration_failure_uses_bounded_job_retry(self) -> None:
+        job = _job(
+            job_type="analyze_business_opportunity", opportunity_id=uuid4()
+        )
+        with patch(
+            "app.services.job_handlers.create_openai_provider",
+            side_effect=AIAgentProviderError("private configuration detail"),
+        ), patch(
+            "app.services.job_handlers.analyze_business_opportunity",
+            new=AsyncMock(),
+        ) as analyze:
+            outcome = await handle_analyze_business_opportunity(
+                _Session(), job  # type: ignore[arg-type]
+            )
+        self.assertEqual(outcome.failure_code, "provider_unavailable")
+        self.assertTrue(outcome.retryable)
+        analyze.assert_not_awaited()
+
+    async def test_persisted_failed_analysis_is_terminal_and_retry_identity_is_stable(self) -> None:
+        opportunity_id = uuid4()
+        job = _job(
+            job_type="analyze_business_opportunity",
+            opportunity_id=opportunity_id,
+        )
+        analyze = AsyncMock(return_value=SimpleNamespace(
+            execution=SimpleNamespace(status="failed"),
+            failure_code="provider_unavailable"
+        ))
+        with patch(
+            "app.services.job_handlers.create_openai_provider",
+            return_value=SimpleNamespace(provider_name="server-provider"),
+        ), patch(
+            "app.services.job_handlers.analyze_business_opportunity", new=analyze
+        ):
+            first = await handle_analyze_business_opportunity(
+                _Session(), job  # type: ignore[arg-type]
+            )
+            second = await handle_analyze_business_opportunity(
+                _Session(), job  # type: ignore[arg-type]
+            )
+        self.assertTrue(first.succeeded)
+        self.assertTrue(second.succeeded)
+        self.assertEqual(
+            [call.kwargs["analysis_request_key"] for call in analyze.await_args_list],
+            [
+                f"business-growth:{opportunity_id}:initial",
+                f"business-growth:{opportunity_id}:initial",
+            ],
+        )
+
+    async def test_existing_running_analysis_requeues_instead_of_claiming_success(self) -> None:
+        with patch(
+            "app.services.job_handlers.create_openai_provider",
+            return_value=SimpleNamespace(provider_name="server-provider"),
+        ), patch(
+            "app.services.job_handlers.analyze_business_opportunity",
+            new=AsyncMock(return_value=SimpleNamespace(
+                execution=SimpleNamespace(status="running"),
+                failure_code=None,
+            )),
+        ):
+            outcome = await handle_analyze_business_opportunity(
+                _Session(),  # type: ignore[arg-type]
+                _job(
+                    job_type="analyze_business_opportunity",
+                    opportunity_id=uuid4(),
+                ),
+            )
+        self.assertFalse(outcome.succeeded)
+        self.assertEqual(outcome.failure_code, "dependency_unavailable")
+        self.assertTrue(outcome.retryable)
+
+    async def test_analysis_handler_classifies_terminal_and_retryable_errors(self) -> None:
+        cases = (
+            (AIWorkforceNotFoundError("missing"), "resource_not_found", False),
+            (AIWorkforceConflictError("closed"), "invalid_job_state", False),
+            (
+                BillingEntitlementError("feature_not_entitled", "ai_agents"),
+                "feature_not_entitled",
+                False,
+            ),
+            (
+                AIWorkforcePersistenceError("database unavailable"),
+                "dependency_unavailable",
+                True,
+            ),
+        )
+        for error, code, retryable in cases:
+            with self.subTest(code=code), patch(
+                "app.services.job_handlers.create_openai_provider",
+                return_value=SimpleNamespace(provider_name="server-provider"),
+            ), patch(
+                "app.services.job_handlers.analyze_business_opportunity",
+                new=AsyncMock(side_effect=error),
+            ):
+                outcome = await handle_analyze_business_opportunity(
+                    _Session(),  # type: ignore[arg-type]
+                    _job(
+                        job_type="analyze_business_opportunity",
+                        opportunity_id=uuid4(),
+                    ),
+                )
+            self.assertEqual(outcome.failure_code, code)
+            self.assertEqual(outcome.retryable, retryable)
+
+    def test_opportunity_handler_contains_no_action_execution_or_connector_path(self) -> None:
+        source = inspect.getsource(handle_analyze_business_opportunity)
+        for forbidden in (
+            "ActionExecutionAttempt",
+            "prepare_action_execution",
+            "dispatch_action",
+            "connector.execute",
+            "send_email",
+            "send_whatsapp",
+            "launch_meta",
+            "launch_google",
+            "change_ad_budget",
+        ):
+            self.assertNotIn(forbidden, source)
 
     async def test_automation_event_creates_durable_start_jobs_for_runs(self) -> None:
         run = SimpleNamespace(id=uuid4(), status="queued")
@@ -167,6 +339,7 @@ def _job(
     workflow_run_id=None,
     integration_event_id=None,
     action_execution_attempt_id=None,
+    opportunity_id=None,
     scheduled_occurrence_at=None,
 ) -> BackgroundJob:
     return BackgroundJob(
@@ -178,6 +351,7 @@ def _job(
         workflow_run_id=workflow_run_id, node_run_id=None,
         integration_event_id=integration_event_id,
         action_execution_attempt_id=action_execution_attempt_id,
+        opportunity_id=opportunity_id,
         social_schedule_id=None, scheduled_occurrence_at=scheduled_occurrence_at,
         created_at=NOW, updated_at=NOW,
     )

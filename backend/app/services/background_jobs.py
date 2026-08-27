@@ -35,6 +35,7 @@ from app.models.integration import IntegrationWebhookEvent
 from app.models.commerce import CommerceFeedDestination, CommerceSyncRun, CommerceWebhookReceipt
 from app.models.marketing import Campaign, SocialSchedule
 from app.models.notification import Notification
+from app.models.opportunity import Opportunity
 from app.services.operations import record_audit
 
 
@@ -54,6 +55,7 @@ _REFERENCE_MODELS = {
     "commerce_webhook_receipt_id": CommerceWebhookReceipt,
     "commerce_feed_destination_id": CommerceFeedDestination,
     "marketing_campaign_id": Campaign,
+    "opportunity_id": Opportunity,
 }
 
 
@@ -78,6 +80,7 @@ async def enqueue_job(
     commerce_webhook_receipt_id: UUID | None = None,
     commerce_feed_destination_id: UUID | None = None,
     marketing_campaign_id: UUID | None = None,
+    opportunity_id: UUID | None = None,
     scheduled_occurrence_at: datetime | None = None,
 ) -> BackgroundJob:
     """Enqueue one server-defined job without accepting arbitrary payloads."""
@@ -100,6 +103,7 @@ async def enqueue_job(
         "commerce_webhook_receipt_id": commerce_webhook_receipt_id,
         "commerce_feed_destination_id": commerce_feed_destination_id,
         "marketing_campaign_id": marketing_campaign_id,
+        "opportunity_id": opportunity_id,
     }
     if references[policy.reference_field] is None:
         raise BackgroundJobValidationError("job_reference_required")
@@ -153,7 +157,15 @@ async def enqueue_job(
         ))
     except SQLAlchemyError:
         raise BackgroundJobPersistenceError("job_enqueue_failed") from None
-    if job is None or job.business_id != business_id or job.job_type != job_type:
+    if (
+        job is None
+        or job.business_id != business_id
+        or job.job_type != job_type
+        or (
+            job_type == "analyze_business_opportunity"
+            and job.opportunity_id != opportunity_id
+        )
+    ):
         raise BackgroundJobValidationError("idempotency_key_conflict")
     return job
 

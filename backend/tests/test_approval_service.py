@@ -14,6 +14,7 @@ os.environ.setdefault(
 os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 
 from app.exceptions.approval import (  # noqa: E402
+    ApprovalConflictError,
     ApprovalNotFoundError,
     ApprovalPersistenceError,
     ApprovalStateError,
@@ -28,6 +29,8 @@ from app.services.approval import (  # noqa: E402
     list_approval_requests,
     reject_approval_request,
 )
+from app.services.action_policy import canonical_action_payload_hash  # noqa: E402
+from app.services.action_registry import ACTION_REGISTRY  # noqa: E402
 
 
 BUSINESS_ID = UUID("c1000000-0000-0000-0000-000000000001")
@@ -59,6 +62,27 @@ class ApprovalServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.flush_calls, 1)
         self.assertEqual(session.commit_calls, 0)
         self.assertGreaterEqual(session.for_update_calls, 3)
+        self.assertEqual(first.action_type_snapshot, action.action_type)
+        self.assertEqual(
+            first.authorized_payload_hash_snapshot,
+            action.authorized_payload_hash,
+        )
+
+    async def test_mutated_action_cannot_be_approved_under_stale_snapshot(self) -> None:
+        action, approval, session = _approval_fixture()
+        action.action_payload = {
+            "customer_ref": "customer-2",
+            "message": "Redirected message",
+        }
+        with self.assertRaises(ApprovalConflictError):
+            await approve_approval_request(
+                session,
+                business_id=BUSINESS_ID,
+                approval_id=approval.id,
+                decided_by_user_id=USER_ID,
+            )
+        self.assertEqual(approval.status, "pending")
+        self.assertEqual(action.status, "pending_approval")
 
     async def test_cross_tenant_create_is_safe_not_found(self) -> None:
         session = _FakeSession(actions=[_pending_action()])
@@ -310,7 +334,7 @@ def _param(params: dict[str, object], prefix: str):
 
 
 def _pending_action(*, business_id: UUID = BUSINESS_ID) -> AIAction:
-    return AIAction(
+    action = AIAction(
         id=uuid4(),
         business_id=business_id,
         execution_id=uuid4(),
@@ -330,6 +354,10 @@ def _pending_action(*, business_id: UUID = BUSINESS_ID) -> AIAction:
         failure_code=None,
         external_reference_id=None,
     )
+    action.authorized_payload_hash = canonical_action_payload_hash(
+        ACTION_REGISTRY.validate_payload(action.action_type, action.action_payload)
+    )
+    return action
 
 
 def _approval(
@@ -345,6 +373,8 @@ def _approval(
         requested_by_user_id=None,
         status="pending",
         reason_code="external_communication",
+        action_type_snapshot=action.action_type,
+        authorized_payload_hash_snapshot=action.authorized_payload_hash,
         requested_at=now,
         expires_at=expires_at,
         decided_at=None,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final, Literal
+from uuid import UUID
 
 
 JobType = Literal[
@@ -18,6 +19,7 @@ JobType = Literal[
     "discover_competitors",
     "generate_content_plan",
     "analyze_campaign_opportunities",
+    "analyze_business_opportunity",
     "commerce_initial_sync",
     "commerce_incremental_sync",
     "commerce_webhook_reconcile",
@@ -115,6 +117,12 @@ _POLICIES = {
     "analyze_campaign_opportunities": JobPolicy(
         "analyze_campaign_opportunities", "marketing_automation_run_id", 20, 3, True, True, True,
     ),
+    # Opportunity analysis is an internal, replay-safe model operation. It may
+    # materialize governed AIAction proposals and ApprovalRequests, but it never
+    # crosses the external action-dispatch boundary.
+    "analyze_business_opportunity": JobPolicy(
+        "analyze_business_opportunity", "opportunity_id", 30, 3, True, True, True,
+    ),
     "commerce_initial_sync": JobPolicy(
         "commerce_initial_sync", "commerce_sync_run_id", 65, 5, True, True, True,
     ),
@@ -155,6 +163,7 @@ JOB_REFERENCE_FIELDS: Final = (
     "commerce_webhook_receipt_id",
     "commerce_feed_destination_id",
     "marketing_campaign_id",
+    "opportunity_id",
 )
 
 
@@ -163,3 +172,13 @@ def require_job_policy(job_type: str) -> JobPolicy:
     if policy is None:
         raise ValueError("job_type_invalid")
     return policy
+
+
+def initial_opportunity_analysis_job_key(opportunity_id: UUID) -> str:
+    """Return the bounded durable-queue identity for first analysis."""
+    return f"opportunity-analysis:{opportunity_id}:initial"
+
+
+def initial_opportunity_analysis_request_key(opportunity_id: UUID) -> str:
+    """Return the stable service idempotency identity used across job retries."""
+    return f"business-growth:{opportunity_id}:initial"

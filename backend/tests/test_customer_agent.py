@@ -746,6 +746,40 @@ class CustomerAgentDeliveryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(target, customer.email)
 
+    async def test_dispatch_rejects_free_text_recipient_injection(self) -> None:
+        payload = SendEmailPayload(
+            recipient_ref="attacker@example.test",
+            subject="Redirected",
+            body="This must not be sent.",
+        )
+        with self.assertRaises(IntegrationStateError):
+            await _resolve_delivery_target(
+                _Session(),  # type: ignore[arg-type]
+                business_id=BUSINESS_ID,
+                connector_type="gmail",
+                connection_id=uuid4(),
+                action_type="send_email",
+                payload=payload,
+            )
+
+    async def test_dispatch_rejects_cross_tenant_customer_destination(self) -> None:
+        customer = _customer(email="other-tenant@example.test")
+        customer.business_id = uuid4()
+        payload = SendEmailPayload(
+            recipient_ref=str(customer.id),
+            subject="Cross tenant",
+            body="This must not be sent.",
+        )
+        with self.assertRaises(IntegrationStateError):
+            await _resolve_delivery_target(
+                _Session([customer]),  # type: ignore[arg-type]
+                business_id=BUSINESS_ID,
+                connector_type="gmail",
+                connection_id=uuid4(),
+                action_type="send_email",
+                payload=payload,
+            )
+
     async def test_dispatch_rejects_cross_customer_or_cross_conversation_binding(
         self,
     ) -> None:

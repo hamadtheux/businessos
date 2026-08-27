@@ -23,6 +23,8 @@ from app.exceptions.action_execution_attempt import (  # noqa: E402
 )
 from app.models.action_execution_attempt import ActionExecutionAttempt  # noqa: E402
 from app.models.ai_action import AIAction  # noqa: E402
+from app.models.ai_agent_execution import AIAgentExecution  # noqa: E402
+from app.models.ai_workforce import AIAgentConfig  # noqa: E402
 from app.models.approval_request import ApprovalRequest  # noqa: E402
 from app.models.business import Business  # noqa: E402
 from app.services.action_execution_attempt import (  # noqa: E402
@@ -39,6 +41,7 @@ from app.services.action_execution_attempt import (  # noqa: E402
 )
 from app.services.action_policy import canonical_action_payload_hash  # noqa: E402
 from app.services.action_registry import ACTION_REGISTRY  # noqa: E402
+from app.services.ai_capabilities import ROLE_CAPABILITIES  # noqa: E402
 
 
 BUSINESS_ID = UUID("11000000-0000-0000-0000-000000000001")
@@ -47,26 +50,17 @@ USER_ID = UUID("13000000-0000-0000-0000-000000000003")
 
 
 class PrepareActionExecutionAttemptTests(unittest.IsolatedAsyncioTestCase):
-    async def test_ready_allowed_action_queues_durable_intent_only(self) -> None:
-        action = _ready_action()
-        session = _FakeSession(actions=[action])
-        attempt = await prepare_action_execution_attempt(
-            session,
-            business_id=BUSINESS_ID,
-            action_id=action.id,
-        )
-        self.assertEqual(attempt.status, "queued")
-        self.assertEqual(attempt.attempt_number, 1)
-        self.assertEqual(
-            attempt.idempotency_key,
-            f"ai-action:{action.id}:attempt:1",
-        )
-        self.assertEqual(attempt.action_type, "update_crm")
-        self.assertEqual(attempt.capability, "crm.customer.update")
-        self.assertEqual(action.status, "queued")
-        self.assertIsNone(action.execution_started_at)
-        self.assertEqual(session.flush_calls, 1)
-        self.assertEqual(session.commit_calls, 0)
+    async def test_registry_action_without_connector_fails_closed(self) -> None:
+        action = _ready_action(requires_approval=False)
+        session = _FakeSession(actions=[action], autonomy_mode="autonomous")
+        with self.assertRaises(ActionExecutionAttemptValidationError):
+            await prepare_action_execution_attempt(
+                session,
+                business_id=BUSINESS_ID,
+                action_id=action.id,
+            )
+        self.assertEqual(session.attempts, [])
+        self.assertEqual(action.status, "ready")
         self.assertEqual(session.external_calls, 0)
 
     async def test_approved_required_action_queues(self) -> None:
@@ -79,12 +73,22 @@ class PrepareActionExecutionAttemptTests(unittest.IsolatedAsyncioTestCase):
             action_id=action.id,
         )
         self.assertEqual(attempt.status, "queued")
+        self.assertEqual(attempt.action_type, "send_email")
+        self.assertEqual(attempt.capability, "communications.email.send")
+        self.assertEqual(
+            attempt.idempotency_key,
+            f"ai-action:{action.id}:attempt:1",
+        )
+        self.assertEqual(action.status, "queued")
+        self.assertEqual(session.flush_calls, 1)
+        self.assertEqual(session.commit_calls, 0)
+        self.assertEqual(session.external_calls, 0)
 
     async def test_missing_matching_approval_is_denied(self) -> None:
         action = _ready_action(requires_approval=True)
         with self.assertRaises(ActionExecutionAttemptStateError):
             await prepare_action_execution_attempt(
-                _FakeSession(actions=[action]),
+                _FakeSession(actions=[action], approvals=[]),
                 business_id=BUSINESS_ID,
                 action_id=action.id,
             )
@@ -95,6 +99,46 @@ class PrepareActionExecutionAttemptTests(unittest.IsolatedAsyncioTestCase):
             await prepare_action_execution_attempt(
                 _FakeSession(actions=[action]),
                 business_id=OTHER_BUSINESS_ID,
+                action_id=action.id,
+            )
+
+    async def test_missing_action_is_safe_not_found(self) -> None:
+        with self.assertRaises(ActionExecutionAttemptNotFoundError):
+            await prepare_action_execution_attempt(
+                _FakeSession(actions=[]),
+                business_id=BUSINESS_ID,
+                action_id=uuid4(),
+            )
+
+    async def test_manual_unapproved_action_is_denied(self) -> None:
+        action = _ready_action(requires_approval=False)
+        with self.assertRaises(ActionExecutionAttemptStateError):
+            await prepare_action_execution_attempt(
+                _FakeSession(actions=[action], autonomy_mode="manual"),
+                business_id=BUSINESS_ID,
+                action_id=action.id,
+            )
+
+    async def test_disabled_current_capability_is_denied(self) -> None:
+        action = _ready_action(requires_approval=True)
+        with self.assertRaises(ActionExecutionAttemptStateError):
+            await prepare_action_execution_attempt(
+                _FakeSession(
+                    actions=[action],
+                    capability_config=["read_business_brain"],
+                ),
+                business_id=BUSINESS_ID,
+                action_id=action.id,
+            )
+
+    async def test_stale_approval_payload_hash_is_denied(self) -> None:
+        action = _ready_action(requires_approval=True)
+        approval = _approved_request(action)
+        approval.authorized_payload_hash_snapshot = "0" * 64
+        with self.assertRaises(ActionExecutionAttemptConflictError):
+            await prepare_action_execution_attempt(
+                _FakeSession(actions=[action], approvals=[approval]),
+                business_id=BUSINESS_ID,
                 action_id=action.id,
             )
 
@@ -164,7 +208,7 @@ class PrepareActionExecutionAttemptTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_duplicate_active_attempt_is_denied(self) -> None:
-        action = _ready_action()
+        action = _ready_action(requires_approval=True)
         existing = _queued_attempt(action)
         with self.assertRaises(ActionExecutionAttemptConflictError):
             await prepare_action_execution_attempt(
@@ -174,7 +218,7 @@ class PrepareActionExecutionAttemptTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_next_attempt_has_stable_incremented_identity(self) -> None:
-        action = _ready_action()
+        action = _ready_action(requires_approval=True)
         previous = _queued_attempt(action, attempt_number=1)
         previous.status = "failed"
         previous.dispatch_started_at = previous.queued_at
@@ -279,6 +323,10 @@ class ClaimAndOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.external_reference_id, "message-123")
         self.assertEqual(action.status, "succeeded")
         self.assertEqual(action.external_reference_id, "message-123")
+        self.assertEqual(
+            action.result_summary,
+            "Provider accepted the governed action.",
+        )
         self.assertIsNotNone(result.completed_at)
         self.assertEqual(action.execution_completed_at, result.completed_at)
 
@@ -313,6 +361,10 @@ class ClaimAndOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempt.status, "failed")
         self.assertEqual(action.status, "failed")
         self.assertEqual(action.failure_code, "connector_rejected")
+        self.assertEqual(
+            action.result_summary,
+            "The connector did not complete the governed action.",
+        )
         self.assertIsNone(attempt.external_reference_id)
 
         repeated = await record_action_execution_failure(
@@ -362,6 +414,10 @@ class ClaimAndOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempt.failure_code, "external_outcome_uncertain")
         self.assertEqual(action.status, "uncertain")
         self.assertEqual(action.failure_code, "external_outcome_uncertain")
+        self.assertEqual(
+            action.result_summary,
+            "The provider outcome is uncertain; reconciliation is required.",
+        )
         self.assertIsNone(attempt.external_reference_id)
         with self.assertRaises(ActionExecutionOutcomeUncertainError):
             await record_action_execution_success(
@@ -492,11 +548,30 @@ class _FakeSession:
         attempts: list[ActionExecutionAttempt] | None = None,
         approvals: list[ApprovalRequest] | None = None,
         business_currency: str = "USD",
+        autonomy_mode: str = "manual",
+        capability_config: list[str] | None = None,
         scalar_error: SQLAlchemyError | None = None,
     ) -> None:
         self.actions = list(actions or [])
         self.attempts = list(attempts or [])
-        self.approvals = list(approvals or [])
+        self.approvals = (
+            list(approvals)
+            if approvals is not None
+            else [
+                _approved_request(action)
+                for action in self.actions
+                if action.policy_decision == "require_approval"
+            ]
+        )
+        self.executions = [_execution_for(action) for action in self.actions]
+        self.configs = [
+            _config_for(
+                action,
+                autonomy_mode=autonomy_mode,
+                capability_config=capability_config,
+            )
+            for action in self.actions
+        ]
         self.business_currency = business_currency
         self.scalar_error = scalar_error
         self.flush_calls = 0
@@ -542,12 +617,34 @@ class _FakeSession:
             reason = _param(params, "reason_code_")
             return next(
                 (
-                    item.id
+                    item
                     for item in self.approvals
                     if item.business_id == business_id
                     and item.action_id == action_id
                     and item.status == "approved"
                     and item.reason_code == reason
+                ),
+                None,
+            )
+
+        if entity is AIAgentExecution:
+            execution_id = _param(params, "id_")
+            return next(
+                (
+                    item
+                    for item in self.executions
+                    if item.id == execution_id and item.business_id == business_id
+                ),
+                None,
+            )
+
+        if entity is AIAgentConfig:
+            role = _param(params, "role_")
+            return next(
+                (
+                    item
+                    for item in self.configs
+                    if item.business_id == business_id and item.role == role
                 ),
                 None,
             )
@@ -617,7 +714,7 @@ def _param(params: dict[str, object], prefix: str):
 
 def _ready_action(
     *,
-    requires_approval: bool = False,
+    requires_approval: bool = True,
     business_id: UUID = BUSINESS_ID,
 ) -> AIAction:
     action_type = "send_email" if requires_approval else "update_crm"
@@ -667,6 +764,8 @@ def _approved_request(action: AIAction) -> ApprovalRequest:
         requested_by_user_id=USER_ID,
         status="approved",
         reason_code=action.policy_reason_code,
+        action_type_snapshot=action.action_type,
+        authorized_payload_hash_snapshot=action.authorized_payload_hash,
         requested_at=now - timedelta(minutes=1),
         expires_at=None,
         decided_at=now,
@@ -675,6 +774,51 @@ def _approved_request(action: AIAction) -> ApprovalRequest:
         decision_note=None,
         created_at=now,
         updated_at=now,
+    )
+
+
+def _execution_for(action: AIAction) -> AIAgentExecution:
+    now = datetime.now(UTC)
+    return AIAgentExecution(
+        id=action.execution_id,
+        business_id=action.business_id,
+        requested_by_user_id=USER_ID,
+        role="business_manager",
+        trigger_type="api",
+        status="completed",
+        task="Prepare governed action.",
+        provider_name="test",
+        model_name="test",
+        context_source_count=0,
+        business_brain_source_count=0,
+        memory_source_count=0,
+        recommendations=[],
+        proposed_actions=[],
+        delegation_sequence=0,
+        delegation_depth=0,
+        completed_at=now,
+    )
+
+
+def _config_for(
+    action: AIAction,
+    *,
+    autonomy_mode: str,
+    capability_config: list[str] | None,
+) -> AIAgentConfig:
+    return AIAgentConfig(
+        id=uuid4(),
+        business_id=action.business_id,
+        role="business_manager",
+        display_name="Business Manager",
+        enabled=True,
+        autonomy_mode=autonomy_mode,
+        custom_instructions=None,
+        capability_config=(
+            list(capability_config)
+            if capability_config is not None
+            else sorted(ROLE_CAPABILITIES["business_manager"])
+        ),
     )
 
 

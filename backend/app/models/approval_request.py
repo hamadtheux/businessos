@@ -60,6 +60,25 @@ class ApprovalRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="valid_decision_note",
         ),
         CheckConstraint(
+            "action_type_snapshot IS NULL OR "
+            "char_length(btrim(action_type_snapshot)) BETWEEN 1 AND 100",
+            name="valid_action_type_snapshot",
+        ),
+        CheckConstraint(
+            "authorized_payload_hash_snapshot IS NULL OR ("
+            "char_length(authorized_payload_hash_snapshot) = 64 AND "
+            "authorized_payload_hash_snapshot ~ '^[0-9a-f]{64}$'"
+            ")",
+            name="valid_authorized_payload_hash_snapshot",
+        ),
+        CheckConstraint(
+            "(action_id IS NULL AND action_type_snapshot IS NULL AND "
+            "authorized_payload_hash_snapshot IS NULL) OR "
+            "(action_id IS NOT NULL AND action_type_snapshot IS NOT NULL AND "
+            "authorized_payload_hash_snapshot IS NOT NULL)",
+            name="consistent_action_authorization_snapshot",
+        ),
+        CheckConstraint(
             "expires_at IS NULL OR expires_at > requested_at",
             name="valid_expiration",
         ),
@@ -129,6 +148,18 @@ class ApprovalRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # Immutable authorization snapshot for an AIAction approval. Workflow
+    # approvals leave both fields NULL. The dispatch boundary compares these
+    # values with the current, registry-validated action before any attempt is
+    # allowed to reach a connector.
+    action_type_snapshot: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+
+    authorized_payload_hash_snapshot: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
 
     requested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

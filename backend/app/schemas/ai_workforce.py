@@ -147,6 +147,36 @@ class ProposedActionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class OpportunityAnalysisRequest(BaseModel):
+    analysis_request_key: str = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$",
+    )
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("analysis_request_key", mode="before")
+    @classmethod
+    def trim_analysis_request_key(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+
+class OpportunityAnalysisResponse(BaseModel):
+    opportunity_id: UUID
+    execution_id: UUID
+    role: AIAgentRole
+    status: Literal["running", "completed", "needs_approval", "blocked", "failed"]
+    summary: str | None
+    recommendations: list[str] = Field(default_factory=list, max_length=8)
+    failure_code: str | None
+    created: bool
+    proposed_actions: list[ProposedActionResponse] = Field(
+        default_factory=list,
+        max_length=3,
+    )
+    model_config = ConfigDict(extra="forbid")
+
+
 class AgentActivityResponse(BaseModel):
     id: UUID
     business_id: UUID

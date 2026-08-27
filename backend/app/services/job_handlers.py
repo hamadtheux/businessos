@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.openai_provider import create_openai_provider
 from app.core.config import settings
+from app.domain.background_jobs import initial_opportunity_analysis_request_key
 from app.exceptions.automation import (
     AutomationConflictError,
     AutomationNotFoundError,
@@ -74,6 +75,12 @@ from app.exceptions.commerce import (
     CommerceValidationError,
 )
 from app.exceptions.ai_agent import AIAgentProviderError
+from app.exceptions.ai_workforce import (
+    AIWorkforceConflictError,
+    AIWorkforceNotFoundError,
+    AIWorkforcePersistenceError,
+    AIWorkforceValidationError,
+)
 from app.exceptions.customer_agent import (
     CustomerAgentNotFoundError,
     CustomerAgentPersistenceError,
@@ -82,6 +89,8 @@ from app.exceptions.customer_agent import (
 from app.services.commerce import process_sync_run_page, reconcile_webhook
 from app.services.ad_commerce import synchronize_destination
 from app.services.customer_agent import process_customer_agent_response
+from app.services.automation_copilot import analyze_business_opportunity
+from app.services.billing import BillingEntitlementError
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +350,51 @@ async def handle_analyze_campaign_opportunities(
     return SUCCESS
 
 
+async def handle_analyze_business_opportunity(
+    session: AsyncSession, job: BackgroundJob,
+) -> HandlerOutcome:
+    """Delegate one tenant-owned Opportunity to the existing analysis service."""
+    if job.opportunity_id is None:
+        return HandlerOutcome(False, "invalid_job_state")
+    try:
+        provider = create_openai_provider(settings)
+    except AIAgentProviderError:
+        # No execution ledger exists yet, so a bounded queue retry can recover
+        # after server-side provider configuration becomes available.
+        return HandlerOutcome(False, "provider_unavailable", True)
+
+    try:
+        outcome = await analyze_business_opportunity(
+            session,
+            business_id=job.business_id,
+            opportunity_id=job.opportunity_id,
+            provider=provider,
+            analysis_request_key=initial_opportunity_analysis_request_key(
+                job.opportunity_id
+            ),
+            requested_by_user_id=None,
+            trigger_type="automation",
+        )
+    except AIWorkforceNotFoundError:
+        return HandlerOutcome(False, "resource_not_found")
+    except BillingEntitlementError:
+        return HandlerOutcome(False, "feature_not_entitled")
+    except (AIWorkforceConflictError, AIWorkforceValidationError):
+        return HandlerOutcome(False, "invalid_job_state")
+    except AIWorkforcePersistenceError:
+        return HandlerOutcome(False, "dependency_unavailable", True)
+
+    if outcome.execution.status == "running":
+        # A previous worker durably started this same request but has not yet
+        # recorded its terminal ledger outcome. Requeue with the existing
+        # bounded policy rather than claiming analysis completed.
+        return HandlerOutcome(False, "dependency_unavailable", True)
+    # The service persists both successful and safely failed terminal model
+    # executions. Either makes the job complete; replaying a failed execution
+    # must not create an infinite provider retry loop.
+    return SUCCESS
+
+
 async def handle_commerce_sync(
     session: AsyncSession, job: BackgroundJob,
 ) -> HandlerOutcome:
@@ -582,6 +636,7 @@ JOB_HANDLERS: Final = MappingProxyType({
     "discover_competitors": handle_discover_competitors,
     "generate_content_plan": handle_generate_content_plan,
     "analyze_campaign_opportunities": handle_analyze_campaign_opportunities,
+    "analyze_business_opportunity": handle_analyze_business_opportunity,
     "commerce_initial_sync": handle_commerce_sync,
     "commerce_incremental_sync": handle_commerce_sync,
     "commerce_webhook_reconcile": handle_commerce_webhook_reconcile,

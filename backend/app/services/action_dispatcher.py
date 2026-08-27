@@ -48,6 +48,7 @@ from app.services.action_execution_attempt import (
 )
 from app.services.operations import record_audit
 from app.services.automation_events import record_automation_event
+from app.services.billing import BillingEntitlementError
 
 
 logger = logging.getLogger("aibos.action_dispatcher")
@@ -166,7 +167,11 @@ async def dispatch_action_execution_job(
             # Close the read/revalidation transaction before secrets are read
             # or the provider is called.
             await session.commit()
-    except (ExternalConnectorWritesDisabledError, IntegrationError):
+    except (
+        ExternalConnectorWritesDisabledError,
+        IntegrationError,
+        BillingEntitlementError,
+    ):
         await _record_definite_failure(
             job.business_id,
             attempt_id,

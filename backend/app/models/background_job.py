@@ -56,6 +56,11 @@ class BackgroundJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             ["marketing_campaigns.id", "marketing_campaigns.business_id"],
             name="fk_jobs_marketing_campaign_business", ondelete="CASCADE",
         ),
+        ForeignKeyConstraint(
+            ["opportunity_id", "business_id"],
+            ["opportunities.id", "opportunities.business_id"],
+            name="fk_jobs_opportunity_business",
+        ),
         UniqueConstraint("idempotency_key", name="uq_background_jobs_idempotency_key"),
         CheckConstraint(
             "job_type IN ('process_automation_event','resume_workflow_run',"
@@ -64,6 +69,7 @@ class BackgroundJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "'reconcile_uncertain_attempt','mark_social_schedule_ready',"
             "'maintain_subscription','discover_competitors',"
             "'generate_content_plan','analyze_campaign_opportunities',"
+            "'analyze_business_opportunity',"
             "'commerce_initial_sync','commerce_incremental_sync','commerce_webhook_reconcile',"
             "'google_merchant_status_sync','meta_catalog_status_sync',"
             "'google_ads_performance_sync','meta_ads_performance_sync')",
@@ -111,6 +117,11 @@ class BackgroundJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "scheduled_occurrence_at IS NULL OR job_type = 'process_scheduled_workflow'",
             name="occurrence_only_for_schedule",
         ),
+        CheckConstraint(
+            "(job_type = 'analyze_business_opportunity' AND opportunity_id IS NOT NULL) OR "
+            "(job_type <> 'analyze_business_opportunity' AND opportunity_id IS NULL)",
+            name="consistent_opportunity_reference",
+        ),
         Index(
             "ix_background_jobs_claim",
             "status", "priority", "available_at", "id",
@@ -122,6 +133,10 @@ class BackgroundJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Index(
             "ix_background_jobs_business_status_created",
             "business_id", "status", "created_at", "id",
+        ),
+        Index(
+            "ix_background_jobs_business_opportunity_status_created",
+            "business_id", "opportunity_id", "status", "created_at", "id",
         ),
     )
 
@@ -173,6 +188,7 @@ class BackgroundJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     commerce_webhook_receipt_id: Mapped[UUID | None] = mapped_column(nullable=True)
     commerce_feed_destination_id: Mapped[UUID | None] = mapped_column(nullable=True)
     marketing_campaign_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    opportunity_id: Mapped[UUID | None] = mapped_column(nullable=True)
     scheduled_occurrence_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )

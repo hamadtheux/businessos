@@ -24,6 +24,8 @@ from app.exceptions.action_execution_attempt import (
 )
 from app.models.action_execution_attempt import ActionExecutionAttempt
 from app.models.ai_action import AIAction
+from app.models.ai_agent_execution import AIAgentExecution
+from app.models.ai_workforce import AIAgentConfig
 from app.models.approval_request import ApprovalRequest
 from app.models.business import Business
 from app.schemas.ai_action_payload import ActionPayload
@@ -35,6 +37,12 @@ from app.services.advertising_spend_policy import (
     require_advertising_spend_authorized,
 )
 from app.services.action_registry import ACTION_REGISTRY, ActionDefinition
+from app.services.ai_capabilities import (
+    ACTION_CAPABILITY,
+    ROLE_CAPABILITIES,
+    validate_role_capabilities,
+)
+from app.services.operations import record_audit
 
 
 DEFAULT_ATTEMPT_PAGE_SIZE: Final = 50
@@ -84,6 +92,15 @@ async def prepare_action_execution_attempt(
         action=action,
         business_id=business_id,
     )
+    # A registry action is not executable merely because it validates. Only
+    # action types with an explicit production connector boundary may create a
+    # durable external-write attempt.
+    from app.integrations.action_boundary import CONNECTOR_ACTION_TYPES
+
+    if definition.action_type not in CONNECTOR_ACTION_TYPES:
+        raise ActionExecutionAttemptValidationError(
+            "AI action execution is not supported"
+        )
     await _require_no_active_attempt(
         session,
         business_id=business_id,
@@ -131,6 +148,18 @@ async def prepare_action_execution_attempt(
         refresh_created=True,
     )
     if isinstance(session, AsyncSession):
+        record_audit(
+            session,
+            business_id=business_id,
+            actor_user_id=None,
+            event_type="action_execution.prepared",
+            entity_type="action_execution_attempt",
+            entity_id=attempt.id,
+            summary=(
+                f"Prepared governed {attempt.action_type} dispatch intent; "
+                "no connector was invoked."
+            ),
+        )
         # Durable intent and its worker job commit atomically. The job cannot
         # be claimed before the caller commits this transaction.
         from app.services.background_jobs import enqueue_job
@@ -224,6 +253,20 @@ async def claim_action_execution_attempt(
     action.status = "executing"
     action.execution_started_at = now
 
+    if isinstance(session, AsyncSession):
+        record_audit(
+            session,
+            business_id=business_id,
+            actor_user_id=None,
+            event_type="action_execution.dispatching",
+            entity_type="action_execution_attempt",
+            entity_id=attempt.id,
+            summary=(
+                f"Claimed governed {attempt.action_type} dispatch intent; "
+                "connector preflight remains required."
+            ),
+        )
+
     await _flush_attempt(session, attempt=attempt)
     return attempt
 
@@ -264,6 +307,7 @@ async def record_action_execution_success(
     action.execution_completed_at = now
     action.external_reference_id = reference
     action.failure_code = None
+    action.result_summary = "Provider accepted the governed action."
     await _flush_attempt(session, attempt=attempt)
     return attempt
 
@@ -306,6 +350,7 @@ async def record_action_execution_failure(
     action.execution_completed_at = now
     action.external_reference_id = None
     action.failure_code = normalized_code
+    action.result_summary = "The connector did not complete the governed action."
     await _flush_attempt(session, attempt=attempt)
     return attempt
 
@@ -525,12 +570,16 @@ async def _revalidate_action_authorization(
         raise ActionExecutionAttemptConflictError(
             "AI action no longer matches its policy evaluation"
         )
+    await _require_current_agent_capability(
+        session,
+        business_id=business_id,
+        action=action,
+    )
     if action.policy_decision == "require_approval":
         await _require_matching_approval(
             session,
             business_id=business_id,
-            action_id=action.id,
-            reason_code=action.policy_reason_code,
+            action=action,
         )
 
     payload = evaluation.validated_payload
@@ -551,25 +600,103 @@ async def _revalidate_action_authorization(
     return definition, payload
 
 
+async def _require_current_agent_capability(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    action: AIAction,
+) -> None:
+    """Recheck the server-owned agent configuration at execution time."""
+    try:
+        execution = await session.scalar(
+            select(AIAgentExecution).where(
+                AIAgentExecution.id == action.execution_id,
+                AIAgentExecution.business_id == business_id,
+            )
+        )
+        if execution is None or not isinstance(execution, AIAgentExecution):
+            raise ActionExecutionAttemptStateError(
+                "AI action execution authorization is unavailable"
+            )
+        config = await session.scalar(
+            select(AIAgentConfig).where(
+                AIAgentConfig.business_id == business_id,
+                AIAgentConfig.role == execution.role,
+            )
+        )
+    except SQLAlchemyError:
+        raise ActionExecutionAttemptPersistenceError(_PERSISTENCE_MESSAGE) from None
+
+    if (
+        config is None
+        or not isinstance(config, AIAgentConfig)
+        or config.business_id != business_id
+        or config.role != execution.role
+        or not config.enabled
+        or config.autonomy_mode not in {"manual", "supervised", "autonomous"}
+        or execution.business_id != business_id
+    ):
+        raise ActionExecutionAttemptStateError(
+            "AI action execution authorization is unavailable"
+        )
+    role_capabilities = ROLE_CAPABILITIES.get(execution.role)
+    required_capability = ACTION_CAPABILITY.get(action.action_type)
+    if role_capabilities is None or required_capability is None:
+        raise ActionExecutionAttemptValidationError(
+            "AI action capability is not supported"
+        )
+    try:
+        configured = validate_role_capabilities(
+            execution.role,
+            list(config.capability_config or []),
+        )
+    except (TypeError, ValueError):
+        raise ActionExecutionAttemptValidationError(
+            "AI action capability configuration is invalid"
+        ) from None
+    if (
+        required_capability not in role_capabilities
+        or required_capability not in configured
+    ):
+        raise ActionExecutionAttemptStateError(
+            "AI action capability is no longer authorized"
+        )
+    if (
+        config.autonomy_mode == "manual"
+        and action.policy_decision != "require_approval"
+    ):
+        raise ActionExecutionAttemptStateError(
+            "Manual AI actions require approval"
+        )
+
+
 async def _require_matching_approval(
     session: AsyncSession,
     *,
     business_id: UUID,
-    action_id: UUID,
-    reason_code: str,
+    action: AIAction,
 ) -> None:
-    statement = select(ApprovalRequest.id).where(
+    statement = select(ApprovalRequest).where(
         ApprovalRequest.business_id == business_id,
-        ApprovalRequest.action_id == action_id,
+        ApprovalRequest.action_id == action.id,
         ApprovalRequest.status == "approved",
-        ApprovalRequest.reason_code == reason_code,
-    )
+        ApprovalRequest.reason_code == action.policy_reason_code,
+    ).with_for_update()
     try:
-        approval_id = await session.scalar(statement)
+        approval = await session.scalar(statement)
     except SQLAlchemyError:
         raise ActionExecutionAttemptPersistenceError(_PERSISTENCE_MESSAGE) from None
-    if approval_id is None:
+    if approval is None or not isinstance(approval, ApprovalRequest):
         raise ActionExecutionAttemptStateError("AI action approval is missing")
+    if (
+        approval.business_id != business_id
+        or approval.action_type_snapshot != action.action_type
+        or approval.authorized_payload_hash_snapshot
+        != action.authorized_payload_hash
+    ):
+        raise ActionExecutionAttemptConflictError(
+            "AI action no longer matches its approval"
+        )
 
 
 async def _require_trusted_business_currency(
@@ -761,6 +888,9 @@ async def _apply_uncertain_outcome(
     action.execution_completed_at = completed_at
     action.external_reference_id = None
     action.failure_code = failure_code
+    action.result_summary = (
+        "The provider outcome is uncertain; reconciliation is required."
+    )
     await _flush_attempt(session, attempt=attempt)
 
 

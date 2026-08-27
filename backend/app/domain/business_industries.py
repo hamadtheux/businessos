@@ -110,6 +110,12 @@ SCHEDULING_BUSINESS_TYPES: Final[frozenset[str]] = frozenset(
     if definition.supports_scheduling
 )
 
+COMMERCE_BUSINESS_TYPES: Final[frozenset[str]] = frozenset(
+    alias
+    for alias, canonical in BUSINESS_TYPE_ALIASES.items()
+    if BUSINESS_INDUSTRIES[canonical].group == "commerce"
+)
+
 
 def normalize_business_type(value: str) -> str:
     """
@@ -136,3 +142,7 @@ def is_healthcare_business_type(value: str) -> bool:
 
 def business_type_supports_scheduling(value: str) -> bool:
     return normalize_business_type(value) in SCHEDULING_BUSINESS_TYPES
+
+
+def is_commerce_business_type(value: str) -> bool:
+    return normalize_business_type(value) in COMMERCE_BUSINESS_TYPES

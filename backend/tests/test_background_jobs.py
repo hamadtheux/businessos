@@ -1,19 +1,26 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import unittest
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, Index, UniqueConstraint
+from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Index, UniqueConstraint
 from sqlalchemy.dialects import postgresql
 
 os.environ.setdefault("AIBOS_DATABASE_URL", "postgresql+asyncpg://database.invalid/test")
 os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 
-from app.domain.background_jobs import JOB_POLICIES, JOB_TYPES, require_job_policy  # noqa: E402
+from app.domain.background_jobs import (  # noqa: E402
+    JOB_POLICIES,
+    JOB_TYPES,
+    initial_opportunity_analysis_job_key,
+    initial_opportunity_analysis_request_key,
+    require_job_policy,
+)
 from app.exceptions.background_jobs import BackgroundJobStateError, BackgroundJobValidationError  # noqa: E402
 from app.models.automation import AutomationWorkflow  # noqa: E402
 from app.models.background_job import BackgroundJob, WorkerInstance  # noqa: E402
@@ -21,6 +28,7 @@ from app.models.marketing import SocialSchedule  # noqa: E402
 from app.models.commerce import CommerceSyncRun  # noqa: E402
 from app.services.automation import _next_schedule  # noqa: E402
 from app.schemas.automation import ScheduleDefinition  # noqa: E402
+from app.schemas.background_jobs import BackgroundJobResponse  # noqa: E402
 from app.services.background_jobs import (  # noqa: E402
     cancel_job,
     claim_jobs,
@@ -48,6 +56,12 @@ class BackgroundJobModelAndRegistryTests(unittest.TestCase):
         self.assertIn("business_id", BackgroundJob.__table__.columns)
         self.assertNotIn("payload", BackgroundJob.__table__.columns)
         self.assertNotIn("handler", BackgroundJob.__table__.columns)
+        self.assertIn("opportunity_id", BackgroundJob.__table__.columns)
+        self.assertFalse(any(
+            token in column.name
+            for column in BackgroundJob.__table__.columns
+            for token in ("api_key", "credential", "provider_secret")
+        ))
 
     def test_lifecycle_lease_retry_and_failure_constraints_exist(self) -> None:
         names = {
@@ -59,6 +73,7 @@ class BackgroundJobModelAndRegistryTests(unittest.TestCase):
             "ck_background_jobs_consistent_lease",
             "ck_background_jobs_consistent_failure",
             "ck_background_jobs_valid_attempt_count",
+            "ck_background_jobs_consistent_opportunity_reference",
         ):
             self.assertIn(expected, names)
 
@@ -74,6 +89,28 @@ class BackgroundJobModelAndRegistryTests(unittest.TestCase):
         self.assertIn("ix_background_jobs_claim", names)
         self.assertIn("ix_background_jobs_expired_lease", names)
         self.assertIn("ix_background_jobs_business_status_created", names)
+        self.assertIn(
+            "ix_background_jobs_business_opportunity_status_created", names
+        )
+
+    def test_opportunity_reference_uses_composite_tenant_foreign_key(self) -> None:
+        foreign_keys = [
+            value for value in BackgroundJob.__table__.constraints
+            if isinstance(value, ForeignKeyConstraint)
+        ]
+        constraint = next(
+            value for value in foreign_keys
+            if value.name == "fk_jobs_opportunity_business"
+        )
+        self.assertEqual(
+            [column.name for column in constraint.columns],
+            ["opportunity_id", "business_id"],
+        )
+        self.assertEqual(
+            [element.target_fullname for element in constraint.elements],
+            ["opportunities.id", "opportunities.business_id"],
+        )
+        self.assertIsNone(constraint.ondelete)
 
     def test_registry_is_immutable_bounded_and_has_no_dispatch_type(self) -> None:
         with self.assertRaises(TypeError):
@@ -84,6 +121,42 @@ class BackgroundJobModelAndRegistryTests(unittest.TestCase):
         self.assertTrue(all(1 <= item.max_attempts <= 10 for item in JOB_POLICIES.values()))
         with self.assertRaises(ValueError):
             require_job_policy("user_supplied_handler")
+
+    def test_opportunity_analysis_policy_and_keys_are_bounded_and_stable(self) -> None:
+        opportunity_id = uuid4()
+        policy = require_job_policy("analyze_business_opportunity")
+        self.assertEqual(policy.reference_field, "opportunity_id")
+        self.assertEqual(policy.max_attempts, 3)
+        job_key = initial_opportunity_analysis_job_key(opportunity_id)
+        request_key = initial_opportunity_analysis_request_key(opportunity_id)
+        self.assertEqual(
+            job_key, f"opportunity-analysis:{opportunity_id}:initial"
+        )
+        self.assertEqual(
+            request_key, f"business-growth:{opportunity_id}:initial"
+        )
+        self.assertLessEqual(len(job_key), 200)
+        self.assertLessEqual(len(request_key), 200)
+
+    def test_opportunity_analysis_job_is_accepted_by_response_schema(self) -> None:
+        opportunity_id = uuid4()
+        response = BackgroundJobResponse.model_validate(
+            _opportunity_job(opportunity_id=opportunity_id)
+        )
+        self.assertEqual(response.job_type, "analyze_business_opportunity")
+        self.assertEqual(response.opportunity_id, opportunity_id)
+
+    def test_migration_adds_tenant_safe_reference_and_job_type(self) -> None:
+        source = (
+            Path(__file__).parents[1]
+            / "alembic/versions/8f3a2c1d4e90_add_opportunity_analysis_jobs.py"
+        ).read_text()
+        self.assertIn('down_revision: str | Sequence[str] | None = "6b6dc1e42c48"', source)
+        self.assertIn('"analyze_business_opportunity"', source)
+        self.assertIn('"fk_jobs_opportunity_business"', source)
+        self.assertIn('["opportunity_id", "business_id"]', source)
+        self.assertIn('["id", "business_id"]', source)
+        self.assertNotIn("ondelete=\"SET NULL\"", source)
 
     def test_worker_id_is_bounded_and_contains_no_secret(self) -> None:
         value = build_instance_id("worker")
@@ -128,6 +201,60 @@ class BackgroundJobServiceTests(unittest.IsolatedAsyncioTestCase):
                 idempotency_key="wrong-reference",
                 automation_event_id=uuid4(),
                 social_schedule_id=uuid4(),
+            )
+        with self.assertRaises(BackgroundJobValidationError):
+            await enqueue_job(
+                _Session(),  # type: ignore[arg-type]
+                business_id=BUSINESS_ID,
+                job_type="analyze_business_opportunity",
+                idempotency_key="opportunity-analysis:missing",
+            )
+
+    async def test_opportunity_enqueue_preserves_tenant_and_is_idempotent(self) -> None:
+        opportunity_id = uuid4()
+        existing = _opportunity_job(opportunity_id=opportunity_id)
+        session = _Session(scalar_values=[None, existing])
+        with patch(
+            "app.services.background_jobs._require_tenant_reference", new=AsyncMock()
+        ) as require_reference:
+            result = await enqueue_job(
+                session,  # type: ignore[arg-type]
+                business_id=BUSINESS_ID,
+                job_type="analyze_business_opportunity",
+                idempotency_key=existing.idempotency_key,
+                opportunity_id=opportunity_id,
+            )
+        self.assertIs(result, existing)
+        self.assertEqual(result.business_id, BUSINESS_ID)
+        self.assertEqual(result.opportunity_id, opportunity_id)
+        require_reference.assert_awaited_once_with(
+            session,
+            field="opportunity_id",
+            reference_id=opportunity_id,
+            business_id=BUSINESS_ID,
+        )
+
+    async def test_cross_tenant_opportunity_reference_is_rejected(self) -> None:
+        with self.assertRaises(BackgroundJobValidationError):
+            await enqueue_job(
+                _Session(scalar_values=[None]),  # type: ignore[arg-type]
+                business_id=BUSINESS_ID,
+                job_type="analyze_business_opportunity",
+                idempotency_key="opportunity-analysis:cross-tenant:initial",
+                opportunity_id=uuid4(),
+            )
+
+    async def test_opportunity_idempotency_conflict_cannot_change_reference(self) -> None:
+        existing = _opportunity_job(opportunity_id=uuid4())
+        with patch(
+            "app.services.background_jobs._require_tenant_reference", new=AsyncMock()
+        ), self.assertRaises(BackgroundJobValidationError):
+            await enqueue_job(
+                _Session(scalar_values=[None, existing]),  # type: ignore[arg-type]
+                business_id=BUSINESS_ID,
+                job_type="analyze_business_opportunity",
+                idempotency_key=existing.idempotency_key,
+                opportunity_id=uuid4(),
             )
 
     async def test_enqueue_is_idempotent_and_uses_registered_policy(self) -> None:
@@ -428,4 +555,16 @@ def _processing_job(
         worker_id="worker-a",
         completed_at=completed_at,
         failure_code=failure_code,
+    )
+
+
+def _opportunity_job(*, opportunity_id: UUID) -> BackgroundJob:
+    return BackgroundJob(
+        id=uuid4(), business_id=BUSINESS_ID,
+        job_type="analyze_business_opportunity", status="queued",
+        priority=30,
+        idempotency_key=initial_opportunity_analysis_job_key(opportunity_id),
+        attempt_count=0, max_attempts=3, available_at=NOW,
+        opportunity_id=opportunity_id,
+        created_at=NOW, updated_at=NOW,
     )

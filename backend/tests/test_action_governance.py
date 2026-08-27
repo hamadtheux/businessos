@@ -108,6 +108,14 @@ class ActionGovernanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result.approval)
         self.assertEqual(result.approval.status, "pending")
         self.assertEqual(result.approval.requested_by_user_id, USER_ID)
+        self.assertEqual(
+            result.approval.action_type_snapshot,
+            result.action.action_type,
+        )
+        self.assertEqual(
+            result.approval.authorized_payload_hash_snapshot,
+            result.action.authorized_payload_hash,
+        )
         self.assertIsNone(action.execution_started_at)
         self.assertEqual(session.commit_calls, 0)
 

@@ -8,7 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies.ai_agent import AIAgentProviderDependency
-from app.api.dependencies.business import BusinessAccessDependency
+from app.api.dependencies.business import BusinessAccessDependency, require_business_role
 from app.api.response_materialization import materialize_response_before_commit
 from app.db.session import get_db_session
 from app.domain.ai_workforce import CANONICAL_AGENT_ROLES
@@ -25,12 +25,20 @@ from app.schemas.ai_workforce import (
     AgentActivityResponse,
     AgentConfigResponse,
     AgentConfigUpdate,
+    ApprovalLinkResponse,
     CapabilityResponse,
     CommandCreateRequest,
     CommandPage,
     CommandResponse,
     DailyBriefResponse,
+    OpportunityAnalysisRequest,
+    OpportunityAnalysisResponse,
+    ProposedActionResponse,
     SuggestedCommandResponse,
+)
+from app.services.automation_copilot import (
+    OpportunityAnalysisOutcome,
+    analyze_business_opportunity,
 )
 from app.services.ai_capabilities import AI_CAPABILITY_REGISTRY
 from app.services.ai_command_execution import command_response, execute_command
@@ -57,6 +65,51 @@ router = APIRouter(prefix="/businesses/{business_id}", tags=["AI Workforce"])
 SessionDependency = Annotated[AsyncSession, Depends(get_db_session)]
 Page = Annotated[int, Query(ge=1, le=1_000_000)]
 PageSize = Annotated[int, Query(ge=1, le=100)]
+
+
+@router.post(
+    "/opportunities/{opportunity_id}/analyze",
+    response_model=OpportunityAnalysisResponse,
+)
+async def request_opportunity_analysis(
+    opportunity_id: UUID,
+    data: OpportunityAnalysisRequest,
+    access: BusinessAccessDependency,
+    response: Response,
+    session: SessionDependency,
+    provider: AIAgentProviderDependency,
+) -> OpportunityAnalysisResponse:
+    """Run or rehydrate one idempotent, non-executing Opportunity analysis."""
+    require_business_role(access)
+    try:
+        outcome = await analyze_business_opportunity(
+            session,
+            business_id=access.business.id,
+            opportunity_id=opportunity_id,
+            provider=provider,
+            analysis_request_key=data.analysis_request_key,
+            requested_by_user_id=access.user.id,
+            trigger_type="api",
+        )
+        value = _opportunity_analysis_response(
+            opportunity_id=opportunity_id,
+            business_id=access.business.id,
+            outcome=outcome,
+        )
+    except AIWorkforceNotFoundError:
+        await _rollback(session)
+        raise _not_found() from None
+    except AIWorkforceValidationError:
+        await _rollback(session)
+        raise _invalid() from None
+    except AIWorkforceConflictError:
+        await _rollback(session)
+        raise _conflict() from None
+    except (AIWorkforcePersistenceError, SQLAlchemyError):
+        await _rollback(session)
+        raise _unavailable() from None
+    _set_private(response)
+    return value
 
 
 @router.get("/agents/capabilities", response_model=list[CapabilityResponse])
@@ -341,6 +394,78 @@ def _command_shell(command: AICommand) -> CommandResponse:
         summary=command.summary, failure_code=command.failure_code,
         executions=[], proposed_actions=[], created_at=command.created_at,
         completed_at=command.completed_at,
+    )
+
+
+def _opportunity_analysis_response(
+    *,
+    opportunity_id: UUID,
+    business_id: UUID,
+    outcome: OpportunityAnalysisOutcome,
+) -> OpportunityAnalysisResponse:
+    execution = outcome.execution
+    if (
+        execution.business_id != business_id
+        or execution.opportunity_id != opportunity_id
+    ):
+        raise AIWorkforcePersistenceError(
+            "Unable to materialize Opportunity analysis response"
+        )
+
+    action_ids = {action.id for action in outcome.actions}
+    approvals_by_action = {}
+    for approval in outcome.approvals:
+        if (
+            approval.business_id != business_id
+            or approval.action_id is None
+            or approval.action_id not in action_ids
+        ):
+            raise AIWorkforcePersistenceError(
+                "Unable to materialize Opportunity analysis response"
+            )
+        approvals_by_action[approval.action_id] = approval
+    actions: list[ProposedActionResponse] = []
+    for action in outcome.actions:
+        if (
+            action.business_id != business_id
+            or action.execution_id != execution.id
+        ):
+            raise AIWorkforcePersistenceError(
+                "Unable to materialize Opportunity analysis response"
+            )
+        approval = approvals_by_action.get(action.id)
+        actions.append(ProposedActionResponse(
+            id=action.id,
+            execution_id=action.execution_id,
+            action_type=action.action_type,
+            description=action.description,
+            risk_level=action.risk_level,
+            status=action.status,
+            policy_decision=action.policy_decision,
+            requires_approval=(
+                action.policy_decision == "require_approval"
+                or action.proposed_requires_approval
+            ),
+            approval=(
+                ApprovalLinkResponse(
+                    id=approval.id,
+                    status=approval.status,
+                    reason_code=approval.reason_code,
+                )
+                if approval is not None
+                else None
+            ),
+        ))
+    return OpportunityAnalysisResponse(
+        opportunity_id=opportunity_id,
+        execution_id=execution.id,
+        role=execution.role,
+        status=execution.status,
+        summary=execution.output_summary,
+        recommendations=list(execution.recommendations or []),
+        failure_code=execution.failure_code,
+        created=outcome.created,
+        proposed_actions=actions,
     )
 
 

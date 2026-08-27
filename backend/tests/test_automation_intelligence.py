@@ -5,7 +5,7 @@ import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 from uuid import uuid4
 
 from sqlalchemy.dialects import postgresql
@@ -42,7 +42,9 @@ from app.services.automation_intelligence import (  # noqa: E402
     content_window,
     discovery_window_key,
     due_intelligence_businesses_statement,
+    enqueue_due_intelligence_automation,
     run_competitor_discovery,
+    schedule_marketing_automation,
 )
 from app.services.marketing_actions import _connector_state, prepare_content_publish_action  # noqa: E402
 from app.services.marketing_automation import (  # noqa: E402
@@ -64,11 +66,86 @@ class AutomationIntelligenceTests(unittest.IsolatedAsyncioTestCase):
     def test_scheduler_batch_skips_tenants_with_all_current_windows(self) -> None:
         statement = due_intelligence_businesses_statement(now=NOW, limit=100)
         compiled = str(statement.compile(compile_kwargs={"literal_binds": True}))
-        self.assertGreaterEqual(compiled.count("NOT (EXISTS"), 3)
+        self.assertGreaterEqual(compiled.count("NOT (EXISTS"), 4)
         self.assertIn("competitor-discovery:scheduled:2026-w35", compiled)
         self.assertIn("marketing-automation:content_plan:2026-w35", compiled)
         self.assertIn(
             "marketing-automation:campaign_opportunities:2026-08-24", compiled
+        )
+        self.assertIn(
+            "marketing-automation:business_growth:2026-08-24", compiled
+        )
+        self.assertIn("lower(btrim(businesses.business_type))", compiled)
+        self.assertIn("'e-commerce'", compiled)
+
+    async def test_scheduler_adds_growth_once_only_for_commerce_businesses(self) -> None:
+        commerce = SimpleNamespace(id=uuid4(), business_type="ecommerce")
+        clinic = SimpleNamespace(id=uuid4(), business_type="clinic")
+        schedule_discovery = AsyncMock(
+            return_value=(SimpleNamespace(), True)
+        )
+        schedule_marketing = AsyncMock(
+            return_value=(SimpleNamespace(), True)
+        )
+        with patch(
+            "app.services.automation_intelligence.schedule_competitor_discovery",
+            new=schedule_discovery,
+        ), patch(
+            "app.services.automation_intelligence.schedule_marketing_automation",
+            new=schedule_marketing,
+        ):
+            created = await enqueue_due_intelligence_automation(
+                _SchedulerSession([commerce, clinic]),  # type: ignore[arg-type]
+                now=NOW,
+            )
+        self.assertEqual(created, 7)
+        growth_calls = [
+            call for call in schedule_marketing.await_args_list
+            if call.kwargs["run_type"] == "business_growth"
+        ]
+        self.assertEqual(len(growth_calls), 1)
+        self.assertEqual(growth_calls[0].kwargs["business_id"], commerce.id)
+        self.assertFalse(any(
+            call.kwargs["business_id"] == clinic.id
+            and call.kwargs["run_type"] == "business_growth"
+            for call in schedule_marketing.await_args_list
+        ))
+
+    async def test_business_growth_schedule_is_idempotent_per_window(self) -> None:
+        business_id = uuid4()
+        run_id = uuid4()
+        run = SimpleNamespace(
+            id=run_id,
+            business_id=business_id,
+            run_type="business_growth",
+            idempotency_key="marketing-automation:business_growth:2026-08-24",
+        )
+        enqueue = AsyncMock(return_value=SimpleNamespace(id=uuid4()))
+        with patch(
+            "app.services.automation_intelligence.enqueue_job", new=enqueue
+        ):
+            first, first_created = await schedule_marketing_automation(
+                _Session([run_id, run]),
+                business_id=business_id,
+                run_type="business_growth",
+                now=NOW,
+            )
+            repeated, repeated_created = await schedule_marketing_automation(
+                _Session([None, run]),
+                business_id=business_id,
+                run_type="business_growth",
+                now=NOW,
+            )
+        self.assertIs(first, run)
+        self.assertIs(repeated, run)
+        self.assertTrue(first_created)
+        self.assertFalse(repeated_created)
+        enqueue.assert_awaited_once_with(
+            ANY,
+            business_id=business_id,
+            job_type="analyze_campaign_opportunities",
+            idempotency_key=f"marketing-automation-run:{run_id}",
+            marketing_automation_run_id=run_id,
         )
 
     def test_production_provider_registry_fails_closed(self) -> None:
@@ -341,3 +418,19 @@ class _Session:
         for value in self.added:
             if getattr(value, "id", None) is None:
                 value.id = uuid4()
+
+
+class _ScalarResult:
+    def __init__(self, values: list[object]) -> None:
+        self.values = values
+
+    def all(self) -> list[object]:
+        return list(self.values)
+
+
+class _SchedulerSession:
+    def __init__(self, businesses: list[object]) -> None:
+        self.businesses = businesses
+
+    async def scalars(self, _statement) -> _ScalarResult:
+        return _ScalarResult(self.businesses)

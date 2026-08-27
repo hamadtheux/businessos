@@ -27,6 +27,7 @@ from app.schemas.ai_action_payload import ActionPayloadType
 from app.services.action_execution_attempt import (
     revalidate_action_execution_attempt_for_dispatch,
 )
+from app.services.billing import require_feature
 
 
 CONNECTOR_ACTION_TYPES: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType({
@@ -85,6 +86,9 @@ async def prepare_connector_dispatch_context(
     require_external_connector_writes_enabled(
         configuration.external_connector_writes_enabled
     )
+    # A connected account does not outlive the business's platform
+    # entitlement. Recheck the current plan before loading connector secrets.
+    await require_feature(session, business_id=business_id, key="integrations")
 
     attempt, action, _action_definition, payload = (
         await revalidate_action_execution_attempt_for_dispatch(
@@ -122,6 +126,10 @@ async def prepare_connector_dispatch_context(
         ApprovalRequest.business_id == business_id,
         ApprovalRequest.action_id == attempt.action_id,
         ApprovalRequest.status == "approved",
+        ApprovalRequest.reason_code == action.policy_reason_code,
+        ApprovalRequest.action_type_snapshot == action.action_type,
+        ApprovalRequest.authorized_payload_hash_snapshot
+        == action.authorized_payload_hash,
     ))
     connector_definition = require_connector(connection.connector_type)
     if (
@@ -198,19 +206,19 @@ async def _resolve_delivery_target(
     )
     if not isinstance(raw_reference, str):
         raise IntegrationStateError("delivery_target_required")
-    customer = None
     try:
         customer_id = UUID(raw_reference)
     except ValueError:
-        customer_id = None
-    if customer_id is not None:
-        customer = await session.scalar(
-            select(Customer).where(
-                Customer.id == customer_id,
-                Customer.business_id == business_id,
-                Customer.status != "archived",
-            )
+        raise IntegrationStateError("delivery_customer_reference_invalid") from None
+    customer = await session.scalar(
+        select(Customer).where(
+            Customer.id == customer_id,
+            Customer.business_id == business_id,
+            Customer.status != "archived",
         )
+    )
+    if customer is None or customer.business_id != business_id:
+        raise IntegrationStateError("delivery_customer_not_found")
     conversation_ref = getattr(payload, "conversation_ref", None)
     if conversation_ref is not None:
         try:
@@ -220,17 +228,17 @@ async def _resolve_delivery_target(
         conversation = await session.scalar(select(Conversation).where(
             Conversation.id == conversation_id,
             Conversation.business_id == business_id,
-            Conversation.customer_id == (customer.id if customer is not None else None),
+            Conversation.customer_id == customer.id,
             Conversation.integration_connection_id == connection_id,
         ))
-        if conversation is None or customer is None:
+        if conversation is None:
             raise IntegrationStateError("conversation_delivery_target_invalid")
     if connector_type in {"gmail", "microsoft_outlook"}:
-        value = customer.email if customer is not None else raw_reference
+        value = customer.email
         if not isinstance(value, str) or "@" not in value or len(value) > 320:
             raise IntegrationStateError("delivery_target_required")
         return value
-    value = customer.phone if customer is not None else raw_reference
+    value = customer.phone
     if not isinstance(value, str):
         raise IntegrationStateError("delivery_target_required")
     normalized = "".join(character for character in value if character.isdigit())

@@ -43,7 +43,12 @@ from app.services.background_jobs import enqueue_job
 from app.services.billing import BillingEntitlementError, require_feature
 from app.services.business_brain_assembly import build_business_brain_manifest
 from app.services.operations import record_audit
-from app.domain.business_industries import get_business_industry, is_healthcare_business_type
+from app.domain.business_industries import (
+    COMMERCE_BUSINESS_TYPES,
+    get_business_industry,
+    is_commerce_business_type,
+    is_healthcare_business_type,
+)
 
 
 DISCOVERY_LIMIT = 20
@@ -284,6 +289,11 @@ async def enqueue_due_intelligence_automation(
                 session, business_id=business.id, run_type=run_type, now=now
             )
             created += int(added)
+        if is_commerce_business_type(business.business_type):
+            _, added = await schedule_marketing_automation(
+                session, business_id=business.id, run_type="business_growth", now=now
+            )
+            created += int(added)
     return created
 
 
@@ -311,6 +321,14 @@ def due_intelligence_businesses_statement(*, now: datetime, limit: int):
         MarketingAutomationRun.idempotency_key
         == f"marketing-automation:campaign_opportunities:{opportunity_suffix}",
     ))
+    growth_scheduled = exists(select(MarketingAutomationRun.id).where(
+        MarketingAutomationRun.business_id == Business.id,
+        MarketingAutomationRun.idempotency_key
+        == f"marketing-automation:business_growth:{opportunity_suffix}",
+    ))
+    commerce_eligible = func.lower(func.btrim(Business.business_type)).in_(
+        tuple(sorted(COMMERCE_BUSINESS_TYPES))
+    )
     return (
         select(Business)
         .where(
@@ -319,6 +337,7 @@ def due_intelligence_businesses_statement(*, now: datetime, limit: int):
                 ~discovery_scheduled,
                 ~content_scheduled,
                 ~opportunities_scheduled,
+                commerce_eligible & ~growth_scheduled,
             ),
         )
         .order_by(Business.id)

@@ -28,6 +28,10 @@ from app.schemas.approval import ApprovalStatus, ensure_aware_datetime
 from app.services.automation_events import record_automation_event
 from app.services.background_jobs import enqueue_job
 from app.services.operations import record_audit
+from app.services.action_policy import (
+    canonical_action_payload_hash,
+    evaluate_action_policy,
+)
 
 
 DEFAULT_APPROVAL_PAGE_SIZE: Final = 50
@@ -61,6 +65,9 @@ async def create_approval_request(
         or action.policy_reason_code != normalized_reason
     ):
         raise ApprovalStateError("Action is not pending approval")
+    action_type_snapshot, payload_hash_snapshot = _action_authorization_snapshot(
+        action, business_id=business_id
+    )
 
     existing = await _get_pending_for_action(
         session,
@@ -68,7 +75,11 @@ async def create_approval_request(
         action_id=action_id,
     )
     if existing is not None:
-        if existing.reason_code != normalized_reason:
+        if (
+            existing.reason_code != normalized_reason
+            or existing.action_type_snapshot != action_type_snapshot
+            or existing.authorized_payload_hash_snapshot != payload_hash_snapshot
+        ):
             raise ApprovalConflictError("Pending approval request conflicts")
         return existing
 
@@ -79,6 +90,8 @@ async def create_approval_request(
         requested_by_user_id=requested_by_user_id,
         status="pending",
         reason_code=normalized_reason,
+        action_type_snapshot=action_type_snapshot,
+        authorized_payload_hash_snapshot=payload_hash_snapshot,
         requested_at=now,
         expires_at=expires_at,
         decided_at=None,
@@ -132,6 +145,8 @@ async def create_workflow_approval_request(
         requested_by_user_id=requested_by_user_id,
         status="pending",
         reason_code=normalized_reason,
+        action_type_snapshot=None,
+        authorized_payload_hash_snapshot=None,
         requested_at=now,
         expires_at=expires_at,
         decided_at=None,
@@ -338,6 +353,17 @@ async def _decide_approval_request(
         or action.policy_reason_code != approval.reason_code
     ):
         raise ApprovalConflictError("Approval request conflicts with action policy")
+    if action is not None:
+        action_type_snapshot, payload_hash_snapshot = _action_authorization_snapshot(
+            action, business_id=business_id
+        )
+        if (
+            approval.action_type_snapshot != action_type_snapshot
+            or approval.authorized_payload_hash_snapshot != payload_hash_snapshot
+        ):
+            raise ApprovalConflictError(
+                "Approval request conflicts with action authorization"
+            )
     if approval.expires_at is not None and datetime.now(UTC) >= approval.expires_at:
         raise ApprovalStateError("Approval request has expired")
 
@@ -581,6 +607,26 @@ def _target_is_pending(action: AIAction | None, node_run: AutomationNodeRun | No
     ) or (
         node_run is not None and node_run.status == "waiting"
     )
+
+
+def _action_authorization_snapshot(
+    action: AIAction,
+    *,
+    business_id: UUID,
+) -> tuple[str, str]:
+    """Return the exact registry/policy identity a human is authorizing."""
+    evaluation = evaluate_action_policy(action, business_id=business_id)
+    if (
+        evaluation.decision != "require_approval"
+        or evaluation.reason_code != action.policy_reason_code
+        or evaluation.validated_payload is None
+        or action.authorized_payload_hash is None
+    ):
+        raise ApprovalConflictError("Action authorization is incomplete")
+    current_hash = canonical_action_payload_hash(evaluation.validated_payload)
+    if current_hash != action.authorized_payload_hash:
+        raise ApprovalConflictError("Action authorization no longer matches")
+    return action.action_type, current_hash
 
 
 def _normalize_reason_code(value: str) -> str:
