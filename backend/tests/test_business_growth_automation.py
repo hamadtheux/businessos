@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 from uuid import UUID, uuid4
 
 from sqlalchemy.dialects import postgresql
@@ -26,12 +26,14 @@ from app.services.marketing_automation import (  # noqa: E402
     _rank_business_growth_signals,
     _create_opportunity_if_missing,
     _detect_advertising_inefficiency,
+    _detect_checkout_abandonment_recovery,
     _detect_customer_value_declines,
     _detect_high_value_customer_at_risk,
     _detect_inventory_risks,
     _detect_product_affinity_cross_sell,
     _detect_product_demand_declines,
     _detect_refund_anomalies,
+    _detect_repeated_product_interest,
     _detect_repeat_purchase_due,
     _detect_revenue_declines,
     analyze_bounded_campaign_opportunities,
@@ -743,6 +745,18 @@ class BusinessGrowthAutomationTests(unittest.IsolatedAsyncioTestCase):
             "app.services.marketing_automation._detect_high_value_customer_at_risk",
             new=AsyncMock(return_value=[promoted]),
         ) as high_value_detector, patch(
+            "app.services.marketing_automation._detect_customer_value_declines",
+            new=AsyncMock(return_value=[]),
+        ), patch(
+            "app.services.marketing_automation._detect_product_affinity_cross_sell",
+            new=AsyncMock(return_value=[]),
+        ), patch(
+            "app.services.marketing_automation._detect_checkout_abandonment_recovery",
+            new=AsyncMock(return_value=[]),
+        ) as checkout_detector, patch(
+            "app.services.marketing_automation._detect_repeated_product_interest",
+            new=AsyncMock(return_value=[]),
+        ) as interest_detector, patch(
             "app.services.marketing_automation._create_opportunity_if_missing",
             new=create,
         ):
@@ -772,6 +786,16 @@ class BusinessGrowthAutomationTests(unittest.IsolatedAsyncioTestCase):
                 "cadence_candidates"
             ],
             [repeat],
+        )
+        checkout_detector.assert_awaited_once_with(
+            ANY,
+            business_id=BUSINESS_ID,
+            window=ANY,
+        )
+        interest_detector.assert_awaited_once_with(
+            ANY,
+            business_id=BUSINESS_ID,
+            window=ANY,
         )
 
 
@@ -1150,6 +1174,284 @@ class BusinessGrowthAutomationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             len(session.execute_statements),
             1,
+        )
+
+
+    async def test_checkout_abandonment_recovery_is_explicit_and_unresolved(
+        self,
+    ) -> None:
+        event_id = uuid4()
+        customer_id = uuid4()
+        catalog_item_id = uuid4()
+        row = SimpleNamespace(
+            event_id=event_id,
+            customer_id=customer_id,
+            catalog_item_id=catalog_item_id,
+            occurred_at=datetime(2026, 8, 24, 12, tzinfo=UTC),
+            catalog_item_name="Observed Product",
+            catalog_item_type="product",
+            catalog_item_status="active",
+            catalog_item_published=True,
+            catalog_item_availability="in_stock",
+            catalog_item_inventory_quantity=20,
+        )
+        first_session = _Session(execute_values=[[row]])
+        second_session = _Session(execute_values=[[row]])
+
+        first = await _detect_checkout_abandonment_recovery(
+            first_session,
+            business_id=BUSINESS_ID,
+            window=_window(),
+        )
+        second = await _detect_checkout_abandonment_recovery(
+            second_session,
+            business_id=BUSINESS_ID,
+            window=_window(),
+        )
+
+        self.assertEqual(len(first), 1)
+        signal = first[0]
+        self.assertEqual(signal.category, "checkout_abandonment_recovery")
+        self.assertEqual(signal.customer_id, customer_id)
+        self.assertEqual(signal.source_entity_type, "catalog_item")
+        self.assertEqual(signal.source_entity_id, catalog_item_id)
+        self.assertEqual(signal.dedupe_key, second[0].dedupe_key)
+        self.assertIn(str(event_id), signal.dedupe_key)
+        evidence = signal.provenance[0]
+        self.assertEqual(evidence["event_type"], "checkout_abandoned")
+        self.assertEqual(evidence["grace_period_hours"], 4)
+        self.assertEqual(evidence["elapsed_hours"], "12.000")
+        self.assertFalse(evidence["purchase_resolved"])
+        self.assertNotIn("session", str(signal.provenance).casefold())
+        self.assertNotIn("email", str(signal.provenance).casefold())
+
+        compiled = first_session.execute_statements[0].compile(
+            dialect=postgresql.dialect()
+        )
+        sql = str(compiled)
+        self.assertIn("commerce_events.business_id", sql)
+        self.assertIn("commerce_events.customer_id IS NOT NULL", sql)
+        self.assertIn("customers.active IS true", sql)
+        self.assertIn("NOT (EXISTS", sql.upper())
+        self.assertIn("order_line_items.catalog_item_id", sql)
+        self.assertIn("orders.provider_created_at", sql)
+        self.assertNotIn("safe_metadata", sql)
+        self.assertNotIn("anonymous_session_hash", sql)
+
+
+    async def test_checkout_abandonment_recovery_fails_closed_for_fresh_anonymous_or_unavailable(
+        self,
+    ) -> None:
+        common = {
+            "event_id": uuid4(),
+            "customer_id": uuid4(),
+            "catalog_item_id": uuid4(),
+            "occurred_at": datetime(2026, 8, 24, 12, tzinfo=UTC),
+            "catalog_item_name": "Observed Product",
+            "catalog_item_type": "product",
+            "catalog_item_status": "active",
+            "catalog_item_published": True,
+            "catalog_item_availability": "in_stock",
+            "catalog_item_inventory_quantity": 20,
+        }
+        invalid_rows = (
+            SimpleNamespace(
+                **{
+                    **common,
+                    "event_id": uuid4(),
+                    "occurred_at": datetime(2026, 8, 24, 22, tzinfo=UTC),
+                }
+            ),
+            SimpleNamespace(
+                **{
+                    **common,
+                    "event_id": uuid4(),
+                    "customer_id": None,
+                }
+            ),
+            SimpleNamespace(
+                **{
+                    **common,
+                    "event_id": uuid4(),
+                    "catalog_item_availability": "out_of_stock",
+                    "catalog_item_inventory_quantity": 0,
+                }
+            ),
+            SimpleNamespace(
+                **{
+                    **common,
+                    "event_id": uuid4(),
+                    "catalog_item_inventory_quantity": 0,
+                }
+            ),
+        )
+
+        for row in invalid_rows:
+            with self.subTest(row=row):
+                signals = await _detect_checkout_abandonment_recovery(
+                    _Session(execute_values=[[row]]),
+                    business_id=BUSINESS_ID,
+                    window=_window(),
+                )
+                self.assertEqual(signals, [])
+
+
+    async def test_repeated_product_interest_requires_cross_day_views_without_purchase(
+        self,
+    ) -> None:
+        customer_id = uuid4()
+        catalog_item_id = uuid4()
+        row = SimpleNamespace(
+            customer_id=customer_id,
+            catalog_item_id=catalog_item_id,
+            event_count=4,
+            first_observed_at=datetime(2026, 8, 20, 10, tzinfo=UTC),
+            last_observed_at=datetime(2026, 8, 24, 10, tzinfo=UTC),
+            distinct_observed_days=3,
+            catalog_item_name="Viewed Product",
+            catalog_item_type="product",
+            catalog_item_status="active",
+            catalog_item_published=True,
+            catalog_item_availability="in_stock",
+            catalog_item_inventory_quantity=10,
+        )
+        first_session = _Session(execute_values=[[row]])
+        second_session = _Session(execute_values=[[row]])
+
+        first = await _detect_repeated_product_interest(
+            first_session,
+            business_id=BUSINESS_ID,
+            window=_window(),
+        )
+        second = await _detect_repeated_product_interest(
+            second_session,
+            business_id=BUSINESS_ID,
+            window=_window(),
+        )
+
+        self.assertEqual(len(first), 1)
+        signal = first[0]
+        self.assertEqual(signal.category, "repeated_product_interest")
+        self.assertEqual(signal.customer_id, customer_id)
+        self.assertEqual(signal.source_entity_id, catalog_item_id)
+        self.assertEqual(signal.dedupe_key, second[0].dedupe_key)
+        self.assertTrue(signal.dedupe_key.endswith("2026-08-24"))
+        evidence = signal.provenance[0]
+        self.assertEqual(evidence["product_view_count"], 4)
+        self.assertEqual(evidence["distinct_observed_days"], 3)
+        self.assertFalse(evidence["purchase_resolved"])
+        self.assertNotIn("session", str(signal.provenance).casefold())
+        self.assertNotIn("email", str(signal.provenance).casefold())
+
+        compiled = first_session.execute_statements[0].compile(
+            dialect=postgresql.dialect()
+        )
+        sql = str(compiled)
+        self.assertIn("commerce_events.business_id", sql)
+        self.assertIn("commerce_events.customer_id IS NOT NULL", sql)
+        self.assertIn("commerce_events.catalog_item_id IS NOT NULL", sql)
+        self.assertIn("date_trunc", sql)
+        self.assertIn("timezone", sql)
+        self.assertIn("NOT (EXISTS", sql.upper())
+        self.assertIn("order_line_items.catalog_item_id", sql)
+        self.assertIn("catalog_items.published IS true", sql)
+        self.assertNotIn("safe_metadata", sql)
+        self.assertNotIn("anonymous_session_hash", sql)
+
+
+    async def test_repeated_product_interest_rejects_noise_stale_anonymous_and_unavailable(
+        self,
+    ) -> None:
+        common = {
+            "customer_id": uuid4(),
+            "catalog_item_id": uuid4(),
+            "event_count": 4,
+            "first_observed_at": datetime(2026, 8, 20, 10, tzinfo=UTC),
+            "last_observed_at": datetime(2026, 8, 24, 10, tzinfo=UTC),
+            "distinct_observed_days": 3,
+            "catalog_item_name": "Viewed Product",
+            "catalog_item_type": "product",
+            "catalog_item_status": "active",
+            "catalog_item_published": True,
+            "catalog_item_availability": "in_stock",
+            "catalog_item_inventory_quantity": 10,
+        }
+        invalid_rows = (
+            SimpleNamespace(**{**common, "event_count": 1}),
+            SimpleNamespace(**{**common, "distinct_observed_days": 1}),
+            SimpleNamespace(
+                **{
+                    **common,
+                    "first_observed_at": datetime(
+                        2026, 8, 1, 10, tzinfo=UTC
+                    ),
+                }
+            ),
+            SimpleNamespace(**{**common, "customer_id": None}),
+            SimpleNamespace(
+                **{
+                    **common,
+                    "catalog_item_availability": "out_of_stock",
+                    "catalog_item_inventory_quantity": 0,
+                }
+            ),
+            SimpleNamespace(
+                **{
+                    **common,
+                    "catalog_item_inventory_quantity": 0,
+                }
+            ),
+        )
+
+        for row in invalid_rows:
+            with self.subTest(row=row):
+                signals = await _detect_repeated_product_interest(
+                    _Session(execute_values=[[row]]),
+                    business_id=BUSINESS_ID,
+                    window=_window(),
+                )
+                self.assertEqual(signals, [])
+
+
+    async def test_repeated_product_interest_is_bounded_and_deterministic(
+        self,
+    ) -> None:
+        rows = [
+            SimpleNamespace(
+                customer_id=UUID(
+                    f"f4000000-0000-4000-8000-{index:012d}"
+                ),
+                catalog_item_id=UUID(
+                    f"f5000000-0000-4000-8000-{index:012d}"
+                ),
+                event_count=3 + index,
+                first_observed_at=datetime(
+                    2026, 8, 20, 10, tzinfo=UTC
+                ),
+                last_observed_at=datetime(
+                    2026, 8, 24, 10, tzinfo=UTC
+                ),
+                distinct_observed_days=2,
+                catalog_item_name=f"Viewed Product {index}",
+                catalog_item_type="product",
+                catalog_item_status="active",
+                catalog_item_published=True,
+                catalog_item_availability="in_stock",
+                catalog_item_inventory_quantity=10,
+            )
+            for index in range(1, 6)
+        ]
+
+        signals = await _detect_repeated_product_interest(
+            _Session(execute_values=[rows]),
+            business_id=BUSINESS_ID,
+            window=_window(),
+        )
+
+        self.assertEqual(len(signals), 4)
+        self.assertEqual(
+            [signal.customer_id for signal in signals],
+            [row.customer_id for row in reversed(rows[1:])],
         )
 
 

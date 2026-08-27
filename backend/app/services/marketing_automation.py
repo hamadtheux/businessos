@@ -25,6 +25,7 @@ from app.exceptions.marketing import MarketingAIError
 from app.models.automation_intelligence import MarketingAutomationRun
 from app.models.business import Business
 from app.models.catalog_item import CatalogItem
+from app.models.commerce import CommerceEvent
 from app.models.customer import Customer
 from app.models.integration import IntegrationConnection
 from app.models.marketing import (
@@ -113,6 +114,13 @@ AFFINITY_MIN_LIFT = Decimal("1.25")
 AFFINITY_MAX_DIRECTION_CANDIDATES = 12
 AFFINITY_CUSTOMERS_PER_DIRECTION = 5
 AFFINITY_SELLABLE_AVAILABILITY = ("in_stock", "preorder", "backorder")
+
+CHECKOUT_ABANDONMENT_LOOKBACK_DAYS = 14
+CHECKOUT_ABANDONMENT_GRACE_HOURS = 4
+
+PRODUCT_INTEREST_LOOKBACK_DAYS = 14
+PRODUCT_INTEREST_MIN_EVENTS = 3
+PRODUCT_INTEREST_MIN_ACTIVE_DAYS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -567,6 +575,18 @@ async def _analyze_bounded_business_growth(
             business_id=business_id,
             window=window,
         )
+        checkout_recovery_signals = (
+            await _detect_checkout_abandonment_recovery(
+                session,
+                business_id=business_id,
+                window=window,
+            )
+        )
+        product_interest_signals = await _detect_repeated_product_interest(
+            session,
+            business_id=business_id,
+            window=window,
+        )
 
         promoted_pairs = {
             (signal.customer_id, signal.currency)
@@ -589,6 +609,8 @@ async def _analyze_bounded_business_growth(
             high_value_signals,
             customer_value_signals,
             product_affinity_signals,
+            checkout_recovery_signals,
+            product_interest_signals,
         )
     except SQLAlchemyError:
         raise AutomationIntelligencePersistenceError(
@@ -659,6 +681,43 @@ def _retained_order_revenue():
             Order.total - Order.refunded_amount,
             Decimal("0.00"),
         ),
+    )
+
+
+def _sellable_product_predicates(item) -> tuple[object, ...]:
+    """Return the shared authoritative boundary for recommendable products."""
+    return (
+        item.item_type == "product",
+        item.status == "active",
+        item.published.is_(True),
+        item.availability.in_(AFFINITY_SELLABLE_AVAILABILITY),
+        or_(
+            item.availability.in_(("preorder", "backorder")),
+            item.inventory_quantity.is_(None),
+            item.inventory_quantity > 0,
+        ),
+    )
+
+
+def _is_sellable_product_state(
+    *,
+    item_type: str,
+    status: str,
+    published: bool,
+    availability: str,
+    inventory_quantity: int | None,
+) -> bool:
+    if (
+        item_type != "product"
+        or status != "active"
+        or not published
+        or availability not in AFFINITY_SELLABLE_AVAILABILITY
+    ):
+        return False
+    return (
+        availability in {"preorder", "backorder"}
+        or inventory_quantity is None
+        or inventory_quantity > 0
     )
 
 
@@ -1589,6 +1648,563 @@ async def _detect_inventory_risks(
     ranked.sort(key=lambda item: (item[0], item[1], item[2].dedupe_key))
     return [item[2] for item in ranked[:MAX_OPPORTUNITIES_PER_DETECTOR]]
 
+
+
+async def _detect_checkout_abandonment_recovery(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    window: _ComparisonWindow,
+) -> list[_GrowthSignal]:
+    """
+    Detect unresolved, explicitly recorded checkout abandonment.
+
+    The canonical ``checkout_abandoned`` event is required. Cart/session state is
+    not inferred from metadata, and anonymous events never become customer-linked
+    outreach Opportunities. A four-hour grace period avoids treating fresh intent
+    as abandoned recovery work.
+    """
+    abandonment_start = window.recent_end - timedelta(
+        days=CHECKOUT_ABANDONMENT_LOOKBACK_DAYS
+    )
+    abandonment_cutoff = window.recent_end - timedelta(
+        hours=CHECKOUT_ABANDONMENT_GRACE_HOURS
+    )
+    purchase_occurred_at = _authoritative_order_occurred_at()
+    retained_revenue = _retained_order_revenue()
+
+    matching_product_purchase = exists(
+        select(OrderLineItem.id).where(
+            OrderLineItem.business_id == business_id,
+            OrderLineItem.order_id == Order.id,
+            OrderLineItem.catalog_item_id
+            == CommerceEvent.catalog_item_id,
+        )
+    )
+    purchase_resolved = exists(
+        select(Order.id).where(
+            Order.business_id == business_id,
+            Order.customer_id == CommerceEvent.customer_id,
+            Order.status != "canceled",
+            Order.payment_status.in_(REALIZED_PAYMENT_STATES),
+            purchase_occurred_at.is_not(None),
+            purchase_occurred_at >= CommerceEvent.occurred_at,
+            purchase_occurred_at < window.recent_end,
+            retained_revenue > Decimal("0.00"),
+            or_(
+                CommerceEvent.catalog_item_id.is_(None),
+                matching_product_purchase,
+            ),
+        )
+    )
+
+    rows = (await session.execute(
+        select(
+            CommerceEvent.id.label("event_id"),
+            CommerceEvent.customer_id,
+            CommerceEvent.catalog_item_id,
+            CommerceEvent.occurred_at,
+            CatalogItem.name.label("catalog_item_name"),
+            CatalogItem.item_type.label("catalog_item_type"),
+            CatalogItem.status.label("catalog_item_status"),
+            CatalogItem.published.label("catalog_item_published"),
+            CatalogItem.availability.label("catalog_item_availability"),
+            CatalogItem.inventory_quantity.label(
+                "catalog_item_inventory_quantity"
+            ),
+        )
+        .join(
+            Customer,
+            (Customer.id == CommerceEvent.customer_id)
+            & (Customer.business_id == CommerceEvent.business_id),
+        )
+        .outerjoin(
+            CatalogItem,
+            (CatalogItem.id == CommerceEvent.catalog_item_id)
+            & (CatalogItem.business_id == CommerceEvent.business_id),
+        )
+        .where(
+            CommerceEvent.business_id == business_id,
+            Customer.business_id == business_id,
+            Customer.active.is_(True),
+            Customer.status == "active",
+            CommerceEvent.event_type == "checkout_abandoned",
+            CommerceEvent.customer_id.is_not(None),
+            CommerceEvent.occurred_at >= abandonment_start,
+            CommerceEvent.occurred_at <= abandonment_cutoff,
+            or_(
+                CommerceEvent.catalog_item_id.is_(None),
+                and_(*_sellable_product_predicates(CatalogItem)),
+            ),
+            ~purchase_resolved,
+        )
+        .order_by(
+            CommerceEvent.occurred_at.desc(),
+            CommerceEvent.id.desc(),
+        )
+        .limit(MAX_DETECTOR_CANDIDATES)
+    )).all()
+
+    ranked: list[tuple[Decimal, Decimal, float, _GrowthSignal]] = []
+    for row in rows:
+        event_id = row.event_id
+        customer_id = row.customer_id
+        catalog_item_id = row.catalog_item_id
+        observed_at = row.occurred_at
+        if event_id is None or customer_id is None or observed_at is None:
+            continue
+        if catalog_item_id is not None and not _is_sellable_product_state(
+            item_type=str(row.catalog_item_type),
+            status=str(row.catalog_item_status),
+            published=bool(row.catalog_item_published),
+            availability=str(row.catalog_item_availability),
+            inventory_quantity=row.catalog_item_inventory_quantity,
+        ):
+            continue
+
+        elapsed_hours = (
+            Decimal(str(
+                (window.recent_end - observed_at).total_seconds()
+            ))
+            / Decimal("3600")
+        )
+        if elapsed_hours < Decimal(CHECKOUT_ABANDONMENT_GRACE_HOURS):
+            continue
+        if elapsed_hours > Decimal(
+            CHECKOUT_ABANDONMENT_LOOKBACK_DAYS * 24
+        ):
+            continue
+
+        product_linked = catalog_item_id is not None
+        confidence = _confidence(
+            base=Decimal("0.720"),
+            evidence=Decimal("0.050") if product_linked else Decimal("0.000"),
+            severity=min(
+                Decimal("0.130"),
+                (
+                    elapsed_hours
+                    - Decimal(CHECKOUT_ABANDONMENT_GRACE_HOURS)
+                )
+                / Decimal("48")
+                * Decimal("0.130"),
+            ),
+        )
+        rank_score = min(
+            Decimal("0.940"),
+            Decimal("0.650")
+            + (Decimal("0.060") if product_linked else Decimal("0.000"))
+            + min(
+                Decimal("0.160"),
+                (
+                    elapsed_hours
+                    - Decimal(CHECKOUT_ABANDONMENT_GRACE_HOURS)
+                )
+                / Decimal("48")
+                * Decimal("0.160"),
+            ),
+        ).quantize(Decimal("0.001"))
+
+        product_name = (
+            str(row.catalog_item_name)
+            if product_linked and row.catalog_item_name
+            else None
+        )
+        entity_type = "catalog_item" if product_linked else "customer"
+        entity_id = catalog_item_id if product_linked else customer_id
+        product_context = (
+            f" for {product_name}" if product_name else ""
+        )
+        signal = _GrowthSignal(
+            dedupe_key=(
+                "business-growth:checkout-abandonment-recovery:"
+                f"{customer_id}:{event_id}"
+            ),
+            title=(
+                f"Observed checkout recovery opportunity{product_context}"
+            )[:180],
+            description=(
+                "A first-party checkout_abandoned event remains unresolved by "
+                "a subsequent eligible retained-revenue purchase after the "
+                f"{CHECKOUT_ABANDONMENT_GRACE_HOURS}-hour grace period. This "
+                "is observed incomplete purchase intent, not a churn signal or "
+                "a prediction of future behavior."
+            )[:3000],
+            category="checkout_abandonment_recovery",
+            source="commerce",
+            source_entity_type=entity_type,
+            source_entity_id=entity_id,
+            customer_id=customer_id,
+            reason=(
+                f"The explicit checkout abandonment was observed "
+                f"{elapsed_hours:.2f} hours before the analysis boundary and "
+                "no resolving eligible purchase was observed afterward."
+            )[:3000],
+            confidence=confidence,
+            recommendation=(
+                "Ask the Sales Copilot to review current order history, product "
+                "context, consent, and business policy before proposing any "
+                "checkout-recovery follow-up."
+            ),
+            provenance=[{
+                "classification": "first_party_observed",
+                "detector": "checkout_abandonment_recovery",
+                "source_type": "commerce_events",
+                "source_id": str(event_id),
+                "observed_at": observed_at.isoformat(),
+                "event_type": "checkout_abandoned",
+                "catalog_item_id": (
+                    str(catalog_item_id) if catalog_item_id else None
+                ),
+                "lookback_days": CHECKOUT_ABANDONMENT_LOOKBACK_DAYS,
+                "grace_period_hours": CHECKOUT_ABANDONMENT_GRACE_HOURS,
+                "elapsed_hours": str(
+                    elapsed_hours.quantize(Decimal("0.001"))
+                ),
+                "purchase_resolved": False,
+                "purchase_resolution_scope": (
+                    "subsequent_same_product_eligible_purchase"
+                    if product_linked
+                    else "subsequent_customer_eligible_purchase"
+                ),
+                "product_sellability_scope": (
+                    "active_published_sellable_catalog_item"
+                    if product_linked
+                    else "not_product_linked"
+                ),
+                "order_timestamp_policy": (
+                    "manual_created_at_else_provider_created_at_required"
+                ),
+                "eligible_payment_states": list(REALIZED_PAYMENT_STATES),
+                "refund_treatment": "positive_retained_revenue_only",
+            }],
+            priority=(
+                "high" if elapsed_hours >= Decimal("24") else "medium"
+            ),
+            currency=None,
+            rank_score=rank_score,
+        )
+        ranked.append((
+            rank_score,
+            confidence,
+            observed_at.astimezone(UTC).timestamp(),
+            signal,
+        ))
+
+    ranked.sort(
+        key=lambda item: (
+            -_GROWTH_PRIORITY_RANK.get(item[3].priority, 0),
+            -item[0],
+            -item[1],
+            -item[2],
+            item[3].dedupe_key,
+        )
+    )
+    selected: list[_GrowthSignal] = []
+    seen_customers: set[UUID] = set()
+    for _score, _confidence_value, _observed_timestamp, signal in ranked:
+        if signal.customer_id is None or signal.customer_id in seen_customers:
+            continue
+        seen_customers.add(signal.customer_id)
+        selected.append(signal)
+        if len(selected) >= MAX_OPPORTUNITIES_PER_DETECTOR:
+            break
+    return selected
+
+
+async def _detect_repeated_product_interest(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    window: _ComparisonWindow,
+) -> list[_GrowthSignal]:
+    """
+    Detect repeated identified-customer product views without a later purchase.
+
+    Three views across at least two UTC days are required. The detector uses only
+    relational customer/catalog identities and never reads event metadata or
+    anonymous session hashes.
+    """
+    interest_start = window.recent_end - timedelta(
+        days=PRODUCT_INTEREST_LOOKBACK_DAYS
+    )
+    event_count = func.count(CommerceEvent.id).label("event_count")
+    first_observed_at = func.min(CommerceEvent.occurred_at).label(
+        "first_observed_at"
+    )
+    last_observed_at = func.max(CommerceEvent.occurred_at).label(
+        "last_observed_at"
+    )
+    distinct_observed_days = func.count(func.distinct(func.date_trunc(
+        "day",
+        func.timezone("UTC", CommerceEvent.occurred_at),
+    ))).label("distinct_observed_days")
+
+    interest_candidates = (
+        select(
+            CommerceEvent.customer_id.label("customer_id"),
+            CommerceEvent.catalog_item_id.label("catalog_item_id"),
+            event_count,
+            first_observed_at,
+            last_observed_at,
+            distinct_observed_days,
+        )
+        .where(
+            CommerceEvent.business_id == business_id,
+            CommerceEvent.event_type == "product_viewed",
+            CommerceEvent.customer_id.is_not(None),
+            CommerceEvent.catalog_item_id.is_not(None),
+            CommerceEvent.occurred_at >= interest_start,
+            CommerceEvent.occurred_at < window.recent_end,
+        )
+        .group_by(
+            CommerceEvent.customer_id,
+            CommerceEvent.catalog_item_id,
+        )
+        .having(
+            event_count >= PRODUCT_INTEREST_MIN_EVENTS,
+            distinct_observed_days >= PRODUCT_INTEREST_MIN_ACTIVE_DAYS,
+        )
+        .subquery("product_interest_candidates")
+    )
+
+    purchase_occurred_at = _authoritative_order_occurred_at()
+    retained_revenue = _retained_order_revenue()
+    purchase_resolved = exists(
+        select(Order.id)
+        .join(
+            OrderLineItem,
+            (OrderLineItem.order_id == Order.id)
+            & (OrderLineItem.business_id == Order.business_id),
+        )
+        .where(
+            Order.business_id == business_id,
+            OrderLineItem.business_id == business_id,
+            Order.customer_id == interest_candidates.c.customer_id,
+            OrderLineItem.catalog_item_id
+            == interest_candidates.c.catalog_item_id,
+            Order.status != "canceled",
+            Order.payment_status.in_(REALIZED_PAYMENT_STATES),
+            purchase_occurred_at.is_not(None),
+            purchase_occurred_at >= interest_candidates.c.first_observed_at,
+            purchase_occurred_at < window.recent_end,
+            retained_revenue > Decimal("0.00"),
+        )
+    )
+
+    rows = (await session.execute(
+        select(
+            interest_candidates.c.customer_id,
+            interest_candidates.c.catalog_item_id,
+            interest_candidates.c.event_count,
+            interest_candidates.c.first_observed_at,
+            interest_candidates.c.last_observed_at,
+            interest_candidates.c.distinct_observed_days,
+            CatalogItem.name.label("catalog_item_name"),
+            CatalogItem.item_type.label("catalog_item_type"),
+            CatalogItem.status.label("catalog_item_status"),
+            CatalogItem.published.label("catalog_item_published"),
+            CatalogItem.availability.label("catalog_item_availability"),
+            CatalogItem.inventory_quantity.label(
+                "catalog_item_inventory_quantity"
+            ),
+        )
+        .join(
+            Customer,
+            (Customer.id == interest_candidates.c.customer_id)
+            & (Customer.business_id == business_id),
+        )
+        .join(
+            CatalogItem,
+            (CatalogItem.id == interest_candidates.c.catalog_item_id)
+            & (CatalogItem.business_id == business_id),
+        )
+        .where(
+            Customer.business_id == business_id,
+            Customer.active.is_(True),
+            Customer.status == "active",
+            CatalogItem.business_id == business_id,
+            *_sellable_product_predicates(CatalogItem),
+            ~purchase_resolved,
+        )
+        .order_by(
+            interest_candidates.c.event_count.desc(),
+            interest_candidates.c.distinct_observed_days.desc(),
+            interest_candidates.c.last_observed_at.desc(),
+            interest_candidates.c.customer_id,
+            interest_candidates.c.catalog_item_id,
+        )
+        .limit(MAX_DETECTOR_CANDIDATES)
+    )).all()
+
+    ranked: list[tuple[Decimal, Decimal, float, _GrowthSignal]] = []
+    for row in rows:
+        customer_id = row.customer_id
+        catalog_item_id = row.catalog_item_id
+        views = int(row.event_count or 0)
+        active_days = int(row.distinct_observed_days or 0)
+        first_observed = row.first_observed_at
+        last_observed = row.last_observed_at
+        if (
+            customer_id is None
+            or catalog_item_id is None
+            or first_observed is None
+            or last_observed is None
+            or views < PRODUCT_INTEREST_MIN_EVENTS
+            or active_days < PRODUCT_INTEREST_MIN_ACTIVE_DAYS
+        ):
+            continue
+        if not _is_sellable_product_state(
+            item_type=str(row.catalog_item_type),
+            status=str(row.catalog_item_status),
+            published=bool(row.catalog_item_published),
+            availability=str(row.catalog_item_availability),
+            inventory_quantity=row.catalog_item_inventory_quantity,
+        ):
+            continue
+        if (
+            first_observed < interest_start
+            or last_observed >= window.recent_end
+        ):
+            continue
+
+        hours_since_last = max(
+            Decimal("0.000"),
+            Decimal(str(
+                (window.recent_end - last_observed).total_seconds()
+            ))
+            / Decimal("3600"),
+        )
+        recency_boost = max(
+            Decimal("0.000"),
+            Decimal("0.080")
+            * (
+                Decimal(PRODUCT_INTEREST_LOOKBACK_DAYS * 24)
+                - hours_since_last
+            )
+            / Decimal(PRODUCT_INTEREST_LOOKBACK_DAYS * 24),
+        )
+        confidence = _confidence(
+            base=Decimal("0.660"),
+            evidence=min(
+                Decimal("0.170"),
+                Decimal(views - PRODUCT_INTEREST_MIN_EVENTS)
+                * Decimal("0.025")
+                + Decimal(active_days - PRODUCT_INTEREST_MIN_ACTIVE_DAYS)
+                * Decimal("0.025"),
+            ),
+            severity=recency_boost,
+        )
+        rank_score = min(
+            Decimal("0.950"),
+            Decimal("0.600")
+            + min(
+                Decimal("0.180"),
+                Decimal(views - PRODUCT_INTEREST_MIN_EVENTS)
+                * Decimal("0.030"),
+            )
+            + min(
+                Decimal("0.100"),
+                Decimal(active_days - PRODUCT_INTEREST_MIN_ACTIVE_DAYS)
+                * Decimal("0.025"),
+            )
+            + recency_boost,
+        ).quantize(Decimal("0.001"))
+
+        last_utc = last_observed.astimezone(UTC)
+        episode_start = last_utc.date() - timedelta(
+            days=last_utc.date().weekday()
+        )
+        product_name = str(row.catalog_item_name)
+        signal = _GrowthSignal(
+            dedupe_key=(
+                "business-growth:repeated-product-interest:"
+                f"{customer_id}:{catalog_item_id}:{episode_start.isoformat()}"
+            ),
+            title=f"Repeated product interest: {product_name}"[:180],
+            description=(
+                f"A customer viewed {product_name} {views} times across "
+                f"{active_days} distinct UTC days in the bounded "
+                f"{PRODUCT_INTEREST_LOOKBACK_DAYS}-day window, with no "
+                "subsequent eligible retained-revenue purchase of that product. "
+                "This is observed product interest, not purchase propensity or "
+                "a prediction that the customer will buy."
+            )[:3000],
+            category="repeated_product_interest",
+            source="commerce",
+            source_entity_type="catalog_item",
+            source_entity_id=catalog_item_id,
+            customer_id=customer_id,
+            reason=(
+                f"Observed {views} product_viewed events from "
+                f"{first_observed.isoformat()} through "
+                f"{last_observed.isoformat()} across {active_days} days; "
+                "no resolving same-product purchase was observed."
+            )[:3000],
+            confidence=confidence,
+            recommendation=(
+                "Ask the Sales Copilot to review product relevance, current "
+                "availability, order history, consent, and business policy "
+                "before proposing any follow-up."
+            ),
+            provenance=[{
+                "classification": "first_party_observed",
+                "detector": "repeated_product_interest",
+                "source_type": "commerce_events",
+                "source_id": str(catalog_item_id),
+                "observed_at": last_observed.isoformat(),
+                "event_type": "product_viewed",
+                "catalog_item_id": str(catalog_item_id),
+                "event_count": views,
+                "product_view_count": views,
+                "distinct_observed_days": active_days,
+                "first_observed_at": first_observed.isoformat(),
+                "last_observed_at": last_observed.isoformat(),
+                "lookback_days": PRODUCT_INTEREST_LOOKBACK_DAYS,
+                "purchase_resolved": False,
+                "purchase_resolution_scope": (
+                    "subsequent_same_product_eligible_purchase"
+                ),
+                "product_sellability_scope": (
+                    "active_published_sellable_catalog_item"
+                ),
+                "order_timestamp_policy": (
+                    "manual_created_at_else_provider_created_at_required"
+                ),
+                "eligible_payment_states": list(REALIZED_PAYMENT_STATES),
+                "refund_treatment": "positive_retained_revenue_only",
+            }],
+            priority=(
+                "high" if views >= 6 and active_days >= 3 else "medium"
+            ),
+            currency=None,
+            rank_score=rank_score,
+        )
+        ranked.append((
+            rank_score,
+            confidence,
+            last_utc.timestamp(),
+            signal,
+        ))
+
+    ranked.sort(
+        key=lambda item: (
+            -_GROWTH_PRIORITY_RANK.get(item[3].priority, 0),
+            -item[0],
+            -item[1],
+            -item[2],
+            item[3].dedupe_key,
+        )
+    )
+    selected: list[_GrowthSignal] = []
+    seen_customers: set[UUID] = set()
+    for _score, _confidence_value, _last_timestamp, signal in ranked:
+        if signal.customer_id is None or signal.customer_id in seen_customers:
+            continue
+        seen_customers.add(signal.customer_id)
+        selected.append(signal)
+        if len(selected) >= MAX_OPPORTUNITIES_PER_DETECTOR:
+            break
+    return selected
 
 
 def _median_decimal(values: list[Decimal]) -> Decimal:
@@ -2646,15 +3262,7 @@ async def _detect_product_affinity_cross_sell(
         )
         .where(
             target_item.business_id == business_id,
-            target_item.item_type == "product",
-            target_item.status == "active",
-            target_item.published.is_(True),
-            target_item.availability.in_(AFFINITY_SELLABLE_AVAILABILITY),
-            or_(
-                target_item.availability.in_(("preorder", "backorder")),
-                target_item.inventory_quantity.is_(None),
-                target_item.inventory_quantity > 0,
-            ),
+            *_sellable_product_predicates(target_item),
         )
         .group_by(
             source_products.c.catalog_item_id,

@@ -120,6 +120,8 @@ _CATEGORY_ROLE: Final[dict[str, AIAgentRole]] = {
     "high_value_customer_at_risk": "sales",
     "customer_value_decline": "sales",
     "product_affinity_cross_sell": "sales",
+    "checkout_abandonment_recovery": "sales",
+    "repeated_product_interest": "sales",
 }
 
 _ROLE_ANALYSIS_CAPABILITY: Final[dict[AIAgentRole, str]] = {
@@ -165,7 +167,11 @@ _PROVENANCE_FIELDS: Final = frozenset({
     "affinity_lift", "affinity_lookback_days",
     "customer_source_purchase_count", "last_source_purchase_at",
     "target_availability", "product_identity_scope",
-    "affinity_disclaimer",
+    "affinity_disclaimer", "event_type", "event_count",
+    "product_view_count", "distinct_observed_days",
+    "first_observed_at", "last_observed_at", "lookback_days",
+    "grace_period_hours", "elapsed_hours", "purchase_resolved",
+    "purchase_resolution_scope", "product_sellability_scope",
 })
 
 _OPPORTUNITY_ANALYSIS_RULES: Final = (
@@ -999,6 +1005,18 @@ def _category_guardrail(category: str) -> str:
         "inventory_risk": (
             "Use only known inventory and observed velocity. Do not invent lead times, "
             "replenishment commitments, variant stock, or future availability."
+        ),
+        "checkout_abandonment_recovery": (
+            "Treat checkout_abandoned as observed incomplete purchase intent only. "
+            "Do not call it churn, infer why checkout stopped, or claim recovery is "
+            "likely. Verify current consent, purchase, and product state before any "
+            "proposal."
+        ),
+        "repeated_product_interest": (
+            "Treat repeated product views as observed engagement only. Do not infer "
+            "purchase probability, intent beyond the recorded views, or a causal "
+            "reason. Verify current consent, purchase, and product state before any "
+            "proposal."
         ),
     }.get(
         category,
