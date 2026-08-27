@@ -18,6 +18,7 @@ from app.exceptions.background_jobs import BackgroundJobStateError, BackgroundJo
 from app.models.automation import AutomationWorkflow  # noqa: E402
 from app.models.background_job import BackgroundJob, WorkerInstance  # noqa: E402
 from app.models.marketing import SocialSchedule  # noqa: E402
+from app.models.commerce import CommerceSyncRun  # noqa: E402
 from app.services.automation import _next_schedule  # noqa: E402
 from app.schemas.automation import ScheduleDefinition  # noqa: E402
 from app.services.background_jobs import (  # noqa: E402
@@ -27,6 +28,7 @@ from app.services.background_jobs import (  # noqa: E402
     record_job_failure,
     record_job_success,
     retry_job,
+    _synchronize_linked_run,
 )
 from app.services.job_scheduler import _scheduled_workflows  # noqa: E402
 from app.services.marketing import mark_social_schedule_ready  # noqa: E402
@@ -90,6 +92,26 @@ class BackgroundJobModelAndRegistryTests(unittest.TestCase):
 
 
 class BackgroundJobServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_successful_page_job_does_not_finalize_parent_commerce_run(self) -> None:
+        run = CommerceSyncRun(
+            id=uuid4(), business_id=BUSINESS_ID, connection_id=uuid4(),
+            mode="initial", idempotency_key="commerce-run-001",
+            status="running", pages_processed=1, warnings=0, failures=0,
+        )
+        job = BackgroundJob(
+            id=uuid4(), business_id=BUSINESS_ID,
+            job_type="commerce_initial_sync", status="processing",
+            priority=65, idempotency_key="commerce-page-001",
+            attempt_count=1, max_attempts=5, available_at=NOW,
+            commerce_sync_run_id=run.id,
+        )
+        await _synchronize_linked_run(
+            _Session(scalar_values=[run]),  # type: ignore[arg-type]
+            job=job, status="completed", instant=NOW, failure_code=None,
+        )
+        self.assertEqual(run.status, "running")
+        self.assertIsNone(run.completed_at)
+
     async def test_enqueue_requires_exact_typed_reference(self) -> None:
         with self.assertRaises(BackgroundJobValidationError):
             await enqueue_job(
@@ -209,6 +231,20 @@ class BackgroundJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "queued")
         self.assertIsNone(result.worker_id)
         self.assertGreater(result.available_at, NOW)
+
+    async def test_provider_retry_after_is_honored_when_longer_than_backoff(self) -> None:
+        job = _processing_job(attempt_count=1)
+        before = datetime.now(UTC)
+        result = await record_job_failure(
+            _Session(scalar_values=[job]),  # type: ignore[arg-type]
+            job_id=job.id,
+            worker_id="worker-a",
+            failure_code="provider_unavailable",
+            retryable=True,
+            retry_after_seconds=37,
+        )
+        self.assertEqual(result.status, "queued")
+        self.assertGreaterEqual(result.available_at, before + timedelta(seconds=37))
 
     async def test_retry_exhaustion_dead_letters_and_notifies_once(self) -> None:
         job = _processing_job(attempt_count=4)

@@ -58,6 +58,21 @@ export type WorkflowDetail = AutomationWorkflow & {
   nodes: AutomationNode[];
   edges: AutomationEdge[];
 };
+export type AutomationCopilotResult = {
+  workflow: WorkflowDetail;
+  explanation: string;
+  required_integrations: string[];
+  missing_information: string[];
+  stop_conditions: string[];
+  proposed_actions: Array<{
+    action_type: "send_email" | "send_whatsapp_message" | "send_customer_message";
+    channel: "email" | "whatsapp" | "customer_message";
+    condition: string;
+    policy_behavior: string;
+    execution_state: "withheld_pending_authoritative_inputs";
+  }>;
+  executable_actions_withheld: boolean;
+};
 export type PageResponse<T> = {
   items: T[];
   page: number;
@@ -171,6 +186,16 @@ const approvalPath = (businessId: string, suffix = "") =>
 
 export function createAutomationsApi(client: ApiClient) {
   return {
+    copilot: {
+      compile: (businessId: string, data: { prompt: string; name?: string | null; timezone?: string }) =>
+        client.request<AutomationCopilotResult>(path(businessId, "/copilot/compile"), {
+          method: "POST", json: data,
+        }),
+      refine: (businessId: string, workflowId: string, instruction: string) =>
+        client.request<AutomationCopilotResult>(path(businessId, `/copilot/${workflowId}/refine`), {
+          method: "POST", json: { instruction },
+        }),
+    },
     workflows: {
       list: (businessId: string, signal?: AbortSignal) =>
         client.request<PageResponse<AutomationWorkflow>>(

@@ -39,6 +39,7 @@ import {
   automationsApi,
   type AutomationNode,
   type AutomationNodeType,
+  type AutomationCopilotResult,
   type SimulationResult,
   type WorkflowRun,
 } from "@/services/automations";
@@ -153,6 +154,9 @@ export function WorkflowBuilderPage() {
   );
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [advanced, setAdvanced] = useState(false);
+  const [copilotResult, setCopilotResult] = useState<AutomationCopilotResult | null>(null);
+  const [copilotPrompt, setCopilotPrompt] = useState("");
 
   const workflows = useQuery({
     queryKey: ["automations", activeBusinessId, "workflows"],
@@ -244,6 +248,24 @@ export function WorkflowBuilderPage() {
       setError(
         humanizeApiError(reason, "The workflow change could not be saved."),
       ),
+  });
+  const copilot = useMutation({
+    mutationFn: (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      return automationsApi.copilot.compile(activeBusinessId, {
+        prompt: String(form.get("prompt")),
+        timezone: activeBusiness?.timezone || "UTC",
+      });
+    },
+    onSuccess: (result) => {
+      setCopilotResult(result);
+      setSelectedId(result.workflow.id);
+      setNotice("Automation Copilot created a deterministic draft. Review the withheld requirements, then dry-run it before activation.");
+      setError("");
+      refresh();
+    },
+    onError: (reason) => setError(humanizeApiError(reason, "Automation Copilot could not compile this request safely.")),
   });
   const simulate = useMutation({
     mutationFn: async () => {
@@ -408,9 +430,9 @@ export function WorkflowBuilderPage() {
   return (
     <>
       <PageHeader
-        eyebrow="Operations · Durable workflow engine"
-        title="Automation Builder"
-        subtitle={`Design, validate, and safely test tenant-owned workflows in ${activeBusiness?.name || "this business"}.`}
+        eyebrow="Operations · Automation 2.0"
+        title="Automation Copilot"
+        subtitle={`Describe the outcome. AI Business OS compiles a governed, dry-runnable workflow for ${activeBusiness?.name || "this business"}.`}
         action={
           <div className="toolbar">
             <Button
@@ -469,6 +491,39 @@ export function WorkflowBuilderPage() {
           </Button>
         </div>
       )}
+      <Card className="intelligence-hero" data-testid="automation-copilot">
+        <div className="intelligence-hero-icon"><Bot /></div>
+        <div className="row-main">
+          <div className="eyebrow">What should AI Business OS automate?</div>
+          <form onSubmit={(event) => copilot.mutate(event)}>
+            <div className="field">
+              <textarea name="prompt" required minLength={8} maxLength={4000} value={copilotPrompt} onChange={(event) => setCopilotPrompt(event.target.value)} placeholder="When someone abandons checkout, wait two hours, send WhatsApp if they consented, and stop immediately after purchase." />
+            </div>
+            <div className="toolbar"><Button variant="green" type="submit" disabled={copilot.isPending}><Bot /> {copilot.isPending ? "Compiling safely…" : "Create automation draft"}</Button><Button type="button" onClick={() => setAdvanced((value) => !value)}><Settings2 /> {advanced ? "Hide advanced editor" : "Advanced editor"}</Button></div>
+          </form>
+        </div>
+      </Card>
+      <Card data-testid="recommended-automation-packs">
+        <SectionTitle title="Recommended automation packs" action={<Badge tone="info">Starts as a reviewable draft</Badge>} />
+        <div className="toolbar">
+          {[
+            ["Recover checkout", "When someone abandons checkout, wait 2 hours, send WhatsApp if allowed, then email them if they have not purchased."],
+            ["Follow up leads", "When a lead is created, wait 1 hour, then send an email if allowed."],
+            ["Request a review", "When an order is delivered, wait 2 days, then ask for a review if allowed."],
+          ].map(([label, prompt]) => <Button type="button" key={label} onClick={() => setCopilotPrompt(prompt)}>{label}</Button>)}
+        </div>
+      </Card>
+      {copilotResult && <Card>
+        <SectionTitle title="Copilot safety review" action={<Badge tone={copilotResult.executable_actions_withheld ? "warning" : "success"}>{copilotResult.executable_actions_withheld ? "External action withheld" : "Internal draft"}</Badge>} />
+        <p className="detail-copy">{copilotResult.explanation}</p>
+        <div className="analysis-grid">
+          <div><div className="eyebrow">Required connections</div><p>{copilotResult.required_integrations.join(", ") || "None"}</p></div>
+          <div><div className="eyebrow">Missing information</div><p>{copilotResult.missing_information.join(" · ") || "None"}</p></div>
+          <div><div className="eyebrow">Stop conditions</div><p>{copilotResult.stop_conditions.join(" · ")}</p></div>
+        </div>
+        {copilotResult.proposed_actions.length > 0 && <><div className="eyebrow">Planned governed actions</div>{copilotResult.proposed_actions.map((action, index) => <div className="list-row" key={`${action.action_type}-${index}`}><div className="row-main"><strong>{index + 1}. {action.channel.replaceAll("_", " ")}</strong><div className="row-copy">{action.condition} {action.policy_behavior}</div></div><Badge tone="warning">withheld</Badge></div>)}</>}
+        <div className="toolbar"><Button variant="soft" onClick={() => simulate.mutate()} disabled={simulate.isPending}><TestTube2 /> Run safe dry-run</Button><Button onClick={() => setAdvanced(true)}><GitBranch /> Review visual workflow</Button></div>
+      </Card>}
       <Card className={`processing-card processing-${processingState}`}>
         <div className="processing-card-head">
           <div>
@@ -521,7 +576,7 @@ export function WorkflowBuilderPage() {
           <small>External sending, publishing, and spend remain disabled.</small>
         </div>
       </Card>
-      <div className="workflow-layout">
+      <div className="workflow-layout" style={{ display: advanced ? undefined : "none" }} data-testid="advanced-workflow-editor">
         <Card className="workflow-sidebar">
           <SectionTitle
             title="Workflows"

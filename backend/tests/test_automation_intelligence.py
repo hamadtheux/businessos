@@ -8,11 +8,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import SQLAlchemyError
+
 os.environ.setdefault("AIBOS_DATABASE_URL", "postgresql+asyncpg://database.invalid/test")
 os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 
 from app.exceptions.automation_intelligence import (  # noqa: E402
     AutomationIntelligenceNotFoundError,
+    AutomationIntelligencePersistenceError,
     AutomationIntelligenceProviderError,
 )
 from app.exceptions.marketing import MarketingValidationError  # noqa: E402
@@ -41,7 +45,10 @@ from app.services.automation_intelligence import (  # noqa: E402
     run_competitor_discovery,
 )
 from app.services.marketing_actions import _connector_state, prepare_content_publish_action  # noqa: E402
-from app.services.marketing_automation import _industry_guardrail  # noqa: E402
+from app.services.marketing_automation import (  # noqa: E402
+    _create_opportunity_if_missing,
+    _industry_guardrail,
+)
 
 
 NOW = datetime(2026, 8, 24, 12, tzinfo=UTC)
@@ -190,6 +197,114 @@ class AutomationIntelligenceTests(unittest.IsolatedAsyncioTestCase):
             str(unsupported["connector_message"]),
         )
 
+    async def test_opportunity_insert_is_atomic_and_business_scoped(
+        self,
+    ) -> None:
+        business_id = uuid4()
+        inserted_id = uuid4()
+        source_entity_id = uuid4()
+        session = _Session([inserted_id])
+
+        created = await _create_opportunity_if_missing(
+            session,
+            business_id=business_id,
+            dedupe_key="business-growth:revenue-decline:2026-08-24",
+            title="Revenue decline detected",
+            description="Observed paid-order revenue declined versus the prior comparable period.",
+            category="revenue_opportunity",
+            source="commerce",
+            source_entity_type="commerce_growth_signal",
+            source_entity_id=source_entity_id,
+            reason="Deterministic first-party commerce comparison detected a material decline.",
+            confidence=Decimal("0.900"),
+            recommendation="Review the decline and identify an evidence-backed recovery action.",
+            provenance=[{
+                "classification": "first_party_observed",
+                "source_type": "orders",
+                "source_id": None,
+            }],
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(len(session.scalar_statements), 1)
+
+        compiled = session.scalar_statements[0].compile(
+            dialect=postgresql.dialect()
+        )
+        sql = str(compiled)
+
+        self.assertIn(
+            "ON CONFLICT (business_id, dedupe_key) DO NOTHING",
+            sql,
+        )
+        self.assertEqual(
+            compiled.params["business_id"],
+            business_id,
+        )
+        self.assertEqual(
+            compiled.params["dedupe_key"],
+            "business-growth:revenue-decline:2026-08-24",
+        )
+        self.assertEqual(session.added, [])
+
+    async def test_opportunity_insert_returns_false_for_duplicate(
+        self,
+    ) -> None:
+        session = _Session([])
+
+        created = await _create_opportunity_if_missing(
+            session,
+            business_id=uuid4(),
+            dedupe_key="business-growth:duplicate:test",
+            title="Duplicate signal",
+            description="This signal has already been persisted.",
+            category="revenue_opportunity",
+            source="commerce",
+            source_entity_type="commerce_growth_signal",
+            source_entity_id=uuid4(),
+            reason="Deterministic duplicate test.",
+            confidence=Decimal("0.900"),
+            recommendation="No duplicate opportunity should be created.",
+            provenance=[],
+        )
+
+        self.assertFalse(created)
+        self.assertEqual(len(session.scalar_statements), 1)
+        self.assertEqual(session.added, [])
+
+    async def test_opportunity_insert_sanitizes_database_failure(
+        self,
+    ) -> None:
+        session = _Session(
+            [],
+            scalar_error=SQLAlchemyError(
+                "sensitive database details"
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            AutomationIntelligencePersistenceError,
+            "opportunity_persist_failed",
+        ):
+            await _create_opportunity_if_missing(
+                session,
+                business_id=uuid4(),
+                dedupe_key="business-growth:persistence:test",
+                title="Persistence test",
+                description="Persistence failure must be sanitized.",
+                category="revenue_opportunity",
+                source="commerce",
+                source_entity_type="commerce_growth_signal",
+                source_entity_id=uuid4(),
+                reason="Test database failure handling.",
+                confidence=Decimal("0.900"),
+                recommendation="Do not leak database details.",
+                provenance=[],
+            )
+
+        self.assertEqual(len(session.scalar_statements), 1)
+        self.assertEqual(session.added, [])
+
     def test_industry_guardrails_do_not_cross_domain_boundaries(self) -> None:
         healthcare = _industry_guardrail("clinic")
         commerce = _industry_guardrail("e-commerce")
@@ -200,11 +315,23 @@ class AutomationIntelligenceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class _Session:
-    def __init__(self, scalar_values: list[object]) -> None:
+    def __init__(
+        self,
+        scalar_values: list[object],
+        *,
+        scalar_error: SQLAlchemyError | None = None,
+    ) -> None:
         self.scalar_values = list(scalar_values)
+        self.scalar_error = scalar_error
+        self.scalar_statements: list[object] = []
         self.added: list[object] = []
 
-    async def scalar(self, _statement):
+    async def scalar(self, statement):
+        self.scalar_statements.append(statement)
+
+        if self.scalar_error is not None:
+            raise self.scalar_error
+
         return self.scalar_values.pop(0) if self.scalar_values else None
 
     def add(self, value: object) -> None:

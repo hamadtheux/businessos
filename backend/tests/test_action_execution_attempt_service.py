@@ -290,6 +290,18 @@ class ClaimAndOutcomeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(repeated, attempt)
 
+    async def test_success_preserves_safe_whatsapp_message_reference(self) -> None:
+        action, attempt, session = _dispatching_fixture()
+        reference = "wamid.HBgMNTU1MjM0NTY3ODkwFQIAERgSQUJDREVGRw=="
+        result = await record_action_execution_success(
+            session,
+            business_id=BUSINESS_ID,
+            attempt_id=attempt.id,
+            external_reference_id=reference,
+        )
+        self.assertEqual(result.external_reference_id, reference)
+        self.assertEqual(action.external_reference_id, reference)
+
     async def test_definite_failure_uses_only_safe_code(self) -> None:
         action, attempt, session = _dispatching_fixture()
         await record_action_execution_failure(

@@ -73,6 +73,18 @@ class NormalizedAdPerformance:
     revenue: Decimal = Decimal("0")
     reach: int = 0
     leads: int = 0
+    external_product_reference: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedCampaignStatus:
+    external_campaign_reference: str
+    status: Literal[
+        "provider_pending", "active", "paused", "completed", "failed",
+        "attention_required", "unknown_external_state",
+    ]
+    provider_status: str
+    issues: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +109,9 @@ class IntegrationConnector(Protocol):
     async def list_resources(self, credentials: CredentialMaterial) -> Sequence[ExternalResource]: ...
     async def health_check(self, credentials: CredentialMaterial) -> ConnectionHealthResult: ...
     async def normalize_webhook(self, payload: Mapping[str, object]) -> NormalizedIntegrationEvent: ...
+    async def normalize_webhooks(
+        self, payload: Mapping[str, object]
+    ) -> Sequence[NormalizedIntegrationEvent]: ...
 
 
 @runtime_checkable
@@ -121,3 +136,7 @@ class AdsPerformanceReadConnector(IntegrationConnector, Protocol):
         period_start: date,
         period_end: date,
     ) -> Sequence[NormalizedAdPerformance]: ...
+    async def read_campaign_status(
+        self, credentials: CredentialMaterial, *, account_reference: str,
+        campaign_reference: str,
+    ) -> NormalizedCampaignStatus: ...

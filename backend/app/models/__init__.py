@@ -43,9 +43,29 @@ from app.models.business_knowledge_entry import BusinessKnowledgeEntry
 from app.models.business_membership import BusinessMembership
 from app.models.business_memory import BusinessMemory
 from app.models.catalog_item import CatalogItem
+from app.models.commerce import (
+    AudienceSegment,
+    AudienceSegmentMember,
+    CatalogMedia,
+    CatalogSource,
+    CatalogVariant,
+    CommerceConnection,
+    CommerceEvent,
+    CommerceFeedDestination,
+    CommerceFeedProductStatus,
+    CommerceSyncIssue,
+    CommerceSyncRun,
+    CommerceWebhookReceipt,
+    ExternalCustomerMapping,
+    ExternalOrderMapping,
+    ExternalProductMapping,
+    ProductGroup,
+    ProductGroupDestination,
+    ProductGroupItem,
+)
 from app.models.chatbot import ChatbotConfig, ChatbotSession
 from app.models.customer import Customer
-from app.models.conversation import Conversation, ConversationMessage
+from app.models.conversation import Conversation, ConversationMessage, CustomerAgentResponse
 from app.models.integration import (
     IntegrationConnection,
     IntegrationEntityLink,
@@ -56,6 +76,7 @@ from app.models.crm_lead import CRMLead
 from app.models.notification import Notification
 from app.models.marketing import (
     Campaign,
+    CampaignProductSelection,
     CampaignChannelPlan,
     Competitor,
     CompetitorAnalysis,
@@ -67,9 +88,18 @@ from app.models.marketing import (
     MarketingPlan,
     MarketingTrend,
     SocialSchedule,
+    ExternalCampaignDeployment,
+    ProductCampaignPerformance,
 )
 from app.models.opportunity import Opportunity
-from app.models.order import Order, OrderLineItem
+from app.models.order import (
+    Order,
+    OrderAddress,
+    OrderFulfillment,
+    OrderLineItem,
+    OrderRefund,
+    OrderRefundLine,
+)
 from app.models.provider_appointment_type import ProviderAppointmentType
 from app.models.provider_availability_exception import ProviderAvailabilityException
 from app.models.provider_availability_rule import ProviderAvailabilityRule
@@ -120,11 +150,30 @@ __all__ = [
     "BusinessMembership",
     "BusinessMemory",
     "CatalogItem",
+    "AudienceSegment",
+    "AudienceSegmentMember",
+    "CatalogMedia",
+    "CatalogSource",
+    "CatalogVariant",
+    "CommerceConnection",
+    "CommerceEvent",
+    "CommerceFeedDestination",
+    "CommerceFeedProductStatus",
+    "CommerceSyncIssue",
+    "CommerceSyncRun",
+    "CommerceWebhookReceipt",
+    "ExternalCustomerMapping",
+    "ExternalOrderMapping",
+    "ExternalProductMapping",
+    "ProductGroup",
+    "ProductGroupDestination",
+    "ProductGroupItem",
     "ChatbotConfig",
     "ChatbotSession",
     "Customer",
     "Conversation",
     "ConversationMessage",
+    "CustomerAgentResponse",
     "IntegrationConnection",
     "IntegrationEntityLink",
     "IntegrationOAuthState",
@@ -132,6 +181,7 @@ __all__ = [
     "CRMLead",
     "Notification",
     "Campaign",
+    "CampaignProductSelection",
     "CampaignChannelPlan",
     "Competitor",
     "CompetitorAnalysis",
@@ -143,9 +193,15 @@ __all__ = [
     "MarketingPlan",
     "MarketingTrend",
     "SocialSchedule",
+    "ExternalCampaignDeployment",
+    "ProductCampaignPerformance",
     "Opportunity",
     "Order",
+    "OrderAddress",
+    "OrderFulfillment",
     "OrderLineItem",
+    "OrderRefund",
+    "OrderRefundLine",
     "ProviderAppointmentType",
     "ProviderAvailabilityException",
     "ProviderAvailabilityRule",

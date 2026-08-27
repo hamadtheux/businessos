@@ -100,6 +100,7 @@ async def execute_ai_agent_with_metadata(
     request: AIAgentExecutionRequest,
     provider: AIAgentProvider,
     *,
+    server_instructions: str | None = None,
     custom_instructions: str | None = None,
     allowed_capabilities: tuple[str, ...] | None = None,
     server_context: str | None = None,
@@ -204,6 +205,12 @@ async def execute_ai_agent_with_metadata(
     system_instructions = build_agent_system_instructions(
         definition,
     )
+
+    if server_instructions:
+        system_instructions += (
+            "\n\nSERVER-ENFORCED TASK SAFETY RULES:\n"
+            f"{server_instructions.strip()[:4_000]}"
+        )
 
     if allowed_capabilities is not None:
         capability_lines = "\n".join(f"- {item}" for item in allowed_capabilities)

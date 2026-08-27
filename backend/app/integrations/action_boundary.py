@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import Final, Mapping
 from uuid import UUID
@@ -11,11 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.integrations import require_external_connector_writes_enabled
 from app.core.config import Settings, settings
 from app.exceptions.integration import IntegrationNotFoundError, IntegrationStateError
-from app.models.action_execution_attempt import ActionExecutionAttempt
-from app.models.ai_action import AIAction
 from app.models.approval_request import ApprovalRequest
 from app.models.integration import IntegrationConnection
 from app.models.customer import Customer
+from app.models.conversation import Conversation, ConversationMessage
+from app.models.automation_intelligence import MarketingActionProposal
+from app.models.marketing import Campaign
 from app.integrations.action_adapters import (
     ConnectorActionAdapterRegistry,
     connector_action_adapters,
@@ -93,14 +95,23 @@ async def prepare_connector_dispatch_context(
     capability = CONNECTOR_WRITE_CAPABILITIES.get(attempt.action_type)
     if not allowed_connectors or capability is None:
         raise IntegrationStateError("connector_dispatch_not_supported")
+    bound_connection_id = await _conversation_connection_binding(
+        session,
+        business_id=business_id,
+        action_type=attempt.action_type,
+        payload=payload,
+    )
+    if connection_id is not None and bound_connection_id not in {None, connection_id}:
+        raise IntegrationStateError("conversation_connection_conflict")
+    effective_connection_id = bound_connection_id or connection_id
     statement = select(IntegrationConnection).where(
         IntegrationConnection.business_id == business_id,
         IntegrationConnection.connector_type.in_(allowed_connectors),
         IntegrationConnection.status == "connected",
         IntegrationConnection.authentication_state == "authorized",
     )
-    if connection_id is not None:
-        statement = statement.where(IntegrationConnection.id == connection_id)
+    if effective_connection_id is not None:
+        statement = statement.where(IntegrationConnection.id == effective_connection_id)
     statement = statement.order_by(
         IntegrationConnection.connector_type.asc(), IntegrationConnection.id.asc()
     ).limit(1)
@@ -136,9 +147,25 @@ async def prepare_connector_dispatch_context(
         session,
         business_id=business_id,
         connector_type=connection.connector_type,
+        connection_id=connection.id,
         action_type=attempt.action_type,
         payload=payload,
     )
+    if attempt.action_type in {"create_google_ads_campaign", "create_meta_campaign"}:
+        proposal = await session.scalar(select(MarketingActionProposal).where(
+            MarketingActionProposal.business_id == business_id,
+            MarketingActionProposal.ai_action_id == action.id,
+            MarketingActionProposal.entity_type == "campaign",
+        ))
+        if proposal is None:
+            raise IntegrationStateError("campaign_proposal_link_required")
+        campaign = await session.scalar(select(Campaign).where(
+            Campaign.business_id == business_id,
+            Campaign.id == proposal.entity_id,
+        ).with_for_update())
+        if campaign is None:
+            raise IntegrationStateError("campaign_not_found")
+        campaign.status = "executing"
     return ConnectorDispatchContext(
         business_id=business_id,
         action_id=action.id,
@@ -160,6 +187,7 @@ async def _resolve_delivery_target(
     *,
     business_id: UUID,
     connector_type: str,
+    connection_id: UUID,
     action_type: str,
     payload: ActionPayloadType,
 ) -> str | None:
@@ -183,6 +211,20 @@ async def _resolve_delivery_target(
                 Customer.status != "archived",
             )
         )
+    conversation_ref = getattr(payload, "conversation_ref", None)
+    if conversation_ref is not None:
+        try:
+            conversation_id = UUID(conversation_ref)
+        except ValueError:
+            raise IntegrationStateError("conversation_reference_invalid") from None
+        conversation = await session.scalar(select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.business_id == business_id,
+            Conversation.customer_id == (customer.id if customer is not None else None),
+            Conversation.integration_connection_id == connection_id,
+        ))
+        if conversation is None or customer is None:
+            raise IntegrationStateError("conversation_delivery_target_invalid")
     if connector_type in {"gmail", "microsoft_outlook"}:
         value = customer.email if customer is not None else raw_reference
         if not isinstance(value, str) or "@" not in value or len(value) > 320:
@@ -195,3 +237,49 @@ async def _resolve_delivery_target(
     if not 7 <= len(normalized) <= 15:
         raise IntegrationStateError("delivery_target_required")
     return normalized
+
+
+async def _conversation_connection_binding(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    action_type: str,
+    payload: ActionPayloadType,
+) -> UUID | None:
+    if action_type not in {"send_email", "send_whatsapp_message", "send_customer_message"}:
+        return None
+    reference = getattr(payload, "conversation_ref", None)
+    if reference is None:
+        # Preserve governed legacy communication proposals that predate the
+        # unified-conversation binding. Customer Agent always supplies it.
+        return None
+    try:
+        conversation_id = UUID(reference)
+    except ValueError:
+        raise IntegrationStateError("conversation_reference_invalid") from None
+    conversation = await session.scalar(select(Conversation).where(
+        Conversation.id == conversation_id,
+        Conversation.business_id == business_id,
+    ))
+    if conversation is None or conversation.integration_connection_id is None:
+        raise IntegrationStateError("conversation_connection_required")
+    raw_customer = getattr(payload, "recipient_ref", None) or getattr(payload, "customer_ref", None)
+    if conversation.customer_id is None or raw_customer != str(conversation.customer_id):
+        raise IntegrationStateError("conversation_customer_conflict")
+    expected_channels = {
+        "send_email": {"email"},
+        "send_whatsapp_message": {"whatsapp"},
+        "send_customer_message": {"email", "whatsapp"},
+    }[action_type]
+    if conversation.channel not in expected_channels:
+        raise IntegrationStateError("conversation_channel_conflict")
+    if conversation.channel == "whatsapp":
+        latest_inbound = await session.scalar(select(ConversationMessage.sent_at).where(
+            ConversationMessage.business_id == business_id,
+            ConversationMessage.conversation_id == conversation.id,
+            ConversationMessage.direction == "inbound",
+            ConversationMessage.sender_type == "customer",
+        ).order_by(ConversationMessage.sent_at.desc(), ConversationMessage.id.desc()).limit(1))
+        if latest_inbound is None or latest_inbound < datetime.now(UTC) - timedelta(hours=24):
+            raise IntegrationStateError("whatsapp_customer_service_window_closed")
+    return conversation.integration_connection_id

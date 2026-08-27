@@ -121,6 +121,21 @@ def build_catalog_source(
             ("Name", item.name),
             ("SKU", item.sku),
             ("Price", price),
+            ("Compare-at price", f"{item.compare_at_price:.2f} {item.currency or business_currency}" if item.compare_at_price is not None else None),
+            ("Availability", item.availability),
+            ("Inventory quantity", item.inventory_quantity),
+            ("Brand", item.brand),
+            ("Vendor", item.vendor),
+            ("Category", item.google_product_category),
+            (
+                    "Collections",
+                    ", ".join(
+                        str(value.get("title"))
+                        for value in (item.provider_metadata or {}).get("collections", [])
+                        if isinstance(value, dict) and value.get("title")
+                    )[:500] or None,
+            ),
+            ("Source", item.source),
             ("Description", item.description),
         )
     )

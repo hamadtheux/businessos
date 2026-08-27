@@ -276,7 +276,10 @@ class MessageResponse(BaseModel):
     content: str
     sent_at: AwareDatetime
     external_reference: str | None
-    delivery_status: Literal["received", "recorded", "failed"]
+    delivery_status: Literal[
+        "received", "recorded", "submitted", "sent", "delivered", "read", "failed",
+    ]
+    action_execution_attempt_id: UUID | None = None
     created_at: AwareDatetime
     updated_at: AwareDatetime
     model_config = ConfigDict(from_attributes=True, extra="forbid")
@@ -286,6 +289,7 @@ class ConversationResponse(BaseModel):
     id: UUID
     business_id: UUID
     customer_id: UUID | None
+    integration_connection_id: UUID | None = None
     customer_display_name: str | None
     channel: ConversationChannel
     external_reference: str | None

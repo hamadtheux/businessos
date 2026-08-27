@@ -46,7 +46,7 @@ MAX_ATTEMPT_NUMBER: Final = 1_000_000
 _PERSISTENCE_MESSAGE: Final = "Unable to persist action execution attempt"
 _FAILURE_CODE_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _EXTERNAL_REFERENCE_PATTERN: Final = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$"
+    r"^[A-Za-z0-9][A-Za-z0-9._:/+=-]{0,254}$"
 )
 
 

@@ -83,9 +83,15 @@ async def create_catalog_item(
     if item_create.sku is not None:
         await _ensure_sku_available(session, business_id, item_create.sku)
 
+    values = item_create.model_dump()
+    if values.get("product_url") is not None:
+        values["product_url"] = str(values["product_url"])
     item = CatalogItem(
         business_id=business_id,
-        **item_create.model_dump(),
+        source="manual",
+        sync_state="manual",
+        provider_metadata={},
+        **values,
     )
     session.add(item)
     try:
@@ -106,6 +112,8 @@ async def update_catalog_item(
     """Apply only explicitly supplied fields and flush without committing."""
     item = await get_catalog_item(session, business_id, item_id)
     changes = item_update.model_dump(exclude_unset=True)
+    if changes.get("product_url") is not None:
+        changes["product_url"] = str(changes["product_url"])
     if "sku" in changes and changes["sku"] is not None and changes["sku"] != item.sku:
         await _ensure_sku_available(
             session,
@@ -116,6 +124,11 @@ async def update_catalog_item(
 
     for field_name, value in changes.items():
         setattr(item, field_name, value)
+    if item.source != "manual" and changes:
+        # Keep the external provenance while making the owner correction
+        # explicit. A later sync can surface the conflict instead of silently
+        # overwriting the reviewed value.
+        item.sync_state = "local_override"
 
     try:
         await session.flush()
@@ -177,10 +190,15 @@ async def create_catalog_items(
     item_creates: Collection[CatalogItemCreate],
 ) -> list[CatalogItem]:
     """Prepare and flush an atomic catalog batch without committing."""
-    items = [
-        CatalogItem(business_id=business_id, **item_create.model_dump())
-        for item_create in item_creates
-    ]
+    items = []
+    for item_create in item_creates:
+        values = item_create.model_dump()
+        if values.get("product_url") is not None:
+            values["product_url"] = str(values["product_url"])
+        items.append(CatalogItem(
+            business_id=business_id, source="manual", sync_state="manual",
+            provider_metadata={}, **values,
+        ))
     session.add_all(items)
     try:
         await session.flush()

@@ -27,7 +27,12 @@ TRIGGER_TYPES = frozenset({
     "ai_action_requires_approval", "ai_execution_completed",
     "integration_event_received", "integration_health_changed",
     "website_chat_started", "lead_captured", "website_appointment_booked",
-    "human_handoff_requested",
+    "human_handoff_requested", "customer_agent_reply_proposed",
+    "outbound_message_recorded",
+    "product_viewed", "collection_viewed", "search_performed",
+    "cart_created", "cart_updated", "checkout_started", "checkout_abandoned",
+    "order_paid", "order_fulfilled", "order_refunded", "coupon_used",
+    "chat_started", "campaign_clicked",
     "scheduled_time", "manual_test",
 })
 

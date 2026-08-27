@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Link } from "wouter";
 import {
   AlertCircle,
@@ -9,6 +9,8 @@ import {
   Package,
   Pencil,
   Plus,
+  Rocket,
+  Store,
   RefreshCw,
   RotateCcw,
   Search,
@@ -21,8 +23,19 @@ import {
   EmptyState,
   Modal,
   PageHeader,
+  SectionTitle,
 } from "@/components/product-ui";
 import { catalogApi, humanizeCatalogError } from "@/services/catalog";
+import {
+  commerceApi,
+  type CommerceConnection,
+  type CommerceImportPreview,
+  type CommerceProviderDefinition,
+  type CommerceSyncIssue,
+  type CommerceSyncRun,
+  type FeedDestination,
+  type FeedProductStatus,
+} from "@/services/commerce";
 import type {
   CatalogItem,
   CatalogItemStatus,
@@ -50,6 +63,31 @@ export function IndustryWorkspacePage() {
   const [actionError, setActionError] = useState("");
   const [notice, setNotice] = useState("");
   const [reloadVersion, setReloadVersion] = useState(0);
+  const [connections, setConnections] = useState<CommerceConnection[]>([]);
+  const [providerDefinitions, setProviderDefinitions] = useState<
+    CommerceProviderDefinition[]
+  >([]);
+  const [syncRuns, setSyncRuns] = useState<Record<string, CommerceSyncRun[]>>(
+    {},
+  );
+  const [syncIssues, setSyncIssues] = useState<
+    Record<string, CommerceSyncIssue[]>
+  >({});
+  const [feedDestinations, setFeedDestinations] = useState<FeedDestination[]>(
+    [],
+  );
+  const [feedProductStatuses, setFeedProductStatuses] = useState<
+    Record<string, FeedProductStatus[]>
+  >({});
+  const [viewingFeedId, setViewingFeedId] = useState("");
+  const [connectingStore, setConnectingStore] = useState(false);
+  const [configuringStore, setConfiguringStore] =
+    useState<CommerceConnection | null>(null);
+  const [importingSource, setImportingSource] =
+    useState<CommerceConnection | null>(null);
+  const [commerceImportPreview, setCommerceImportPreview] =
+    useState<CommerceImportPreview | null>(null);
+  const [commerceBusy, setCommerceBusy] = useState(false);
   const requestVersion = useRef(0);
   const activeBusinessIdRef = useRef(activeBusinessId);
   activeBusinessIdRef.current = activeBusinessId;
@@ -61,6 +99,60 @@ export function IndustryWorkspacePage() {
     setNotice("");
     setActionError("");
   }, [activeBusinessId]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    if (!activeBusinessId) return () => controller.abort();
+    void Promise.all([
+      commerceApi.providers(activeBusinessId, controller.signal),
+      commerceApi.connections.list(activeBusinessId, controller.signal),
+      commerceApi.feeds.list(activeBusinessId, controller.signal),
+    ])
+      .then(async ([providers, connectionItems, destinations]) => {
+        if (controller.signal.aborted) return;
+        const histories = await Promise.all(
+          connectionItems.map(
+            async (connection) =>
+              [
+                connection.id,
+                await commerceApi.connections
+                  .syncRuns(activeBusinessId, connection.id, controller.signal)
+                  .catch(() => []),
+              ] as const,
+          ),
+        );
+        const issueEntries = await Promise.all(
+          histories.flatMap(([, runs]) => {
+            const latest = runs[0];
+            return latest
+              ? [
+                  commerceApi
+                    .syncIssues(activeBusinessId, latest.id, controller.signal)
+                    .then((issues) => [latest.id, issues] as const)
+                    .catch(() => [latest.id, []] as const),
+                ]
+              : [];
+          }),
+        );
+        if (controller.signal.aborted) return;
+        setProviderDefinitions(providers);
+        setConnections(connectionItems);
+        setFeedDestinations(destinations);
+        setSyncRuns(Object.fromEntries(histories));
+        setSyncIssues(Object.fromEntries(issueEntries));
+      })
+      .catch((reason) => {
+        if (!controller.signal.aborted) {
+          setActionError(
+            humanizeCatalogError(
+              reason,
+              "Commerce connection status could not be loaded.",
+            ),
+          );
+        }
+      });
+    return () => controller.abort();
+  }, [activeBusinessId, reloadVersion]);
 
   useEffect(() => {
     const businessId = activeBusinessId;
@@ -199,25 +291,254 @@ export function IndustryWorkspacePage() {
   const currency = activeBusiness?.currency ?? "USD";
   const locale = activeBusiness?.locale ?? "en";
 
+  const createCommerceConnection = async (
+    event: FormEvent<HTMLFormElement>,
+  ) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setCommerceBusy(true);
+    setActionError("");
+    try {
+      const provider = String(
+        form.get("provider"),
+      ) as CommerceConnection["provider"];
+      const record = await commerceApi.connections.create(activeBusinessId, {
+        provider,
+        display_name: String(form.get("display_name")),
+        store_url: String(form.get("store_url")) || null,
+        external_account_id: String(form.get("external_account_id")) || null,
+      });
+      setConnectingStore(false);
+      if (
+        [
+          "shopify",
+          "woocommerce",
+          "bigcommerce",
+          "magento",
+          "custom_api",
+        ].includes(record.provider)
+      ) {
+        setConfiguringStore(record);
+      } else if (
+        ["csv", "xml_feed", "google_product_feed"].includes(record.provider)
+      ) {
+        setCommerceImportPreview(null);
+        setImportingSource(record);
+      }
+      setNotice(
+        ["csv", "xml_feed", "google_product_feed"].includes(record.provider)
+          ? `${record.display_name} is ready for a local, validated import.`
+          : `${record.display_name} was added. Provider configuration is required before any data can synchronize.`,
+      );
+      reload();
+    } catch (reason) {
+      setActionError(
+        humanizeCatalogError(reason, "The commerce source could not be added."),
+      );
+    } finally {
+      setCommerceBusy(false);
+    }
+  };
+
+  const configureCommerceConnection = async (
+    event: FormEvent<HTMLFormElement>,
+  ) => {
+    event.preventDefault();
+    if (!configuringStore) return;
+    const form = new FormData(event.currentTarget);
+    const credentials = Object.fromEntries(
+      [...form.entries()]
+        .filter(([key, value]) => key !== "provider" && String(value).trim())
+        .map(([key, value]) => [key, String(value).trim()]),
+    );
+    setCommerceBusy(true);
+    setActionError("");
+    try {
+      const connected = await commerceApi.connections.configure(
+        activeBusinessIdRef.current,
+        configuringStore.id,
+        credentials,
+      );
+      setConfiguringStore(null);
+      setNotice(
+        `${connected.store_name ?? connected.display_name} authenticated. Start the initial sync when ready.`,
+      );
+      reload();
+    } catch (reason) {
+      setActionError(
+        humanizeCatalogError(
+          reason,
+          "The store could not be authenticated. Check the provider credentials and URL.",
+        ),
+      );
+    } finally {
+      setCommerceBusy(false);
+    }
+  };
+
+  const syncCommerceConnection = async (connection: CommerceConnection) => {
+    setCommerceBusy(true);
+    setActionError("");
+    try {
+      const run = await commerceApi.connections.sync(
+        activeBusinessIdRef.current,
+        connection.id,
+        connection.last_success_at ? "incremental" : "initial",
+      );
+      setNotice(
+        `${connection.store_name ?? connection.display_name} sync queued (${run.mode}). Progress is durable and can resume safely.`,
+      );
+      reload();
+    } catch (reason) {
+      setActionError(
+        humanizeCatalogError(reason, "The store sync could not be queued."),
+      );
+    } finally {
+      setCommerceBusy(false);
+    }
+  };
+
+  const selectedImportFile = (form: HTMLFormElement) => {
+    const value = new FormData(form).get("upload");
+    if (!(value instanceof File) || value.size === 0) {
+      throw new Error("Choose a non-empty product file first.");
+    }
+    return value;
+  };
+
+  const previewCommerceImport = async (form: HTMLFormElement) => {
+    if (!importingSource) return;
+    setCommerceBusy(true);
+    setActionError("");
+    try {
+      const file = selectedImportFile(form);
+      const preview = await commerceApi.imports.preview(
+        activeBusinessIdRef.current,
+        importingSource.provider as CommerceImportPreview["file_type"],
+        file,
+      );
+      setCommerceImportPreview(preview);
+    } catch (reason) {
+      setActionError(
+        humanizeCatalogError(
+          reason,
+          "The product file could not be previewed.",
+        ),
+      );
+    } finally {
+      setCommerceBusy(false);
+    }
+  };
+
+  const applyCommerceImport = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!importingSource) return;
+    setCommerceBusy(true);
+    setActionError("");
+    try {
+      const file = selectedImportFile(event.currentTarget);
+      const result = await commerceApi.imports.apply(
+        activeBusinessIdRef.current,
+        importingSource.id,
+        importingSource.provider as CommerceImportPreview["file_type"],
+        file,
+        `ui-import:${importingSource.id}:${file.size}:${file.lastModified}`,
+      );
+      setImportingSource(null);
+      setCommerceImportPreview(null);
+      setNotice(
+        `${result.products_created} products created, ${result.products_updated} updated, and ${result.products_failed} rejected safely.`,
+      );
+      reload();
+    } catch (reason) {
+      setActionError(
+        humanizeCatalogError(reason, "The product file could not be imported."),
+      );
+    } finally {
+      setCommerceBusy(false);
+    }
+  };
+
+  const synchronizeFeed = async (
+    destinationId: string,
+    reconcileOnly = false,
+  ) => {
+    setCommerceBusy(true);
+    setActionError("");
+    try {
+      const result = await commerceApi.feeds.sync(
+        activeBusinessIdRef.current,
+        destinationId,
+        reconcileOnly,
+      );
+      setNotice(
+        reconcileOnly
+          ? `Provider state reconciled: ${result.eligible_count} eligible, ${result.limited_count} limited, ${result.rejected_count} ineligible.`
+          : `${result.submitted_count} products submitted; provider processing and eligibility remain separate states.`,
+      );
+      reload();
+    } catch (reason) {
+      setActionError(
+        humanizeCatalogError(
+          reason,
+          "The provider destination could not be synchronized.",
+        ),
+      );
+    } finally {
+      setCommerceBusy(false);
+    }
+  };
+
+  const viewFeedIssues = async (destinationId: string) => {
+    if (viewingFeedId === destinationId) {
+      setViewingFeedId("");
+      return;
+    }
+    setCommerceBusy(true);
+    setActionError("");
+    try {
+      const statuses = await commerceApi.feeds.products(
+        activeBusinessIdRef.current,
+        destinationId,
+      );
+      setFeedProductStatuses((current) => ({
+        ...current,
+        [destinationId]: statuses,
+      }));
+      setViewingFeedId(destinationId);
+    } catch (reason) {
+      setActionError(
+        humanizeCatalogError(
+          reason,
+          "Provider product issues could not be loaded.",
+        ),
+      );
+    } finally {
+      setCommerceBusy(false);
+    }
+  };
+
   return (
     <>
       <PageHeader
         eyebrow="Business catalog"
         title="Products & services"
-        subtitle={`Build ${activeBusiness?.name ?? "this business"}'s catalog manually or in bulk.`}
-        action={loadState === "success" && items.length > 0 ? (
-          <>
-            <Button variant="green" onClick={() => setImportMode("upload")}>
-              <FileSpreadsheet /> Upload CSV / Excel
-            </Button>
-            <Button variant="soft" onClick={() => setImportMode("paste")}>
-              <ClipboardPaste /> Paste a list
-            </Button>
-            <Button variant="tertiary" onClick={() => setEditor("create")}>
-              <Plus /> Add manually
-            </Button>
-          </>
-        ) : undefined}
+        subtitle={`Connect a store so ${activeBusiness?.name ?? "this business"}'s catalog stays current automatically. Manual and bulk entry remain available.`}
+        action={
+          loadState === "success" && items.length > 0 ? (
+            <>
+              <Button variant="green" onClick={() => setImportMode("upload")}>
+                <FileSpreadsheet /> Upload CSV / Excel
+              </Button>
+              <Button variant="soft" onClick={() => setImportMode("paste")}>
+                <ClipboardPaste /> Paste a list
+              </Button>
+              <Button variant="tertiary" onClick={() => setEditor("create")}>
+                <Plus /> Add manually
+              </Button>
+            </>
+          ) : undefined
+        }
       />
 
       {notice && (
@@ -230,6 +551,347 @@ export function IndustryWorkspacePage() {
           <AlertCircle /> {actionError}
         </div>
       )}
+
+      <Card className="catalog-workspace-card">
+        <div className="table-toolbar">
+          <div>
+            <div className="eyebrow">Commerce Connect</div>
+            <h2>
+              {connections.length
+                ? `${connections.length} commerce source${connections.length === 1 ? "" : "s"}`
+                : "Connect the system that already runs your store"}
+            </h2>
+            <p className="subtle">
+              Provider synchronization never reports success until an
+              authenticated adapter has completed a real import.
+            </p>
+          </div>
+          <Button variant="green" onClick={() => setConnectingStore(true)}>
+            <Store /> Connect store
+          </Button>
+        </div>
+        <div className="metric-grid compact">
+          {providerDefinitions
+            .filter((provider) =>
+              [
+                "shopify",
+                "woocommerce",
+                "bigcommerce",
+                "magento",
+                "custom_api",
+                "csv",
+                "xml_feed",
+                "google_product_feed",
+              ].includes(provider.provider),
+            )
+            .map((provider) => {
+              const connection = connections.find(
+                (item) => item.provider === provider.provider,
+              );
+              return (
+                <button
+                  className="metric-card"
+                  type="button"
+                  key={provider.provider}
+                  onClick={() => {
+                    if (
+                      ["csv", "xml_feed", "google_product_feed"].includes(
+                        provider.provider,
+                      ) &&
+                      connection
+                    ) {
+                      setCommerceImportPreview(null);
+                      setImportingSource(connection);
+                      return;
+                    }
+                    if (connection?.status === "configuration_required")
+                      setConfiguringStore(connection);
+                    else if (!connection) setConnectingStore(true);
+                  }}
+                >
+                  <span>{provider.display_name}</span>
+                  <strong>
+                    {connection
+                      ? connection.status.replaceAll("_", " ")
+                      : provider.provider === "csv"
+                        ? "Import"
+                        : "Connect"}
+                  </strong>
+                  <small>
+                    {provider.implementation_status.replaceAll("_", " ")}
+                  </small>
+                </button>
+              );
+            })}
+        </div>
+        {connections.map((connection) => (
+          <div key={connection.id}>
+            <div className="list-row">
+              <Store />
+              <div className="row-main">
+                <strong>
+                  {connection.store_name ?? connection.display_name}
+                </strong>
+                <div className="row-copy">
+                  {connection.provider.replaceAll("_", " ")} ·{" "}
+                  {connection.last_success_at
+                    ? `last successful sync ${new Date(connection.last_success_at).toLocaleString()}`
+                    : "no successful synchronization yet"}{" "}
+                  · health {connection.health.replaceAll("_", " ")}
+                </div>
+              </div>
+              {["configuration_required", "authentication_expired"].includes(
+                connection.status,
+              ) &&
+                [
+                  "shopify",
+                  "woocommerce",
+                  "bigcommerce",
+                  "magento",
+                  "custom_api",
+                ].includes(connection.provider) && (
+                  <Button
+                    disabled={commerceBusy}
+                    onClick={() => setConfiguringStore(connection)}
+                  >
+                    Configure
+                  </Button>
+                )}
+              {["csv", "xml_feed", "google_product_feed"].includes(
+                connection.provider,
+              ) && (
+                <Button
+                  disabled={commerceBusy}
+                  onClick={() => {
+                    setCommerceImportPreview(null);
+                    setImportingSource(connection);
+                  }}
+                >
+                  <FileSpreadsheet /> Import
+                </Button>
+              )}
+              {[
+                "shopify",
+                "woocommerce",
+                "bigcommerce",
+                "magento",
+                "custom_api",
+              ].includes(connection.provider) &&
+                [
+                  "connected",
+                  "attention_required",
+                  "rate_limited",
+                  "failed",
+                ].includes(connection.status) && (
+                  <Button
+                    disabled={
+                      commerceBusy || connection.status === "rate_limited"
+                    }
+                    onClick={() => void syncCommerceConnection(connection)}
+                  >
+                    <RefreshCw /> Sync now
+                  </Button>
+                )}
+              <Badge
+                tone={
+                  connection.health === "healthy"
+                    ? "success"
+                    : [
+                          "attention_required",
+                          "authentication_expired",
+                          "failed",
+                        ].includes(connection.status)
+                      ? "danger"
+                      : "warning"
+                }
+              >
+                {connection.health === "healthy"
+                  ? "healthy"
+                  : connection.status.replaceAll("_", " ")}
+              </Badge>
+            </div>
+            {(syncRuns[connection.id]?.length ?? 0) > 0 && (
+              <details className="recommendation-strip">
+                <summary>Sync history</summary>
+                {syncRuns[connection.id].slice(0, 5).map((run) => (
+                  <div key={run.id}>
+                    <div className="row-copy">
+                      {new Date(run.created_at).toLocaleString()} ·{" "}
+                      {run.mode.replaceAll("_", " ")} ·{" "}
+                      {formatSyncDuration(run)} ·{" "}
+                      {run.status.replaceAll("_", " ")} · {run.pages_processed}{" "}
+                      pages · {run.products_created + run.products_updated}{" "}
+                      products · {run.customers_created + run.customers_updated}{" "}
+                      customers · {run.orders_created + run.orders_updated}{" "}
+                      orders · {run.warnings} warnings · {run.failures} failures
+                    </div>
+                    {(syncIssues[run.id] ?? []).slice(0, 3).map((issue) => (
+                      <div className="row-copy" key={issue.id}>
+                        {issue.severity}: {issue.message}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </details>
+            )}
+          </div>
+        ))}
+        {!connections.length && (
+          <div className="recommendation-strip">
+            <Store />
+            <div>
+              <div className="eyebrow">Primary setup</div>
+              <p>
+                Shopify, WooCommerce, BigCommerce, Magento, custom APIs, feeds,
+                website discovery, CSV, and manual fallback share one
+                provider-neutral catalog boundary.
+              </p>
+            </div>
+          </div>
+        )}
+        <SectionTitle
+          title="Commerce feed destinations"
+          action={
+            <Link href="/integrations" className="btn btn-sm">
+              Manage connections
+            </Link>
+          }
+        />
+        {feedDestinations.map((destination) => {
+          const issues =
+            feedProductStatuses[destination.id]?.filter(
+              (item) =>
+                item.provider_issues.length ||
+                item.missing_attributes.length ||
+                item.warnings.length,
+            ) ?? [];
+          const accountIssues = Array.isArray(
+            destination.safe_metadata.account_issues,
+          )
+            ? destination.safe_metadata.account_issues
+            : [];
+          return (
+            <div key={destination.id}>
+              <div className="list-row">
+                <Rocket />
+                <div className="row-main">
+                  <strong>{destination.display_name}</strong>
+                  <div className="row-copy">
+                    {destination.provider === "google_merchant_center"
+                      ? "Google Merchant Center"
+                      : "Meta product catalog"}{" "}
+                    · account{" "}
+                    {destination.external_account_id ?? "not selected"} ·{" "}
+                    {destination.external_resource_id
+                      ? "destination selected"
+                      : destination.managed
+                        ? "managed destination will be created on first sync"
+                        : "destination not selected"}
+                  </div>
+                  <div className="row-copy">
+                    {destination.submitted_count.toLocaleString()}{" "}
+                    submitted/processing ·{" "}
+                    {destination.eligible_count.toLocaleString()} eligible ·{" "}
+                    {destination.limited_count} limited ·{" "}
+                    {destination.rejected_count} ineligible ·{" "}
+                    {destination.last_synchronized_at
+                      ? `last sync ${new Date(destination.last_synchronized_at).toLocaleString()}`
+                      : "never synchronized"}
+                  </div>
+                </div>
+                <Button
+                  disabled={commerceBusy}
+                  onClick={() => void synchronizeFeed(destination.id)}
+                >
+                  <RefreshCw /> Sync now
+                </Button>
+                <Button
+                  disabled={commerceBusy}
+                  onClick={() => void synchronizeFeed(destination.id, true)}
+                >
+                  Reconcile
+                </Button>
+                <Button
+                  disabled={commerceBusy}
+                  onClick={() => void viewFeedIssues(destination.id)}
+                >
+                  View issues
+                </Button>
+                <Badge
+                  tone={
+                    destination.status === "connected"
+                      ? "success"
+                      : destination.status === "attention_required"
+                        ? "danger"
+                        : "warning"
+                  }
+                >
+                  {destination.status.replaceAll("_", " ")}
+                </Badge>
+              </div>
+              {viewingFeedId === destination.id && (
+                <div className="recommendation-strip">
+                  <AlertCircle />
+                  <div className="row-main">
+                    <strong>Provider and feed issues</strong>
+                    {!issues.length && !accountIssues.length && (
+                      <p>
+                        No normalized issues are currently recorded. Submitted
+                        items may still be processing.
+                      </p>
+                    )}
+                    {accountIssues.slice(0, 10).map((issue, index) => (
+                      <p key={`account:${index}`}>
+                        {String(
+                          (issue as Record<string, unknown>).message ??
+                            (issue as Record<string, unknown>).code ??
+                            "Account issue",
+                        )}
+                      </p>
+                    ))}
+                    {issues.slice(0, 20).map((item) => (
+                      <div key={item.id}>
+                        <p>
+                          <strong>{item.status.replaceAll("_", " ")}:</strong>{" "}
+                          {[...item.missing_attributes, ...item.warnings].join(
+                            " · ",
+                          ) ||
+                            String(
+                              item.provider_error_code ??
+                                "Provider review required",
+                            )}
+                        </p>
+                        {item.provider_issues
+                          .slice(0, 5)
+                          .map((issue, index) => (
+                            <p key={`${item.id}:provider:${index}`}>
+                              {String(issue.message ?? issue.code ?? "Issue")} ·{" "}
+                              <strong>
+                                {String(
+                                  issue.resolution ??
+                                    "provider_policy_review_required",
+                                ).toUpperCase()}
+                              </strong>
+                            </p>
+                          ))}
+                      </div>
+                    ))}
+                    <Link href="/integrations" className="btn btn-sm">
+                      Reconnect or change provider assets
+                    </Link>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {!feedDestinations.length && (
+          <p className="subtle">
+            Google Merchant Center and Meta catalog destinations will appear
+            here after a real provider account is configured and selected.
+          </p>
+        )}
+      </Card>
 
       <Card className="table-card catalog-workspace-card" pad={false}>
         <div className="table-toolbar catalog-toolbar">
@@ -309,6 +971,7 @@ export function IndustryWorkspacePage() {
                   <th>SKU</th>
                   <th>Price</th>
                   <th>Status</th>
+                  <th>Source</th>
                   <th aria-label="Actions" />
                 </tr>
               </thead>
@@ -342,7 +1005,30 @@ export function IndustryWorkspacePage() {
                       </Badge>
                     </td>
                     <td>
+                      <Badge
+                        tone={
+                          item.source === "manual"
+                            ? "neutral"
+                            : item.sync_state === "in_sync"
+                              ? "success"
+                              : "warning"
+                        }
+                      >
+                        {item.source.replaceAll("_", " ")} ·{" "}
+                        {item.sync_state.replaceAll("_", " ")}
+                      </Badge>
+                    </td>
+                    <td>
                       <div className="catalog-row-actions">
+                        {item.item_type === "product" &&
+                          item.status !== "archived" && (
+                            <Link
+                              className="btn btn-sm btn-green"
+                              href={`/campaigns?new=1&product=${encodeURIComponent(item.id)}`}
+                            >
+                              <Rocket /> Promote with AI
+                            </Link>
+                          )}
                         {item.status === "archived" ? (
                           <button
                             className="icon-btn"
@@ -391,6 +1077,7 @@ export function IndustryWorkspacePage() {
           key={editor === "create" ? "create" : editor.id}
           businessId={activeBusiness.id}
           businessName={activeBusiness.name}
+          currency={currency}
           item={editor === "create" ? undefined : editor}
           onClose={() => setEditor(null)}
           onSaved={handleSaved}
@@ -444,8 +1131,304 @@ export function IndustryWorkspacePage() {
           </div>
         </Modal>
       )}
+      {connectingStore && (
+        <Modal
+          title="Connect an existing store"
+          description="Add the source identity now. External providers remain configuration-required until their authenticated adapter and credentials are available."
+          onClose={() => setConnectingStore(false)}
+        >
+          <form onSubmit={createCommerceConnection}>
+            <div className="form-grid">
+              <div className="field">
+                <label>Provider</label>
+                <select name="provider" defaultValue="woocommerce">
+                  <option value="shopify">Shopify</option>
+                  <option value="woocommerce">WooCommerce</option>
+                  <option value="bigcommerce">BigCommerce</option>
+                  <option value="magento">Magento / Adobe Commerce</option>
+                  <option value="custom_api">Custom API</option>
+                  <option value="website">Website discovery</option>
+                  <option value="xml_feed">XML feed</option>
+                  <option value="google_product_feed">Google-style feed</option>
+                  <option value="csv">CSV import</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>Connection name</label>
+                <input
+                  name="display_name"
+                  required
+                  maxLength={160}
+                  placeholder="Main online store"
+                />
+              </div>
+              <div className="field full">
+                <label>Store URL</label>
+                <input
+                  name="store_url"
+                  type="url"
+                  placeholder="https://store.example.com"
+                />
+              </div>
+              <div className="field full">
+                <label>External account ID (when known)</label>
+                <input name="external_account_id" maxLength={255} />
+              </div>
+            </div>
+            <div className="modal-foot">
+              <Button type="button" onClick={() => setConnectingStore(false)}>
+                Cancel
+              </Button>
+              <Button variant="green" type="submit" disabled={commerceBusy}>
+                {commerceBusy ? "Adding…" : "Add commerce source"}
+              </Button>
+            </div>
+          </form>
+        </Modal>
+      )}
+      {configuringStore && (
+        <Modal
+          title={`Authenticate ${configuringStore.display_name}`}
+          description="Credentials are sent once to secure credential storage and are never returned to this browser."
+          onClose={() => setConfiguringStore(null)}
+        >
+          <form onSubmit={configureCommerceConnection}>
+            <input
+              type="hidden"
+              name="provider"
+              value={configuringStore.provider}
+            />
+            <CommerceCredentialFields provider={configuringStore.provider} />
+            <div className="modal-foot">
+              <Button type="button" onClick={() => setConfiguringStore(null)}>
+                Cancel
+              </Button>
+              <Button variant="green" type="submit" disabled={commerceBusy}>
+                {commerceBusy ? "Authenticating…" : "Authenticate store"}
+              </Button>
+            </div>
+          </form>
+        </Modal>
+      )}
+      {importingSource && (
+        <Modal
+          title={`Import ${importingSource.display_name}`}
+          description="Preview and validate the provider feed before applying it. Re-importing the same external IDs updates existing products instead of duplicating them."
+          onClose={() => {
+            setImportingSource(null);
+            setCommerceImportPreview(null);
+          }}
+        >
+          <form onSubmit={applyCommerceImport}>
+            <div className="field">
+              <label>Product file</label>
+              <input
+                name="upload"
+                type="file"
+                required
+                accept={
+                  importingSource.provider === "csv"
+                    ? ".csv,text/csv"
+                    : ".xml,application/xml,text/xml"
+                }
+                onChange={() => setCommerceImportPreview(null)}
+              />
+            </div>
+            {commerceImportPreview && (
+              <div className="recommendation-strip" role="status">
+                <FileSpreadsheet />
+                <div>
+                  <strong>
+                    {commerceImportPreview.products.length} valid preview
+                    products
+                  </strong>
+                  <p>
+                    {commerceImportPreview.failures.length} rejected items ·
+                    detected fields:{" "}
+                    {commerceImportPreview.detected_fields
+                      .slice(0, 8)
+                      .join(", ") || "none"}
+                    {commerceImportPreview.truncated
+                      ? " · preview limited to the first 25 items"
+                      : ""}
+                  </p>
+                </div>
+              </div>
+            )}
+            <div className="modal-foot">
+              <Button
+                type="button"
+                onClick={() => {
+                  setImportingSource(null);
+                  setCommerceImportPreview(null);
+                }}
+                disabled={commerceBusy}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                disabled={commerceBusy}
+                onClick={(event) => {
+                  const form = event.currentTarget.form;
+                  if (form) void previewCommerceImport(form);
+                }}
+              >
+                {commerceBusy ? "Checking…" : "Preview"}
+              </Button>
+              <Button variant="green" type="submit" disabled={commerceBusy}>
+                {commerceBusy ? "Importing…" : "Import products"}
+              </Button>
+            </div>
+          </form>
+        </Modal>
+      )}
     </>
   );
+}
+
+function CommerceCredentialFields({
+  provider,
+}: {
+  provider: CommerceConnection["provider"];
+}) {
+  if (provider === "shopify")
+    return (
+      <div className="form-grid">
+        <div className="field full">
+          <label>Admin API access token</label>
+          <input
+            name="access_token"
+            type="password"
+            required
+            autoComplete="off"
+          />
+        </div>
+        <div className="field full">
+          <label>Webhook signing secret</label>
+          <input name="webhook_secret" type="password" autoComplete="off" />
+        </div>
+      </div>
+    );
+  if (provider === "woocommerce")
+    return (
+      <div className="form-grid">
+        <div className="field">
+          <label>Consumer key</label>
+          <input
+            name="consumer_key"
+            type="password"
+            required
+            autoComplete="off"
+          />
+        </div>
+        <div className="field">
+          <label>Consumer secret</label>
+          <input
+            name="consumer_secret"
+            type="password"
+            required
+            autoComplete="off"
+          />
+        </div>
+        <div className="field full">
+          <label>Webhook signing secret</label>
+          <input name="webhook_secret" type="password" autoComplete="off" />
+        </div>
+      </div>
+    );
+  if (provider === "bigcommerce")
+    return (
+      <div className="form-grid">
+        <div className="field">
+          <label>Store hash</label>
+          <input name="store_hash" required autoComplete="off" />
+        </div>
+        <div className="field">
+          <label>Access token</label>
+          <input
+            name="access_token"
+            type="password"
+            required
+            autoComplete="off"
+          />
+        </div>
+        <div className="field full">
+          <label>Webhook signing secret</label>
+          <input name="webhook_secret" type="password" autoComplete="off" />
+        </div>
+      </div>
+    );
+  if (provider === "magento")
+    return (
+      <div className="form-grid">
+        <div className="field full">
+          <label>Integration access token</label>
+          <input
+            name="access_token"
+            type="password"
+            required
+            autoComplete="off"
+          />
+        </div>
+        <div className="field full">
+          <label>Adobe webhook public verification key (PEM)</label>
+          <textarea
+            name="webhook_public_key"
+            rows={7}
+            autoComplete="off"
+            placeholder="-----BEGIN PUBLIC KEY-----"
+          />
+        </div>
+        <details className="field full">
+          <summary>Legacy/custom Magento webhook</summary>
+          <div className="field full">
+            <label>HMAC signing secret</label>
+            <input name="webhook_secret" type="password" autoComplete="off" />
+          </div>
+        </details>
+      </div>
+    );
+  return (
+    <div className="form-grid">
+      <div className="field full">
+        <label>API token</label>
+        <input name="api_token" type="password" required autoComplete="off" />
+      </div>
+      <details className="field full" open>
+        <summary>Advanced endpoint configuration</summary>
+        <div className="field full">
+          <label>Constrained endpoint configuration</label>
+          <textarea
+            name="configuration"
+            required
+            rows={8}
+            placeholder={
+              '{"endpoints":{"products":"api/products","customers":"api/customers","orders":"api/orders"}}'
+            }
+          />
+        </div>
+        <div className="field full">
+          <label>Webhook signing secret</label>
+          <input name="webhook_secret" type="password" autoComplete="off" />
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function formatSyncDuration(run: CommerceSyncRun) {
+  if (!run.started_at) return "not started";
+  if (!run.completed_at) return "in progress";
+  const seconds = Math.max(
+    0,
+    Math.round(
+      (Date.parse(run.completed_at) - Date.parse(run.started_at)) / 1000,
+    ),
+  );
+  return seconds < 60
+    ? `${seconds}s`
+    : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
 function CatalogLoadingState() {
@@ -510,7 +1493,9 @@ function CatalogEmptyState({
       <div className="catalog-integration-cta">
         <div>
           <strong>Want to sync a storefront?</strong>
-          <span>Provider setup is optional and does not block catalog import.</span>
+          <span>
+            Provider setup is optional and does not block catalog import.
+          </span>
         </div>
         <Badge>Provider configuration required</Badge>
         <Link href="/integrations" className="btn btn-sm btn-secondary">

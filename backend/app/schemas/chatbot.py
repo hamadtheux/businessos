@@ -217,6 +217,8 @@ class PublicProductCard(BaseModel):
     description: str | None
     price: Decimal | None
     currency: str
+    availability: Literal["unknown", "in_stock", "out_of_stock", "preorder", "backorder"] = "unknown"
+    product_url: str | None = None
     model_config = ConfigDict(extra="forbid")
 
 
@@ -314,9 +316,31 @@ class PublicOrderLookupRequest(BaseModel):
         return self
 
 
+class PublicOrderRefundFact(BaseModel):
+    amount: Decimal
+    currency: str
+    occurred_at: AwareDatetime
+    model_config = ConfigDict(extra="forbid")
+
+
+class PublicOrderFulfillmentFact(BaseModel):
+    status: Literal["pending", "open", "in_progress", "fulfilled", "canceled", "failed"]
+    occurred_at: AwareDatetime | None
+    tracking_company: str | None
+    tracking_number: str | None
+    tracking_url: str | None
+    external_order_line_ids: list[str]
+    model_config = ConfigDict(extra="forbid")
+
+
 class PublicOrderStatusResponse(BaseModel):
     order_reference: str
     status: Literal["draft", "confirmed", "processing", "completed", "canceled"]
+    payment_status: Literal["unknown", "pending", "authorized", "paid", "partially_refunded", "refunded", "voided", "failed"]
+    fulfillment_status: Literal["unknown", "unfulfilled", "partial", "fulfilled", "canceled"]
+    refunded_amount: Decimal
+    refunds: list[PublicOrderRefundFact]
+    fulfillments: list[PublicOrderFulfillmentFact]
     model_config = ConfigDict(extra="forbid")
 
 

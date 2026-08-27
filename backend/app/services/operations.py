@@ -390,7 +390,7 @@ async def conversation_response(session: AsyncSession, conversation: Conversatio
         latest = await session.scalar(select(ConversationMessage.content).where(ConversationMessage.business_id == conversation.business_id, ConversationMessage.conversation_id == conversation.id).order_by(ConversationMessage.sent_at.desc(), ConversationMessage.id.desc()).limit(1))
     except SQLAlchemyError:
         raise OperationsPersistenceError from None
-    return ConversationResponse(id=conversation.id, business_id=conversation.business_id, customer_id=conversation.customer_id, customer_display_name=customer_name, channel=conversation.channel, external_reference=conversation.external_reference, status=conversation.status, assigned_user_id=conversation.assigned_user_id, last_activity_at=conversation.last_activity_at, latest_message=latest, unread=False, messages=[MessageResponse.model_validate(message) for message in messages], created_at=conversation.created_at, updated_at=conversation.updated_at)
+    return ConversationResponse(id=conversation.id, business_id=conversation.business_id, customer_id=conversation.customer_id, integration_connection_id=conversation.integration_connection_id, customer_display_name=customer_name, channel=conversation.channel, external_reference=conversation.external_reference, status=conversation.status, assigned_user_id=conversation.assigned_user_id, last_activity_at=conversation.last_activity_at, latest_message=latest, unread=False, messages=[MessageResponse.model_validate(message) for message in messages], created_at=conversation.created_at, updated_at=conversation.updated_at)
 
 
 async def conversation_responses(session: AsyncSession, conversations: list[Conversation]) -> list[ConversationResponse]:
@@ -410,6 +410,7 @@ async def conversation_responses(session: AsyncSession, conversations: list[Conv
         latest.setdefault(message.conversation_id, message.content)
     return [ConversationResponse(
         id=item.id, business_id=item.business_id, customer_id=item.customer_id,
+        integration_connection_id=item.integration_connection_id,
         customer_display_name=names.get(item.customer_id), channel=item.channel,
         external_reference=item.external_reference, status=item.status,
         assigned_user_id=item.assigned_user_id, last_activity_at=item.last_activity_at,

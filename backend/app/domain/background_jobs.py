@@ -10,6 +10,7 @@ JobType = Literal[
     "resume_workflow_run",
     "process_scheduled_workflow",
     "process_integration_event",
+    "customer_agent_response",
     "dispatch_action_execution",
     "reconcile_uncertain_attempt",
     "mark_social_schedule_ready",
@@ -17,6 +18,13 @@ JobType = Literal[
     "discover_competitors",
     "generate_content_plan",
     "analyze_campaign_opportunities",
+    "commerce_initial_sync",
+    "commerce_incremental_sync",
+    "commerce_webhook_reconcile",
+    "google_merchant_status_sync",
+    "meta_catalog_status_sync",
+    "google_ads_performance_sync",
+    "meta_ads_performance_sync",
 ]
 
 JOB_STATUSES: Final = frozenset({
@@ -63,6 +71,19 @@ _POLICIES = {
     "process_integration_event": JobPolicy(
         "process_integration_event", "integration_event_id", 90, 4, True, True, True,
     ),
+    # Customer-agent reasoning is an internal, replay-safe operation.
+    # It references the durable inbound automation event. Any resulting
+    # external customer reply must still cross AIAction governance and the
+    # non-replayable dispatch_action_execution boundary.
+    "customer_agent_response": JobPolicy(
+        "customer_agent_response",
+        "automation_event_id",
+        95,
+        4,
+        True,
+        True,
+        True,
+    ),
     # A connector attempt is never blindly replayed by the queue. Ambiguous
     # outcomes are terminalized as uncertain by the dispatcher.
     "dispatch_action_execution": JobPolicy(
@@ -94,6 +115,27 @@ _POLICIES = {
     "analyze_campaign_opportunities": JobPolicy(
         "analyze_campaign_opportunities", "marketing_automation_run_id", 20, 3, True, True, True,
     ),
+    "commerce_initial_sync": JobPolicy(
+        "commerce_initial_sync", "commerce_sync_run_id", 65, 5, True, True, True,
+    ),
+    "commerce_incremental_sync": JobPolicy(
+        "commerce_incremental_sync", "commerce_sync_run_id", 60, 5, True, True, True,
+    ),
+    "commerce_webhook_reconcile": JobPolicy(
+        "commerce_webhook_reconcile", "commerce_webhook_receipt_id", 85, 5, True, True, True,
+    ),
+    "google_merchant_status_sync": JobPolicy(
+        "google_merchant_status_sync", "commerce_feed_destination_id", 55, 5, True, True, True,
+    ),
+    "meta_catalog_status_sync": JobPolicy(
+        "meta_catalog_status_sync", "commerce_feed_destination_id", 55, 5, True, True, True,
+    ),
+    "google_ads_performance_sync": JobPolicy(
+        "google_ads_performance_sync", "marketing_campaign_id", 45, 5, True, True, True,
+    ),
+    "meta_ads_performance_sync": JobPolicy(
+        "meta_ads_performance_sync", "marketing_campaign_id", 45, 5, True, True, True,
+    ),
 }
 
 JOB_POLICIES: Final = MappingProxyType(_POLICIES)
@@ -109,6 +151,10 @@ JOB_REFERENCE_FIELDS: Final = (
     "subscription_id",
     "competitor_discovery_run_id",
     "marketing_automation_run_id",
+    "commerce_sync_run_id",
+    "commerce_webhook_receipt_id",
+    "commerce_feed_destination_id",
+    "marketing_campaign_id",
 )
 
 

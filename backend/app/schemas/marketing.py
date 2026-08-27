@@ -10,7 +10,11 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstrai
 
 Channel = Literal["meta", "google_ads", "instagram", "facebook", "linkedin", "tiktok", "email", "whatsapp", "website", "other"]
 MarketingPlanStatus = Literal["draft", "ready", "active", "completed", "archived"]
-CampaignStatus = Literal["draft", "planned", "awaiting_approval", "approved", "scheduled", "active", "paused", "completed", "canceled"]
+CampaignStatus = Literal[
+    "draft", "planned", "awaiting_approval", "approved", "scheduled", "executing",
+    "provider_pending", "active", "paused", "completed", "canceled", "failed",
+    "attention_required", "unknown_external_state",
+]
 ChannelPlanStatus = Literal["draft", "ready", "approved", "scheduled", "active", "completed", "archived"]
 ContentStatus = Literal["draft", "review", "approved", "scheduled", "ready_to_publish", "archived"]
 TrendStatus = Literal["detected", "reviewed", "acted_on", "dismissed", "expired"]
@@ -213,7 +217,29 @@ class CampaignResponse(CampaignCreate, MarketingRecord):
     risks: list[str] | None = None
     required_integrations: list[str] | None = None
     source_evidence: list[dict[str, object]] | None = None
+    normalized_proposal: dict[str, object] = Field(default_factory=dict)
+    recommended_provider: Literal["google", "meta"] | None = None
+    campaign_type: Literal["retail_performance_max", "catalog_sales"] | None = None
+    offer_source: Literal["none", "authoritative_promotion", "owner_authorized"] = "none"
+    offer_authorized: bool = False
+    proposal_confidence: Decimal | None = None
     audience_hypothesis_id: UUID | None = None
+    catalog_item_ids: list[UUID] = Field(default_factory=list)
+
+    @field_validator("normalized_proposal", mode="before")
+    @classmethod
+    def proposal_default(cls, value: object) -> object:
+        return {} if value is None else value
+
+    @field_validator("offer_source", mode="before")
+    @classmethod
+    def offer_source_default(cls, value: object) -> object:
+        return "none" if value is None else value
+
+    @field_validator("offer_authorized", mode="before")
+    @classmethod
+    def offer_authorized_default(cls, value: object) -> object:
+        return False if value is None else value
 
 
 class ChannelConfiguration(MarketingSchema):
@@ -331,6 +357,37 @@ class CampaignGenerateRequest(MarketingSchema):
     budget_mode: Literal["daily", "lifetime"] = "lifetime"
     start_date: date | None = None
     end_date: date | None = None
+    catalog_item_ids: list[UUID] = Field(default_factory=list, max_length=100)
+    offer: str | None = Field(default=None, max_length=2000)
+    offer_authorized: bool = False
+
+    @field_validator("catalog_item_ids")
+    @classmethod
+    def unique_catalog_items(cls, values: list[UUID]) -> list[UUID]:
+        if len(values) != len(set(values)):
+            raise ValueError("catalog_item_ids cannot contain duplicates")
+        return values
+
+    @model_validator(mode="after")
+    def authorized_offer_only(self) -> "CampaignGenerateRequest":
+        if self.offer and not self.offer_authorized:
+            raise ValueError("An explicit campaign offer requires owner authorization")
+        return self
+
+
+class CampaignPreflightIssue(MarketingSchema):
+    code: str
+    message: str
+    blocking: bool = True
+
+
+class CampaignPreflightResponse(MarketingSchema):
+    ready: bool
+    provider: Literal["google", "meta"]
+    selected_products: int
+    eligible_products: int
+    approval_required: bool = True
+    issues: list[CampaignPreflightIssue] = Field(default_factory=list)
 
 
 class CreativeBriefCreate(MarketingSchema):
@@ -608,6 +665,8 @@ class PerformanceCreate(MarketingSchema):
 
 class PerformanceResponse(PerformanceCreate, MarketingRecord):
     data_source: Literal["manual", "import", "future_connector"]
+    attribution_class: Literal["provider_attributed", "first_party_observed", "ai_business_os_derived", "unknown"] = "unknown"
+    external_campaign_reference: str | None = None
     ctr: Decimal
     cpc: Decimal
     cpm: Decimal

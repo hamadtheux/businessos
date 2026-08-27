@@ -43,6 +43,11 @@ class ActionExecutionAttempt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "idempotency_key",
             name="uq_action_execution_attempts_idempotency_key",
         ),
+        UniqueConstraint(
+            "id",
+            "business_id",
+            name="uq_action_execution_attempts_id_business",
+        ),
         CheckConstraint(
             "attempt_number BETWEEN 1 AND 1000000",
             name="valid_attempt_number",

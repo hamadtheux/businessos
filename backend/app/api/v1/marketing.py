@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from typing import Annotated, Awaitable
+from typing import Annotated, Awaitable, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -32,6 +32,7 @@ from app.schemas.marketing import (
     CampaignCreate,
     CampaignDetail,
     CampaignGenerateRequest,
+    CampaignPreflightResponse,
     CampaignResponse,
     CampaignStatus,
     CampaignUpdate,
@@ -95,6 +96,7 @@ from app.services.automation_intelligence import (
     schedule_marketing_automation,
 )
 from app.services.marketing_actions import (
+    preflight_campaign,
     prepare_campaign_action,
     prepare_content_publish_action,
 )
@@ -194,6 +196,17 @@ async def generate_campaign(data: CampaignGenerateRequest, access: BusinessAcces
 async def read_campaign(campaign_id: UUID, access: BusinessAccessDependency, response: Response, session: SessionDependency):
     campaign = await _read(None, service.get_campaign(session, business_id=access.business.id, campaign_id=campaign_id))
     return await _read(response, service.campaign_detail(session, business_id=access.business.id, campaign=campaign))
+
+
+@router.get("/campaigns/{campaign_id}/preflight", response_model=CampaignPreflightResponse)
+async def read_campaign_preflight(
+    campaign_id: UUID, access: BusinessAccessDependency,
+    response: Response, session: SessionDependency,
+    channel: Literal["meta", "google_ads"] | None = None,
+):
+    return await _read(response, preflight_campaign(
+        session, business_id=access.business.id, campaign_id=campaign_id, channel=channel,
+    ))
 
 
 @router.get(
@@ -737,7 +750,10 @@ def _not_found() -> HTTPException:
 
 
 def _invalid() -> HTTPException:
-    return HTTPException(422, "Invalid marketing request.", headers=_PRIVATE_HEADERS)
+    return HTTPException(422, {
+        "code": "validation_error",
+        "message": "Check the campaign or content details and try again.",
+    }, headers=_PRIVATE_HEADERS)
 
 
 def _conflict() -> HTTPException:
@@ -745,11 +761,17 @@ def _conflict() -> HTTPException:
 
 
 def _unavailable() -> HTTPException:
-    return HTTPException(503, "Marketing services are temporarily unavailable.", headers=_PRIVATE_HEADERS)
+    return HTTPException(503, {
+        "code": "temporarily_unavailable",
+        "message": "Marketing services are temporarily unavailable. Please try again.",
+    }, headers=_PRIVATE_HEADERS)
 
 
 def _ai_unavailable() -> HTTPException:
-    return HTTPException(503, "AI marketing generation is temporarily unavailable.", headers=_PRIVATE_HEADERS)
+    return HTTPException(503, {
+        "code": "provider_unavailable",
+        "message": "The AI provider could not complete generation. No campaign or content was saved; please try again.",
+    }, headers=_PRIVATE_HEADERS)
 
 
 _PRIVATE_HEADERS = {"Cache-Control": "no-store", "Pragma": "no-cache"}

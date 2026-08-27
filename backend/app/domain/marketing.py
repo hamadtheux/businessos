@@ -14,11 +14,16 @@ class CampaignStatus(StrEnum):
     PLANNED = "planned"
     AWAITING_APPROVAL = "awaiting_approval"
     APPROVED = "approved"
+    EXECUTING = "executing"
+    PROVIDER_PENDING = "provider_pending"
     SCHEDULED = "scheduled"
     ACTIVE = "active"
     PAUSED = "paused"
     COMPLETED = "completed"
     CANCELED = "canceled"
+    FAILED = "failed"
+    ATTENTION_REQUIRED = "attention_required"
+    UNKNOWN_EXTERNAL_STATE = "unknown_external_state"
 
 
 class ContentStatus(StrEnum):
@@ -51,12 +56,17 @@ CAMPAIGN_TRANSITIONS = {
     "draft": frozenset({"planned", "awaiting_approval", "canceled"}),
     "planned": frozenset({"draft", "awaiting_approval", "canceled"}),
     "awaiting_approval": frozenset({"draft", "approved", "canceled"}),
-    "approved": frozenset({"scheduled", "canceled"}),
+    "approved": frozenset({"scheduled", "executing", "canceled"}),
+    "executing": frozenset({"provider_pending", "paused", "failed", "attention_required", "unknown_external_state"}),
+    "provider_pending": frozenset({"active", "paused", "failed", "attention_required", "unknown_external_state"}),
     "scheduled": frozenset({"active", "canceled"}),
     "active": frozenset({"paused", "completed", "canceled"}),
     "paused": frozenset({"active", "completed", "canceled"}),
     "completed": frozenset(),
     "canceled": frozenset(),
+    "failed": frozenset({"draft", "attention_required"}),
+    "attention_required": frozenset({"draft", "awaiting_approval", "executing", "paused", "canceled"}),
+    "unknown_external_state": frozenset({"paused", "attention_required"}),
 }
 
 

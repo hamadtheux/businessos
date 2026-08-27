@@ -14,6 +14,7 @@ os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 from app.exceptions.marketing import MarketingStateError, MarketingValidationError  # noqa: E402
 from app.models.audit_log import AuditLog  # noqa: E402
 from app.models.business import Business  # noqa: E402
+from app.models.catalog_item import CatalogItem  # noqa: E402
 from app.models.marketing import Campaign, CampaignChannelPlan, Competitor, CompetitorObservation, MarketingContent, MarketingPlan, MarketingTrend, SocialSchedule  # noqa: E402
 from app.models.opportunity import Opportunity  # noqa: E402
 from app.schemas.marketing import CampaignCreate, CampaignGenerateRequest, ChannelPlanCreate, ContentCreate, ContentVersionCreate, CreativeBriefCreate, PerformanceCreate, PlanGenerateRequest, ScheduleCreate, TrendOpportunityRequest  # noqa: E402
@@ -117,7 +118,7 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
             id=uuid4(), preferred_channels=["instagram", "email"], summary="Existing customers",
             evidence=[], confidence=Decimal("0.650"), geographic_areas=[], campaign_id=None,
         )
-        with patch("app.services.marketing._run_cmo", new=AsyncMock(return_value=output)), patch(
+        with patch("app.services.marketing._run_cmo", new=AsyncMock(return_value=output)) as runtime, patch(
             "app.services.marketing.build_audience_hypothesis", new=AsyncMock(return_value=audience),
         ):
             campaign = await generate_campaign(session, business_id=BUSINESS_ID, actor_user_id=USER_ID, data=CampaignGenerateRequest(goal="Grow", name="Summer", audience_definition="Existing customers", channels=["instagram", "email"], planned_budget="2000"), provider=SimpleNamespace())
@@ -128,6 +129,38 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(type(item).__name__ == "AIAction" for item in session.added))
         self.assertEqual(campaign.audience_hypothesis_id, audience.id)
         self.assertIn("External execution remains unavailable", campaign.risks[-1])
+
+    async def test_ai_campaign_persists_selected_product_context_without_lazy_loading(self) -> None:
+        business = Business(id=BUSINESS_ID, name="Acme", slug="acme", business_type="retail", status="active", timezone="UTC", currency="USD", locale="en", created_at=NOW, updated_at=NOW)
+        product = CatalogItem(
+            id=uuid4(), business_id=BUSINESS_ID, item_type="product",
+            name="Premium Farm Eggs", status="active", source="shopify",
+            sync_state="in_sync", availability="in_stock", published=True,
+        )
+        session = _ScalarSession([business], rows=[[product]])
+        output = SimpleNamespace(summary="Grounded plan", recommendations=["Lead with observed quality"], proposed_actions=[])
+        audience = SimpleNamespace(
+            id=uuid4(), preferred_channels=["instagram"], summary="Observed buyers",
+            evidence=[], confidence=Decimal("0.650"), geographic_areas=[], campaign_id=None,
+        )
+        with patch("app.services.marketing._run_cmo", new=AsyncMock(return_value=output)) as runtime, patch(
+            "app.services.marketing.build_audience_hypothesis", new=AsyncMock(return_value=audience),
+        ):
+            campaign = await generate_campaign(
+                session, business_id=BUSINESS_ID, actor_user_id=USER_ID,
+                data=CampaignGenerateRequest(
+                    goal="Promote selected product", catalog_item_ids=[product.id],
+                    channels=["instagram"],
+                ),
+                provider=SimpleNamespace(),
+            )
+        self.assertEqual(campaign.catalog_item_ids, [product.id])
+        self.assertEqual(
+            [item.catalog_item_id for item in campaign.product_selections],
+            [product.id],
+        )
+        self.assertIn("source=shopify", runtime.await_args.args[2])
+        self.assertIn("availability=in_stock", runtime.await_args.args[2])
 
     async def test_plan_generation_uses_cmo_runtime_result_and_persists_only_conclusions(self) -> None:
         business = Business(id=BUSINESS_ID, name="Acme", slug="acme", business_type="retail", status="active", timezone="UTC", currency="USD", locale="en", created_at=NOW, updated_at=NOW)

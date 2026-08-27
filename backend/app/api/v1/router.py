@@ -10,6 +10,7 @@ from app.api.v1.business_brain_manifest import router as business_brain_manifest
 from app.api.v1.business_memory import router as business_memory_router
 from app.api.v1.businesses import router as businesses_router
 from app.api.v1.catalog import router as catalog_router
+from app.api.v1.commerce import router as commerce_router, webhook_router as commerce_webhook_router
 from app.api.v1.chatbot import router as chatbot_router
 from app.api.v1.scheduling import router as scheduling_router
 from app.api.v1.operations import router as operations_router
@@ -24,6 +25,8 @@ api_router = APIRouter()
 api_router.include_router(auth_router)
 api_router.include_router(businesses_router)
 api_router.include_router(catalog_router)
+api_router.include_router(commerce_router)
+api_router.include_router(commerce_webhook_router)
 api_router.include_router(chatbot_router)
 api_router.include_router(business_brain_router)
 api_router.include_router(business_brain_manifest_router)

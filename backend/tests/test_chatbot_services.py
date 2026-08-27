@@ -127,6 +127,7 @@ class PublicChatbotDomainServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(len(item.description or "") == 500 for item in result))
         self.assertTrue(all(str(item.reference) not in {str(value.id) for value in items} for item in result))
         self.assertIn("catalog_items.business_id", str(session.statements[0]))
+        self.assertIn("catalog_items.published", str(session.statements[0]))
 
     async def test_catalog_rejects_a_foreign_row_defensively(self) -> None:
         _, _, business = _records()
@@ -262,7 +263,10 @@ class PublicChatbotDomainServiceTests(unittest.IsolatedAsyncioTestCase):
                 limiter=_AllowLimiter(),
             )
         self.assertEqual(response.model_dump(), {
-            "order_reference": "ORD-42", "status": "processing"
+            "order_reference": "ORD-42", "status": "processing",
+            "payment_status": "unknown", "fulfillment_status": "unknown",
+            "refunded_amount": Decimal("0.00"), "refunds": [],
+            "fulfillments": [],
         })
         self.assertEqual(public_session.order_lookup_attempts, 1)
         self.assertEqual(public_session.order_lookup_count, 1)

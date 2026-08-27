@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from email.message import EmailMessage
+import json
 from types import MappingProxyType
 from typing import Mapping
 from urllib.parse import urlsplit
@@ -126,14 +127,17 @@ class ProviderConnectorActionAdapter:
             body = payload.message
         message.set_content(body)
         raw = base64.urlsafe_b64encode(message.as_bytes()).rstrip(b"=").decode("ascii")
+        body = {"raw": raw}
+        if isinstance(payload, SendEmailPayload) and payload.thread_ref:
+            body["threadId"] = payload.thread_ref
         response = await self._http.request_json(
-            "POST", _GMAIL_SEND, headers=headers, json_body={"raw": raw}
+            "POST", _GMAIL_SEND, headers=headers, json_body=body
         )
         reference = _required_reference(response, "id")
         return ConnectorActionResult(
             succeeded=True,
             external_reference_id=reference,
-            safe_metadata={"provider": "gmail"},
+            safe_metadata={"provider": "gmail", "delivery_status": "submitted"},
         )
 
     async def _send_whatsapp(self, payload, target, resources, headers):
@@ -163,7 +167,7 @@ class ProviderConnectorActionAdapter:
         return ConnectorActionResult(
             succeeded=True,
             external_reference_id=reference,
-            safe_metadata={"provider": "whatsapp_business"},
+            safe_metadata={"provider": "whatsapp_business", "delivery_status": "submitted"},
         )
 
     async def _publish_social(self, payload, resources, headers):
@@ -219,6 +223,22 @@ class ProviderConnectorActionAdapter:
         if account is None:
             raise ConnectorRequestNotSentError("ad_account_selection_required")
         if isinstance(payload, CreateMetaCampaignPayload):
+            commerce_values = (
+                payload.catalog_ref,
+                payload.product_set_ref,
+                payload.page_ref,
+                payload.conversion_dataset_ref,
+            )
+            commerce_campaign = any(commerce_values)
+            if commerce_campaign and not all(
+                (*commerce_values, payload.creative.destination_url)
+            ):
+                # Validate the whole catalog-sales chain before creating even
+                # the paused provider campaign. A local validation failure must
+                # never leave an orphan provider object behind.
+                raise ConnectorRequestNotSentError("meta_catalog_assets_required")
+            if commerce_campaign and payload.budget_period != "daily":
+                raise ConnectorRequestNotSentError("daily_budget_required")
             objective = {
                 "awareness": "OUTCOME_AWARENESS",
                 "traffic": "OUTCOME_TRAFFIC",
@@ -238,9 +258,79 @@ class ProviderConnectorActionAdapter:
                     "special_ad_categories": "[]",
                 },
             )
+            campaign_reference = _required_reference(response, "id")
+            if commerce_campaign:
+                try:
+                    ad_set = await self._http.request_json(
+                        "POST", f"{self._meta_root()}/{account}/adsets", headers=headers,
+                        data={
+                            "name": f"{payload.campaign_name} products"[:200],
+                            "campaign_id": campaign_reference,
+                            "daily_budget": str(int(payload.budget * 100)),
+                            "billing_event": "IMPRESSIONS",
+                            "optimization_goal": "OFFSITE_CONVERSIONS",
+                            "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+                            "destination_type": "WEBSITE",
+                            "targeting": json.dumps({"geo_locations": {"countries": payload.audience.countries}}, separators=(",", ":")),
+                            "promoted_object": json.dumps({
+                                "product_set_id": payload.product_set_ref,
+                                "pixel_id": payload.conversion_dataset_ref,
+                                "custom_event_type": "PURCHASE",
+                            }, separators=(",", ":")),
+                            "status": "PAUSED",
+                        },
+                    )
+                    ad_set_reference = _required_reference(ad_set, "id")
+                    link_data = {
+                        "link": payload.creative.destination_url,
+                        "message": payload.primary_text or payload.campaign_name,
+                        "name": payload.headline or payload.campaign_name,
+                        "description": payload.description or "",
+                        "call_to_action": {"type": payload.call_to_action, "value": {"link": payload.creative.destination_url}},
+                    }
+                    creative = await self._http.request_json(
+                        "POST", f"{self._meta_root()}/{account}/adcreatives", headers=headers,
+                        data={
+                            "name": f"{payload.campaign_name} creative"[:200],
+                            "product_set_id": payload.product_set_ref,
+                            "object_story_spec": json.dumps({
+                                "page_id": payload.page_ref,
+                                "template_data": link_data,
+                            }, separators=(",", ":")),
+                        },
+                    )
+                    creative_reference = _required_reference(creative, "id")
+                    ad = await self._http.request_json(
+                        "POST", f"{self._meta_root()}/{account}/ads", headers=headers,
+                        data={
+                            "name": f"{payload.campaign_name} ad"[:200],
+                            "adset_id": ad_set_reference,
+                            "creative": json.dumps({"creative_id": creative_reference}),
+                            "status": "PAUSED",
+                        },
+                    )
+                    ad_reference = _required_reference(ad, "id")
+                except (
+                    _ProviderHttpError,
+                    IntegrationProviderUnavailableError,
+                    ConnectorRequestNotSentError,
+                    RuntimeError,
+                ):
+                    # The campaign exists, so any later failure has an unknown
+                    # external outcome. The dispatcher must not blind-retry.
+                    raise RuntimeError("provider_outcome_unknown") from None
+                return ConnectorActionResult(
+                    succeeded=True, external_reference_id=campaign_reference,
+                    safe_metadata={
+                        "provider": "meta_ads", "status": "provider_pending",
+                        "ad_set_reference": ad_set_reference,
+                        "creative_reference": creative_reference,
+                        "ad_reference": ad_reference,
+                    },
+                )
             return ConnectorActionResult(
                 succeeded=True,
-                external_reference_id=_required_reference(response, "id"),
+                external_reference_id=campaign_reference,
                 safe_metadata={"provider": "meta_ads", "status": "paused"},
             )
         if isinstance(payload, (LaunchMetaCampaignPayload, PauseAdCampaignPayload)):
@@ -290,37 +380,46 @@ class ProviderConnectorActionAdapter:
         )
         if isinstance(payload, CreateGoogleAdsCampaignPayload):
             micros = str(int(payload.budget * 1_000_000))
+            if payload.network == "performance_max" and payload.merchant_account_ref:
+                operations = _google_retail_pmax_operations(customer, payload, micros)
+            else:
+                operations = [
+                    {"campaignBudgetOperation": {"create": {
+                        "resourceName": f"customers/{customer}/campaignBudgets/-1",
+                        "name": f"{payload.campaign_name} budget",
+                        "amountMicros": micros,
+                        "deliveryMethod": "STANDARD",
+                        "explicitlyShared": False,
+                    }}},
+                    {"campaignOperation": {"create": {
+                        "resourceName": f"customers/{customer}/campaigns/-2",
+                        "name": payload.campaign_name,
+                        "status": "PAUSED",
+                        "advertisingChannelType": payload.network.upper(),
+                        "campaignBudget": f"customers/{customer}/campaignBudgets/-1",
+                        "maximizeConversions": {},
+                    }}},
+                ]
             response = await self._http.request_json(
                 "POST",
                 f"{root}/googleAds:mutate",
                 headers=ads_headers,
                 json_body={
-                    "mutateOperations": [
-                        {"campaignBudgetOperation": {"create": {
-                            "resourceName": f"customers/{customer}/campaignBudgets/-1",
-                            "name": f"{payload.campaign_name} budget",
-                            "amountMicros": micros,
-                            "deliveryMethod": "STANDARD",
-                            "explicitlyShared": False,
-                        }}},
-                        {"campaignOperation": {"create": {
-                            "resourceName": f"customers/{customer}/campaigns/-2",
-                            "name": payload.campaign_name,
-                            "status": "PAUSED",
-                            "advertisingChannelType": payload.network.upper(),
-                            "campaignBudget": f"customers/{customer}/campaignBudgets/-1",
-                            "maximizeConversions": {},
-                        }}},
-                    ],
+                    "mutateOperations": operations,
                     "partialFailure": False,
                     "responseContentType": "RESOURCE_NAME_ONLY",
                 },
             )
             reference = _google_campaign_reference(response)
+            metadata: dict[str, str | int | bool] = {
+                "provider": "google_ads", "status": "paused",
+            }
+            if payload.network == "performance_max" and payload.merchant_account_ref:
+                metadata.update(_google_child_references(response))
             return ConnectorActionResult(
                 succeeded=True,
                 external_reference_id=reference,
-                safe_metadata={"provider": "google_ads", "status": "paused"},
+                safe_metadata=metadata,
             )
         if isinstance(payload, (LaunchGoogleAdsCampaignPayload, PauseAdCampaignPayload)):
             status = "ENABLED" if action_type == "launch_google_ads_campaign" else "PAUSED"
@@ -400,6 +499,80 @@ def build_configured_action_adapters(
     return adapters
 
 
+def _google_retail_pmax_operations(customer: str, payload, micros: str) -> list[dict[str, object]]:
+    merchant = payload.merchant_account_ref
+    if merchant is None or not merchant.isdigit() or not payload.creative.destination_url:
+        raise ConnectorRequestNotSentError("merchant_and_landing_page_required")
+    budget = f"customers/{customer}/campaignBudgets/-1"
+    campaign = f"customers/{customer}/campaigns/-2"
+    asset_group = f"customers/{customer}/assetGroups/-3"
+    operations: list[dict[str, object]] = [
+        {"campaignBudgetOperation": {"create": {
+            "resourceName": budget,
+            "name": f"{payload.campaign_name} budget",
+            "amountMicros": micros,
+            "deliveryMethod": "STANDARD",
+            "explicitlyShared": False,
+        }}},
+        {"campaignOperation": {"create": {
+            "resourceName": campaign,
+            "name": payload.campaign_name,
+            "status": "PAUSED",
+            "advertisingChannelType": "PERFORMANCE_MAX",
+            "campaignBudget": budget,
+            "maximizeConversionValue": {},
+            "shoppingSetting": {
+                "merchantId": merchant,
+                "campaignPriority": 0,
+                "enableLocal": False,
+            },
+        }}},
+        {"assetGroupOperation": {"create": {
+            "resourceName": asset_group,
+            "name": f"{payload.campaign_name} products",
+            "campaign": campaign,
+            "finalUrls": [payload.creative.destination_url],
+            "status": "PAUSED",
+        }}},
+    ]
+    if payload.product_offer_ids:
+        root = f"customers/{customer}/assetGroupListingGroupFilters/-4"
+        operations.append({"assetGroupListingGroupFilterOperation": {"create": {
+            "resourceName": root,
+            "assetGroup": asset_group,
+            "type": "SUBDIVISION",
+            "listingSource": "SHOPPING",
+        }}})
+        next_temp = -5
+        for offer_id in payload.product_offer_ids:
+            operations.append({"assetGroupListingGroupFilterOperation": {"create": {
+                "resourceName": f"customers/{customer}/assetGroupListingGroupFilters/{next_temp}",
+                "assetGroup": asset_group,
+                "parentListingGroupFilter": root,
+                "type": "UNIT_INCLUDED",
+                "listingSource": "SHOPPING",
+                "caseValue": {"productItemId": {"value": offer_id}},
+            }}})
+            next_temp -= 1
+        # The mandatory other-case unit closes the subdivision tree and is excluded.
+        operations.append({"assetGroupListingGroupFilterOperation": {"create": {
+            "resourceName": f"customers/{customer}/assetGroupListingGroupFilters/{next_temp}",
+            "assetGroup": asset_group,
+            "parentListingGroupFilter": root,
+            "type": "UNIT_EXCLUDED",
+            "listingSource": "SHOPPING",
+            "caseValue": {"productItemId": {}},
+        }}})
+    else:
+        operations.append({"assetGroupListingGroupFilterOperation": {"create": {
+            "resourceName": f"customers/{customer}/assetGroupListingGroupFilters/-4",
+            "assetGroup": asset_group,
+            "type": "UNIT_INCLUDED",
+            "listingSource": "SHOPPING",
+        }}})
+    return operations
+
+
 def _resource(resources, resource_type: str) -> str | None:
     for item in resources:
         if item.get("resource_type") == resource_type:
@@ -456,6 +629,27 @@ def _google_campaign_reference(response: Mapping[str, object]) -> str:
             if isinstance(reference, str):
                 return _required_reference({"value": reference}, "value")
     raise RuntimeError("provider_outcome_unknown")
+
+
+def _google_child_references(response: Mapping[str, object]) -> dict[str, str]:
+    values = response.get("mutateOperationResponses")
+    if not isinstance(values, list):
+        return {}
+    result: dict[str, str] = {}
+    keys = {
+        "campaignBudgetResult": "budget_reference",
+        "assetGroupResult": "asset_group_reference",
+        "assetGroupListingGroupFilterResult": "listing_group_reference",
+    }
+    for value in values:
+        if not isinstance(value, Mapping):
+            continue
+        for provider_key, normalized_key in keys.items():
+            candidate = value.get(provider_key)
+            reference = candidate.get("resourceName") if isinstance(candidate, Mapping) else None
+            if isinstance(reference, str) and normalized_key not in result:
+                result[normalized_key] = _required_reference({"value": reference}, "value")
+    return result
 
 
 def _google_budget_reference(response: Mapping[str, object]) -> str:

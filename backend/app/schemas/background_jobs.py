@@ -6,21 +6,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from app.domain.background_jobs import JobType
+
 
 JobStatus = Literal["queued", "processing", "succeeded", "failed", "dead_letter", "canceled"]
-JobType = Literal[
-    "process_automation_event",
-    "resume_workflow_run",
-    "process_scheduled_workflow",
-    "process_integration_event",
-    "dispatch_action_execution",
-    "reconcile_uncertain_attempt",
-    "mark_social_schedule_ready",
-    "maintain_subscription",
-    "discover_competitors",
-    "generate_content_plan",
-    "analyze_campaign_opportunities",
-]
 
 
 class BackgroundJobResponse(BaseModel):

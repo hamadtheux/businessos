@@ -6,6 +6,7 @@ import html
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, func, or_, select
@@ -59,7 +60,7 @@ from app.models.conversation import Conversation, ConversationMessage
 from app.models.crm_lead import CRMLead
 from app.models.customer import Customer
 from app.models.notification import Notification
-from app.models.order import Order
+from app.models.order import Order, OrderFulfillment, OrderRefund
 from app.models.service_provider import ServiceProvider
 from app.schemas.ai_agent import AIAgentExecutionRequest
 from app.schemas.chatbot import (
@@ -987,6 +988,7 @@ async def search_public_catalog(
     statement = select(CatalogItem).where(
         CatalogItem.business_id == business.id,
         CatalogItem.status == "active",
+        or_(CatalogItem.item_type == "service", CatalogItem.published.is_(True)),
     )
     if terms:
         statement = statement.where(or_(*[
@@ -1022,7 +1024,9 @@ async def search_public_catalog(
             name=item.name,
             description=item.description[:500] if item.description else None,
             price=item.price,
-            currency=business.currency,
+            currency=item.currency or business.currency,
+            availability=item.availability or "unknown",
+            product_url=item.product_url,
         ) for item in values
     ]
 
@@ -1197,8 +1201,38 @@ async def lookup_public_order(
         if conversation is not None:
             conversation.customer_id = customer.id
     context.session.last_activity_at = datetime.now(UTC)
-    await session.flush()
-    return PublicOrderStatusResponse(order_reference=order.order_number, status=order.status)
+    try:
+        refunds = list((await session.scalars(select(OrderRefund).where(
+            OrderRefund.business_id == context.business.id,
+            OrderRefund.order_id == order.id,
+        ).order_by(OrderRefund.occurred_at, OrderRefund.id))).all())
+        fulfillments = list((await session.scalars(select(OrderFulfillment).where(
+            OrderFulfillment.business_id == context.business.id,
+            OrderFulfillment.order_id == order.id,
+        ).order_by(OrderFulfillment.occurred_at, OrderFulfillment.id))).all())
+        await session.flush()
+    except SQLAlchemyError:
+        raise ChatbotPersistenceError("Unable to verify order") from None
+    return PublicOrderStatusResponse(
+        order_reference=order.order_number,
+        status=order.status,
+        payment_status=order.payment_status or "unknown",
+        fulfillment_status=order.fulfillment_status or "unknown",
+        refunded_amount=order.refunded_amount or Decimal("0.00"),
+        refunds=[{
+            "amount": value.amount,
+            "currency": value.currency,
+            "occurred_at": value.occurred_at,
+        } for value in refunds],
+        fulfillments=[{
+            "status": value.status,
+            "occurred_at": value.occurred_at,
+            "tracking_company": value.tracking_company,
+            "tracking_number": value.tracking_number,
+            "tracking_url": value.tracking_url,
+            "external_order_line_ids": value.external_order_line_ids,
+        } for value in fulfillments],
+    )
 
 
 async def public_availability(

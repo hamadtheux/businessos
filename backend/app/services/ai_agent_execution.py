@@ -16,6 +16,7 @@ from app.exceptions.ai_agent_execution import (
     AIAgentExecutionValidationError,
 )
 from app.models.ai_agent_execution import AIAgentExecution
+from app.models.opportunity import Opportunity
 from app.schemas.ai_agent import (
     AIAgentExecutionResult,
     AIAgentRole,
@@ -49,6 +50,7 @@ async def create_running_ai_agent_execution(
     model_name: str,
     trigger_type: AIAgentExecutionTrigger = "api",
     command_id: UUID | None = None,
+    opportunity_id: UUID | None = None,
     parent_execution_id: UUID | None = None,
     delegation_role: AIAgentRole | None = None,
     delegation_sequence: int = 0,
@@ -87,10 +89,29 @@ async def create_running_ai_agent_execution(
     if delegation_depth > 0 and (parent_execution_id is None or delegation_role is None):
         raise AIAgentExecutionValidationError("Delegated execution requires linkage")
 
+    if opportunity_id is not None:
+        try:
+            owned_opportunity_id = await session.scalar(
+                select(Opportunity.id).where(
+                    Opportunity.id == opportunity_id,
+                    Opportunity.business_id == business_id,
+                )
+            )
+        except SQLAlchemyError:
+            raise AIAgentExecutionPersistenceError(
+                "Unable to validate AI execution opportunity"
+            ) from None
+
+        if owned_opportunity_id is None:
+            raise AIAgentExecutionValidationError(
+                "AI execution opportunity is invalid"
+            )
+
     execution = AIAgentExecution(
         business_id=business_id,
         requested_by_user_id=requested_by_user_id,
         command_id=command_id,
+        opportunity_id=opportunity_id,
         parent_execution_id=parent_execution_id,
         delegation_role=delegation_role,
         delegation_sequence=delegation_sequence,

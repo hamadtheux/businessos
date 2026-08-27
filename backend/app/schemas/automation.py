@@ -242,6 +242,38 @@ class WorkflowDetailResponse(WorkflowResponse):
     edges: list[EdgeResponse]
 
 
+class AutomationCopilotCompileRequest(BaseModel):
+    prompt: str = Field(min_length=8, max_length=4000)
+    name: str | None = Field(default=None, min_length=1, max_length=180)
+    timezone: str = Field(default="UTC", min_length=1, max_length=64)
+    model_config = ConfigDict(extra="forbid")
+
+
+class AutomationCopilotRefineRequest(BaseModel):
+    instruction: str = Field(min_length=3, max_length=2000)
+    model_config = ConfigDict(extra="forbid")
+
+
+class AutomationCopilotProposedAction(BaseModel):
+    action_type: Literal["send_email", "send_whatsapp_message", "send_customer_message"]
+    channel: Literal["email", "whatsapp", "customer_message"]
+    condition: str = Field(min_length=1, max_length=500)
+    policy_behavior: str = Field(min_length=1, max_length=500)
+    execution_state: Literal["withheld_pending_authoritative_inputs"] = "withheld_pending_authoritative_inputs"
+    model_config = ConfigDict(extra="forbid")
+
+
+class AutomationCopilotResponse(BaseModel):
+    workflow: WorkflowDetailResponse
+    explanation: str
+    required_integrations: list[str]
+    missing_information: list[str]
+    stop_conditions: list[str]
+    proposed_actions: list[AutomationCopilotProposedAction]
+    executable_actions_withheld: bool
+    model_config = ConfigDict(extra="forbid")
+
+
 class PageMeta(BaseModel):
     page: int
     page_size: int

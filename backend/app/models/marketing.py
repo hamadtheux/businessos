@@ -19,7 +19,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
@@ -135,7 +135,7 @@ class Campaign(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint("planned_budget >= 0 AND planned_budget <= 1000000000", name="valid_budget"),
         CheckConstraint("currency ~ '^[A-Z]{3}$'", name="valid_currency"),
         CheckConstraint("budget_mode IN ('daily','lifetime')", name="valid_budget_mode"),
-        CheckConstraint("status IN ('draft','planned','awaiting_approval','approved','scheduled','active','paused','completed','canceled')", name="valid_status"),
+        CheckConstraint("status IN ('draft','planned','awaiting_approval','approved','scheduled','executing','provider_pending','active','paused','completed','canceled','failed','attention_required','unknown_external_state')", name="valid_status"),
         UniqueConstraint("id", "business_id", name="uq_marketing_campaigns_id_business"),
         Index("ix_marketing_campaigns_business_status_updated", "business_id", "status", "updated_at", "id"),
         Index("ix_marketing_campaigns_business_period", "business_id", "start_date", "end_date", "id"),
@@ -176,7 +176,104 @@ class Campaign(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     risks: Mapped[list[str]] = mapped_column(ARRAY(String(500)), nullable=False, default=list, server_default="{}")
     required_integrations: Mapped[list[str]] = mapped_column(ARRAY(String(64)), nullable=False, default=list, server_default="{}")
     source_evidence: Mapped[list[dict[str, object]]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    normalized_proposal: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    recommended_provider: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    campaign_type: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    offer_source: Mapped[str] = mapped_column(String(32), nullable=False, default="none", server_default="none")
+    offer_authorized: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    proposal_confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
     audience_hypothesis_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    product_selections: Mapped[list["CampaignProductSelection"]] = relationship(
+        back_populates="campaign", lazy="selectin", cascade="all, delete-orphan",
+        order_by="CampaignProductSelection.created_at",
+    )
+
+    @property
+    def catalog_item_ids(self) -> list[UUID]:
+        return [selection.catalog_item_id for selection in self.product_selections]
+
+
+class CampaignProductSelection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "campaign_product_selections"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["campaign_id", "business_id"],
+            ["marketing_campaigns.id", "marketing_campaigns.business_id"],
+            name="fk_campaign_product_selections_campaign_business",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["catalog_item_id", "business_id"],
+            ["catalog_items.id", "catalog_items.business_id"],
+            name="fk_campaign_product_selections_item_business",
+        ),
+        CheckConstraint("selection_reason IS NULL OR char_length(selection_reason) <= 500", name="valid_selection_reason"),
+        UniqueConstraint("business_id", "campaign_id", "catalog_item_id", name="uq_campaign_product_selections_campaign_item"),
+        Index("ix_campaign_product_selections_business_item", "business_id", "catalog_item_id", "campaign_id"),
+    )
+
+    business_id: Mapped[UUID] = mapped_column(ForeignKey("businesses.id", ondelete="CASCADE"), nullable=False)
+    campaign_id: Mapped[UUID] = mapped_column(nullable=False)
+    catalog_item_id: Mapped[UUID] = mapped_column(nullable=False)
+    selection_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    campaign: Mapped[Campaign] = relationship(back_populates="product_selections")
+
+
+class ExternalCampaignDeployment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "external_campaign_deployments"
+    __table_args__ = (
+        ForeignKeyConstraint(["campaign_id", "business_id"], ["marketing_campaigns.id", "marketing_campaigns.business_id"], name="fk_external_campaign_deployments_campaign_business", ondelete="CASCADE"),
+        ForeignKeyConstraint(["integration_connection_id", "business_id"], ["integration_connections.id", "integration_connections.business_id"], name="fk_external_campaign_deployments_connection_business"),
+        CheckConstraint("provider IN ('google','meta')", name="valid_provider"),
+        CheckConstraint("status IN ('executing','provider_pending','active','paused','completed','failed','attention_required','unknown_external_state')", name="valid_status"),
+        CheckConstraint("jsonb_typeof(child_references) = 'object' AND pg_column_size(child_references) <= 16384", name="valid_child_references"),
+        UniqueConstraint("id", "business_id", name="uq_external_campaign_deployments_id_business"),
+        UniqueConstraint("business_id", "campaign_id", "provider", name="uq_external_campaign_deployments_campaign_provider"),
+        UniqueConstraint("integration_connection_id", "external_campaign_reference", name="uq_external_campaign_deployments_connection_external"),
+        Index("ix_external_campaign_deployments_business_status", "business_id", "status", "provider", "id"),
+    )
+
+    business_id: Mapped[UUID] = mapped_column(ForeignKey("businesses.id", ondelete="CASCADE"), nullable=False)
+    campaign_id: Mapped[UUID] = mapped_column(nullable=False)
+    integration_connection_id: Mapped[UUID] = mapped_column(nullable=False)
+    provider: Mapped[str] = mapped_column(String(16), nullable=False)
+    external_campaign_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    child_references: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="executing", server_default="executing")
+    safe_payload_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ProductCampaignPerformance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "product_campaign_performance"
+    __table_args__ = (
+        ForeignKeyConstraint(["campaign_id", "business_id"], ["marketing_campaigns.id", "marketing_campaigns.business_id"], name="fk_product_campaign_performance_campaign_business", ondelete="CASCADE"),
+        ForeignKeyConstraint(["catalog_item_id", "business_id"], ["catalog_items.id", "catalog_items.business_id"], name="fk_product_campaign_performance_item_business", ondelete="CASCADE"),
+        CheckConstraint("provider IN ('google','meta')", name="valid_provider"),
+        CheckConstraint("attribution_class IN ('provider_attributed','first_party_observed','ai_business_os_derived','unknown')", name="valid_attribution_class"),
+        CheckConstraint("spend >= 0 AND impressions >= 0 AND clicks >= 0 AND conversions >= 0 AND conversion_value >= 0", name="valid_metrics"),
+        CheckConstraint("period_end >= period_start", name="valid_period"),
+        UniqueConstraint("business_id", "campaign_id", "catalog_item_id", "provider", "period_start", "period_end", "attribution_class", name="uq_product_campaign_performance_slice"),
+        Index("ix_product_campaign_performance_business_campaign", "business_id", "campaign_id", "period_start", "id"),
+    )
+
+    business_id: Mapped[UUID] = mapped_column(ForeignKey("businesses.id", ondelete="CASCADE"), nullable=False)
+    campaign_id: Mapped[UUID] = mapped_column(nullable=False)
+    catalog_item_id: Mapped[UUID] = mapped_column(nullable=False)
+    product_group_id: Mapped[UUID | None] = mapped_column(ForeignKey("commerce_product_groups.id", ondelete="SET NULL"), nullable=True)
+    provider: Mapped[str] = mapped_column(String(16), nullable=False)
+    external_campaign_reference: Mapped[str] = mapped_column(String(255), nullable=False)
+    external_product_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    period_start: Mapped[date] = mapped_column(Date, nullable=False)
+    period_end: Mapped[date] = mapped_column(Date, nullable=False)
+    spend: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=Decimal("0"), server_default="0")
+    impressions: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    clicks: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    conversions: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False, default=Decimal("0"), server_default="0")
+    conversion_value: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=Decimal("0"), server_default="0")
+    attribution_class: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
 class CampaignChannelPlan(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -422,6 +519,7 @@ class MarketingPerformance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint(f"channel IN {CHANNEL_SQL}", name="valid_channel"),
         CheckConstraint("period_end >= period_start", name="valid_period"),
         CheckConstraint("data_source IN ('manual','import','future_connector')", name="valid_data_source"),
+        CheckConstraint("attribution_class IN ('provider_attributed','first_party_observed','ai_business_os_derived','unknown')", name="valid_attribution_class"),
         CheckConstraint("spend >= 0 AND revenue >= 0", name="valid_money"),
         CheckConstraint("impressions >= 0 AND reach >= 0 AND clicks >= 0 AND leads >= 0 AND conversions >= 0", name="valid_counts"),
         CheckConstraint("ctr >= 0 AND cpc >= 0 AND cpm >= 0 AND cpl >= 0 AND cpa >= 0 AND roas >= 0", name="valid_derived_metrics"),
@@ -437,6 +535,8 @@ class MarketingPerformance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     period_start: Mapped[date] = mapped_column(Date, nullable=False)
     period_end: Mapped[date] = mapped_column(Date, nullable=False)
     data_source: Mapped[str] = mapped_column(String(24), nullable=False)
+    attribution_class: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown", server_default="unknown")
+    external_campaign_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
     spend: Mapped[Decimal] = mapped_column(Numeric(16, 4), nullable=False, default=Decimal("0"), server_default="0")
     impressions: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     reach: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")

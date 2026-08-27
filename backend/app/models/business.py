@@ -21,6 +21,10 @@ class Business(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "status IN ('active', 'inactive', 'suspended')",
             name="valid_status",
         ),
+        CheckConstraint(
+            "jsonb_typeof(avoid_keywords) = 'array' AND jsonb_array_length(avoid_keywords) <= 100",
+            name="valid_avoid_keywords",
+        ),
     )
 
     name: Mapped[str] = mapped_column(

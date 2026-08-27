@@ -14,7 +14,7 @@ class ConnectorActionResult(BaseModel):
     succeeded: bool
     external_reference_id: str | None = Field(
         default=None, min_length=1, max_length=255,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$",
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/+=-]{0,254}$",
     )
     failure_code: str | None = Field(
         default=None, pattern=r"^[a-z][a-z0-9_]{0,63}$"

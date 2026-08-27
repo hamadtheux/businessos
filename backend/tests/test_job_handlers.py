@@ -33,9 +33,13 @@ class JobHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(JOB_HANDLERS), {
             "process_automation_event", "resume_workflow_run", "process_scheduled_workflow",
             "process_integration_event", "reconcile_uncertain_attempt", "mark_social_schedule_ready",
+            "customer_agent_response",
             "dispatch_action_execution",
             "maintain_subscription",
             "discover_competitors", "generate_content_plan", "analyze_campaign_opportunities",
+            "commerce_initial_sync", "commerce_incremental_sync", "commerce_webhook_reconcile",
+            "google_merchant_status_sync", "meta_catalog_status_sync",
+            "google_ads_performance_sync", "meta_ads_performance_sync",
         })
         with self.assertRaises(TypeError):
             JOB_HANDLERS["dynamic"] = AsyncMock()  # type: ignore[index]

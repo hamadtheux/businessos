@@ -257,7 +257,214 @@ class IntegrationWebhookServiceTests(unittest.IsolatedAsyncioTestCase):
                 payload={}, verifier=_Verifier(False), adapters=ConnectorAdapterRegistry({"gmail": adapter}),
             )
 
-    async def test_verified_inbound_message_records_conversation_and_message_without_ai(self) -> None:
+    async def test_verified_whatsapp_status_webhook_fans_out_and_replay_is_idempotent(
+        self,
+    ) -> None:
+        from app.integrations.oauth_adapters import (
+            _normalize_whatsapp_status_events,
+        )
+
+        connection = _connection(connector_type="whatsapp_business")
+
+        wamid = "wamid.HBgMNTU1MjM0NTY3ODkwFQIAERgSQUJDREVGRw=="
+        payload = {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "id": "123456789",
+                    "changes": [
+                        {
+                            "field": "messages",
+                            "value": {
+                                "messaging_product": "whatsapp",
+                                "statuses": [
+                                    {
+                                        "id": wamid,
+                                        "status": "sent",
+                                        "timestamp": "1787486400",
+                                        "recipient_id": "923001234567",
+                                    },
+                                    {
+                                        "id": wamid,
+                                        "status": "delivered",
+                                        "timestamp": "1787486460",
+                                        "recipient_id": "923001234567",
+                                    },
+                                ],
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+        normalized = _normalize_whatsapp_status_events(payload)
+        self.assertEqual(len(normalized), 2)
+
+        first_event = IntegrationWebhookEvent(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            integration_connection_id=connection.id,
+            connector_type="whatsapp_business",
+            external_event_id=normalized[0].external_event_id,
+            event_type="message_status_updated",
+            status="received",
+            normalized_payload={
+                **dict(normalized[0].safe_payload),
+                "occurred_at": normalized[0].occurred_at.isoformat(),
+            },
+            received_at=NOW,
+            processed_at=None,
+            failure_code=None,
+            created_at=NOW,
+        )
+        second_event = IntegrationWebhookEvent(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            integration_connection_id=connection.id,
+            connector_type="whatsapp_business",
+            external_event_id=normalized[1].external_event_id,
+            event_type="message_status_updated",
+            status="received",
+            normalized_payload={
+                **dict(normalized[1].safe_payload),
+                "occurred_at": normalized[1].occurred_at.isoformat(),
+            },
+            received_at=NOW,
+            processed_at=None,
+            failure_code=None,
+            created_at=NOW,
+        )
+
+        class _WhatsAppStatusAdapter:
+            connector_type = "whatsapp_business"
+
+            async def normalize_webhooks(self, received_payload):
+                self.received_payload = received_payload
+                return _normalize_whatsapp_status_events(received_payload)
+
+        adapter = _WhatsAppStatusAdapter()
+        adapters = ConnectorAdapterRegistry(
+            {"whatsapp_business": adapter}  # type: ignore[arg-type]
+        )
+        verifier = _Verifier(True)
+
+        # First verified delivery-status request:
+        #
+        # connection
+        # → insert status 1
+        # → reload status 1
+        # → insert status 2
+        # → reload status 2
+        first_session = _Session(
+            [
+                connection,
+                first_event.id,
+                first_event,
+                second_event.id,
+                second_event,
+            ]
+        )
+
+        with patch(
+            "app.services.integrations.enqueue_job",
+            new=AsyncMock(),
+        ) as enqueue:
+            returned = await service.ingest_webhook(
+                first_session,  # type: ignore[arg-type]
+                connector_type="whatsapp_business",
+                connection_id=connection.id,
+                body=b'{"verified":"meta-status-batch"}',
+                headers={},
+                payload=payload,
+                verifier=verifier,
+                adapters=adapters,
+            )
+
+            self.assertIs(returned, first_event)
+            self.assertEqual(enqueue.await_count, 2)
+
+            queued = enqueue.await_args_list
+
+            self.assertEqual(
+                queued[0].kwargs["job_type"],
+                "process_integration_event",
+            )
+            self.assertEqual(
+                queued[0].kwargs["integration_event_id"],
+                first_event.id,
+            )
+            self.assertEqual(
+                queued[0].kwargs["idempotency_key"],
+                f"integration-event:{first_event.id}",
+            )
+
+            self.assertEqual(
+                queued[1].kwargs["job_type"],
+                "process_integration_event",
+            )
+            self.assertEqual(
+                queued[1].kwargs["integration_event_id"],
+                second_event.id,
+            )
+            self.assertEqual(
+                queued[1].kwargs["idempotency_key"],
+                f"integration-event:{second_event.id}",
+            )
+
+            # Replaying the exact same signed provider evidence resolves both
+            # existing durable events and must not enqueue either event again.
+            replay_session = _Session(
+                [
+                    connection,
+                    None,
+                    first_event,
+                    None,
+                    second_event,
+                ]
+            )
+
+            replayed = await service.ingest_webhook(
+                replay_session,  # type: ignore[arg-type]
+                connector_type="whatsapp_business",
+                connection_id=connection.id,
+                body=b'{"verified":"meta-status-batch"}',
+                headers={},
+                payload=payload,
+                verifier=verifier,
+                adapters=adapters,
+            )
+
+            self.assertIs(replayed, first_event)
+
+            # Still exactly the two jobs from the original request.
+            self.assertEqual(enqueue.await_count, 2)
+
+        self.assertEqual(
+            first_event.normalized_payload["external_message_reference"],
+            wamid,
+        )
+        self.assertEqual(
+            second_event.normalized_payload["external_message_reference"],
+            wamid,
+        )
+        self.assertTrue(wamid.endswith("=="))
+
+        self.assertEqual(
+            first_event.normalized_payload["delivery_status"],
+            "sent",
+        )
+        self.assertEqual(
+            second_event.normalized_payload["delivery_status"],
+            "delivered",
+        )
+        self.assertNotEqual(
+            first_event.external_event_id,
+            second_event.external_event_id,
+        )
+
+
+    async def test_verified_inbound_message_records_message_and_durable_agent_job(self) -> None:
         connection = _connection(connector_type="whatsapp_business")
         event = IntegrationWebhookEvent(
             id=uuid4(), business_id=BUSINESS_ID, integration_connection_id=connection.id,
@@ -270,7 +477,9 @@ class IntegrationWebhookServiceTests(unittest.IsolatedAsyncioTestCase):
             }, received_at=NOW, processed_at=None, failure_code=None, created_at=NOW,
         )
         session = _Session([None])
-        with patch("app.services.integrations._match_customer", new=AsyncMock(return_value=None)):
+        with patch("app.services.integrations._match_customer", new=AsyncMock(return_value=None)), patch(
+            "app.services.integrations.enqueue_job", new=AsyncMock(),
+        ) as enqueue:
             await service._record_inbound_message(session, connection, event, NOW)  # type: ignore[arg-type]
         conversation = next(item for item in session.added if isinstance(item, Conversation))
         message = next(item for item in session.added if isinstance(item, ConversationMessage))
@@ -278,6 +487,8 @@ class IntegrationWebhookServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conversation.channel, "whatsapp")
         self.assertEqual(message.direction, "inbound")
         self.assertEqual(message.sender_type, "customer")
+        enqueue.assert_awaited_once()
+        self.assertEqual(enqueue.await_args.kwargs["job_type"], "customer_agent_response")
         self.assertFalse(any(item.__class__.__name__ in {"AIAction", "AIAgentExecution"} for item in session.added))
 
     async def test_replayed_inbound_message_does_not_duplicate_canonical_message(self) -> None:
@@ -330,12 +541,13 @@ class IntegrationWebhookServiceTests(unittest.IsolatedAsyncioTestCase):
             identity_matches=[],
         )
 
-        await service._record_inbound_message(
-            session,  # type: ignore[arg-type]
-            connection,
-            event,
-            NOW,
-        )
+        with patch("app.services.integrations.enqueue_job", new=AsyncMock()):
+            await service._record_inbound_message(
+                session,  # type: ignore[arg-type]
+                connection,
+                event,
+                NOW,
+            )
 
         customer = next(
             item for item in session.added
@@ -385,12 +597,13 @@ class IntegrationWebhookServiceTests(unittest.IsolatedAsyncioTestCase):
             identity_matches=[],
         )
 
-        await service._record_inbound_message(
-            session,  # type: ignore[arg-type]
-            connection,
-            event,
-            NOW,
-        )
+        with patch("app.services.integrations.enqueue_job", new=AsyncMock()):
+            await service._record_inbound_message(
+                session,  # type: ignore[arg-type]
+                connection,
+                event,
+                NOW,
+            )
 
         customer = next(
             item for item in session.added
@@ -434,12 +647,13 @@ class IntegrationWebhookServiceTests(unittest.IsolatedAsyncioTestCase):
             identity_matches=[],
         )
 
-        await service._record_inbound_message(
-            session,  # type: ignore[arg-type]
-            connection,
-            event,
-            NOW,
-        )
+        with patch("app.services.integrations.enqueue_job", new=AsyncMock()):
+            await service._record_inbound_message(
+                session,  # type: ignore[arg-type]
+                connection,
+                event,
+                NOW,
+            )
 
         conversation = next(
             item for item in session.added
@@ -490,12 +704,13 @@ class IntegrationWebhookServiceTests(unittest.IsolatedAsyncioTestCase):
             identity_matches=[email_customer, phone_customer],
         )
 
-        await service._record_inbound_message(
-            session,  # type: ignore[arg-type]
-            connection,
-            event,
-            NOW,
-        )
+        with patch("app.services.integrations.enqueue_job", new=AsyncMock()):
+            await service._record_inbound_message(
+                session,  # type: ignore[arg-type]
+                connection,
+                event,
+                NOW,
+            )
 
         conversation = next(
             item for item in session.added
@@ -512,16 +727,25 @@ class IntegrationWebhookServiceTests(unittest.IsolatedAsyncioTestCase):
         event = IntegrationWebhookEvent(
             id=uuid4(), business_id=BUSINESS_ID, integration_connection_id=connection.id,
             connector_type="gmail", external_event_id="email-event", event_type="email_received",
-            status="received", normalized_payload={"occurred_at": NOW.isoformat()},
+            status="received", normalized_payload={
+                "occurred_at": NOW.isoformat(),
+                "external_conversation_reference": "gmail-thread-worker",
+                "external_message_reference": "gmail-message-worker",
+                "sender_email": "customer@example.test",
+                "content": "Can you help with my order?",
+            },
             received_at=NOW, processed_at=None, failure_code=None, created_at=NOW,
         )
         session = _Session([event, connection])
-        with patch("app.services.integrations.record_automation_event") as record_event:
+        with patch("app.services.integrations.record_automation_event") as record_event, patch(
+            "app.services.integrations._record_inbound_message", new=AsyncMock(),
+        ) as record_message:
             result = await service.process_integration_webhook_event(
                 session, business_id=BUSINESS_ID, event_id=event.id,  # type: ignore[arg-type]
             )
         self.assertEqual(result.status, "processed")
         self.assertIsNotNone(result.processed_at)
+        record_message.assert_awaited_once_with(session, connection, event, NOW)
         record_event.assert_called_once()
         self.assertEqual(record_event.call_args.kwargs["business_id"], BUSINESS_ID)
 

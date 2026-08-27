@@ -10,6 +10,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Numeric,
     String,
@@ -51,6 +52,11 @@ class AIAgentExecution(
     __tablename__ = "ai_agent_executions"
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["opportunity_id", "business_id"],
+            ["opportunities.id", "opportunities.business_id"],
+            name="fk_ai_agent_executions_opportunity_business",
+        ),
         UniqueConstraint(
             "id", "business_id", name="uq_ai_agent_executions_id_business"
         ),
@@ -210,6 +216,13 @@ class AIAgentExecution(
             "command_id",
             "delegation_sequence",
         ),
+        Index(
+            "ix_ai_agent_executions_business_opportunity_created",
+            "business_id",
+            "opportunity_id",
+            "created_at",
+            "id",
+        ),
     )
 
     business_id: Mapped[UUID] = mapped_column(
@@ -230,6 +243,10 @@ class AIAgentExecution(
 
     command_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("ai_commands.id", ondelete="SET NULL"), nullable=True
+    )
+
+    opportunity_id: Mapped[UUID | None] = mapped_column(
+        nullable=True,
     )
 
     parent_execution_id: Mapped[UUID | None] = mapped_column(

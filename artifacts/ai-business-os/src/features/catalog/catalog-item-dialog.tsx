@@ -14,12 +14,14 @@ import type { CatalogItem, CatalogItemType } from "@/services/api-types";
 export function CatalogItemDialog({
   businessId,
   businessName,
+  currency,
   item,
   onClose,
   onSaved,
 }: {
   businessId: string;
   businessName: string;
+  currency: string;
   item?: CatalogItem;
   onClose: () => void;
   onSaved: (item: CatalogItem) => void;
@@ -156,6 +158,25 @@ export function CatalogItemDialog({
               data-testid="textarea-catalog-item-description"
             />
           </div>
+          {draft.itemType === "product" && <details className="field full">
+            <summary><strong>Commerce details</strong> · inventory, feed quality, and product grounding</summary>
+            <div className="form-grid section-gap">
+              <div className="field"><label>Currency</label><input value={draft.currency} onChange={(event) => update("currency", event.target.value.toUpperCase())} maxLength={3} placeholder={currency} /></div>
+              <div className="field"><label>Compare-at price</label><input inputMode="decimal" value={draft.compareAtPrice} onChange={(event) => update("compareAtPrice", event.target.value)} placeholder="Optional" /></div>
+              <div className="field"><label>Cost</label><input inputMode="decimal" value={draft.cost} onChange={(event) => update("cost", event.target.value)} placeholder="Private unit cost" /></div>
+              <div className="field"><label>Inventory quantity</label><input inputMode="numeric" value={draft.inventoryQuantity} onChange={(event) => update("inventoryQuantity", event.target.value)} placeholder="Optional" /></div>
+              <div className="field"><label>Availability</label><select value={draft.availability} onChange={(event) => update("availability", event.target.value as CatalogItemDraft["availability"])}><option value="unknown">Unknown</option><option value="in_stock">In stock</option><option value="out_of_stock">Out of stock</option><option value="preorder">Preorder</option><option value="backorder">Backorder</option></select></div>
+              <div className="field"><label>Condition</label><select value={draft.condition} onChange={(event) => update("condition", event.target.value as CatalogItemDraft["condition"])}><option value="new">New</option><option value="refurbished">Refurbished</option><option value="used">Used</option></select></div>
+              <div className="field full"><label>Product URL</label><input type="url" value={draft.productUrl} onChange={(event) => update("productUrl", event.target.value)} maxLength={2048} placeholder="https://store.example.com/products/item" /></div>
+              <div className="field"><label>Brand</label><input value={draft.brand} onChange={(event) => update("brand", event.target.value)} maxLength={160} /></div>
+              <div className="field"><label>Vendor</label><input value={draft.vendor} onChange={(event) => update("vendor", event.target.value)} maxLength={160} /></div>
+              <div className="field"><label>GTIN</label><input value={draft.gtin} onChange={(event) => update("gtin", event.target.value)} maxLength={32} /></div>
+              <div className="field"><label>MPN</label><input value={draft.mpn} onChange={(event) => update("mpn", event.target.value)} maxLength={100} /></div>
+              <div className="field full"><label>Google product category</label><input value={draft.googleProductCategory} onChange={(event) => update("googleProductCategory", event.target.value)} maxLength={255} /></div>
+              <div className="field full"><label>Tags</label><input value={draft.tags} onChange={(event) => update("tags", event.target.value)} placeholder="premium, seasonal, local" /></div>
+              <label className="checkbox-row full"><input type="checkbox" checked={draft.published} onChange={(event) => update("published", event.target.checked)} /> Available to customer-facing catalog experiences</label>
+            </div>
+          </details>}
         </div>
         {error && (
           <div className="catalog-inline-error" role="alert">

@@ -618,7 +618,7 @@ export function humanizeApiError(
         ? detail.message.trim()
         : "";
       const actionableErrors: Record<string, string> = {
-        provider_not_configured: "Platform configuration required.",
+        provider_not_configured: "The AI provider is not configured. Ask a platform administrator to connect it.",
         connection_required: "Connect the required provider account to continue.",
         authorization_expired: "The provider authorization expired. Reconnect the account.",
         permission_missing: "Your business role does not permit this action.",
@@ -627,13 +627,19 @@ export function humanizeApiError(
         spend_limit_exceeded: "This action exceeds the authorized advertising spend limit.",
         rate_limited: "Too many requests. Wait a moment and try again.",
         provider_unavailable: "The external provider is temporarily degraded. Your internal data remains available.",
+        temporarily_unavailable: "The service is temporarily unavailable. Please try again.",
         temporary_failure: "The service could not complete the request. Please try again.",
         external_outcome_uncertain: "The provider outcome is uncertain. This action will not be retried automatically.",
         feature_not_entitled: "Your current plan does not include this feature.",
         validation_error: "Check the supplied details and try again.",
       };
+      const entitlementLabels: Record<string, string> = {
+        marketing_cmo: "AI CMO",
+        campaigns: "Campaigns",
+        advanced_analytics: "Advanced Analytics",
+      };
       const label = typeof detail.entitlement_key === "string"
-        ? detail.entitlement_key.replace(/^max_/, "").replace(/_month$/, "").replaceAll("_", " ")
+        ? entitlementLabels[detail.entitlement_key] || detail.entitlement_key.replace(/^max_/, "").replace(/_month$/, "").replaceAll("_", " ")
         : "plan access";
       if (
         detail.code === "usage_limit_reached" &&

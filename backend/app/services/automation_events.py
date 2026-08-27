@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -18,7 +18,7 @@ SAFE_EVENT_FIELDS = frozenset({
     "channel", "category", "objective", "total", "estimated_value", "tags",
     "provider_id", "appointment_type_id", "starts_at", "scheduled_for", "name",
     "connector_type", "health",
-    "reason",
+    "reason", "delivery_status",
 })
 
 
@@ -37,6 +37,7 @@ def record_automation_event(
         raise AutomationValidationError("event_invalid")
     safe_payload = _safe_payload(payload or {})
     event = AutomationEvent(
+        id=uuid4(),
         business_id=business_id,
         event_type=event_type,
         entity_type=entity_type,

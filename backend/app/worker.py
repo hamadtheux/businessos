@@ -65,6 +65,7 @@ async def process_claimed_job(job: BackgroundJob, *, worker_id: str) -> None:
                     worker_id=worker_id,
                     failure_code=outcome.failure_code or "invalid_job_state",
                     retryable=outcome.retryable,
+                    retry_after_seconds=outcome.retry_after_seconds,
                 )
             await session.commit()
     except Exception:

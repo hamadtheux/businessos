@@ -19,6 +19,9 @@ from app.exceptions.automation import (
     AutomationValidationError,
 )
 from app.schemas.automation import (
+    AutomationCopilotCompileRequest,
+    AutomationCopilotRefineRequest,
+    AutomationCopilotResponse,
     AutomationAnalyticsResponse,
     AutomationEventPageResponse,
     EdgeCreate,
@@ -67,10 +70,32 @@ from app.services.automation import (
     workflow_detail,
 )
 from app.services.automation_events import list_automation_events
+from app.services.automation_copilot import compile_workflow, refine_workflow
 
 
 router = APIRouter(prefix="/businesses/{business_id}/automations", tags=["Automations"])
 SessionDependency = Annotated[AsyncSession, Depends(get_db_session)]
+
+
+@router.post("/copilot/compile", response_model=AutomationCopilotResponse, status_code=status.HTTP_201_CREATED)
+async def compile_copilot_workflow(
+    data: AutomationCopilotCompileRequest, access: BusinessAccessDependency,
+    response: Response, session: SessionDependency,
+):
+    return await _write(session, response, lambda: compile_workflow(
+        session, business_id=access.business.id, actor_user_id=access.user.id, data=data,
+    ))
+
+
+@router.post("/copilot/{workflow_id}/refine", response_model=AutomationCopilotResponse)
+async def refine_copilot_workflow(
+    workflow_id: UUID, data: AutomationCopilotRefineRequest,
+    access: BusinessAccessDependency, response: Response, session: SessionDependency,
+):
+    return await _write(session, response, lambda: refine_workflow(
+        session, business_id=access.business.id, workflow_id=workflow_id,
+        actor_user_id=access.user.id, data=data,
+    ))
 
 
 @router.get("/workflows", response_model=WorkflowPageResponse)

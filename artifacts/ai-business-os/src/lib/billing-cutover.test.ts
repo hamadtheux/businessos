@@ -167,6 +167,14 @@ test("structured backend entitlement errors become upgrade guidance", () => {
       entitlement_key: "advanced_analytics",
       upgrade_required: true,
     } }), "fallback"),
-    "Your current plan doesn't include advanced analytics. Review Billing to compare plans.",
+    "Your current plan doesn't include Advanced Analytics. Review Billing to compare plans.",
+  );
+  assert.equal(
+    humanizeApiError(new ApiError(403, { detail: {
+      code: "feature_not_in_plan",
+      entitlement_key: "marketing_cmo",
+      upgrade_required: true,
+    } }), "AI content generation could not be completed."),
+    "Your current plan doesn't include AI CMO. Review Billing to compare plans.",
   );
 });

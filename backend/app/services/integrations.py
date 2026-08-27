@@ -5,7 +5,7 @@ import hashlib
 import json
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Mapping, Sequence
+from typing import Mapping
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
@@ -42,7 +42,6 @@ from app.integrations.credentials import IntegrationCredentialStore, credential_
 from app.integrations.registry import ConnectorDefinition, list_connector_definitions, require_connector
 from app.integrations.webhooks import WebhookSignatureVerifier
 from app.models.appointment import Appointment
-from app.models.business_membership import BusinessMembership
 from app.services.billing import require_capacity, require_feature
 from app.models.conversation import Conversation, ConversationMessage
 from app.models.integration import (
@@ -759,58 +758,94 @@ async def ingest_webhook(
         raise IntegrationPersistenceError("webhook_unavailable") from None
     if connection is None:
         raise IntegrationNotFoundError("connection_not_found")
+    adapter = adapters.get(connector_type)
     try:
-        normalized = await adapters.get(connector_type).normalize_webhook(payload)
+        normalize_many = getattr(adapter, "normalize_webhooks", None)
+        if callable(normalize_many):
+            normalized_events = tuple(await normalize_many(payload))
+        else:
+            normalized_events = (await adapter.normalize_webhook(payload),)
     except IntegrationProviderUnavailableError:
         raise
     except Exception:
         raise IntegrationProviderUnavailableError("provider_response_invalid") from None
-    external_event_id = _validate_normalized_event(normalized, connector_type)
-    safe_payload = _safe_webhook_payload(normalized)
-    safe_payload["occurred_at"] = normalized.occurred_at.astimezone(UTC).isoformat()
-    event_id = uuid4()
+
+    # A verified provider request must produce at least one canonical event.
+    # Bound the fan-out and fail closed rather than silently dropping provider
+    # evidence from an unexpectedly large webhook.
+    if not normalized_events or len(normalized_events) > 100:
+        raise IntegrationProviderUnavailableError("provider_response_invalid")
+
+    persisted_events: list[IntegrationWebhookEvent] = []
+
     try:
-        inserted_id = await session.scalar(
-            pg_insert(IntegrationWebhookEvent)
-            .values(
-                id=event_id,
-                business_id=connection.business_id,
-                integration_connection_id=connection.id,
-                connector_type=connector_type,
-                external_event_id=external_event_id,
-                event_type=normalized.event_type,
-                status="received",
-                normalized_payload=safe_payload,
-                received_at=datetime.now(UTC),
-                created_at=datetime.now(UTC),
+        for normalized in normalized_events:
+            external_event_id = _validate_normalized_event(
+                normalized, connector_type
             )
-            .on_conflict_do_nothing(
-                constraint="uq_integration_webhook_events_connection_external"
+            safe_payload = _safe_webhook_payload(normalized)
+            safe_payload["occurred_at"] = (
+                normalized.occurred_at.astimezone(UTC).isoformat()
             )
-            .returning(IntegrationWebhookEvent.id)
-        )
-        if inserted_id is None:
-            existing = await session.scalar(select(IntegrationWebhookEvent).where(
-                IntegrationWebhookEvent.integration_connection_id == connection.id,
-                IntegrationWebhookEvent.external_event_id == external_event_id,
-            ))
-            if existing is None:
-                raise IntegrationPersistenceError("webhook_unavailable")
-            return existing
-        event = await session.scalar(select(IntegrationWebhookEvent).where(
-            IntegrationWebhookEvent.id == inserted_id
-        ).with_for_update())
-        if event is None:
-            raise IntegrationPersistenceError("webhook_unavailable")
-        await enqueue_job(
-            session,
-            business_id=connection.business_id,
-            job_type="process_integration_event",
-            idempotency_key=f"integration-event:{event.id}",
-            integration_event_id=event.id,
-        )
+
+            event_id = uuid4()
+            inserted_id = await session.scalar(
+                pg_insert(IntegrationWebhookEvent)
+                .values(
+                    id=event_id,
+                    business_id=connection.business_id,
+                    integration_connection_id=connection.id,
+                    connector_type=connector_type,
+                    external_event_id=external_event_id,
+                    event_type=normalized.event_type,
+                    status="received",
+                    normalized_payload=safe_payload,
+                    received_at=datetime.now(UTC),
+                    created_at=datetime.now(UTC),
+                )
+                .on_conflict_do_nothing(
+                    constraint="uq_integration_webhook_events_connection_external"
+                )
+                .returning(IntegrationWebhookEvent.id)
+            )
+
+            if inserted_id is None:
+                event = await session.scalar(
+                    select(IntegrationWebhookEvent).where(
+                        IntegrationWebhookEvent.integration_connection_id
+                        == connection.id,
+                        IntegrationWebhookEvent.external_event_id
+                        == external_event_id,
+                    )
+                )
+                if event is None:
+                    raise IntegrationPersistenceError("webhook_unavailable")
+            else:
+                event = await session.scalar(
+                    select(IntegrationWebhookEvent)
+                    .where(IntegrationWebhookEvent.id == inserted_id)
+                    .with_for_update()
+                )
+                if event is None:
+                    raise IntegrationPersistenceError("webhook_unavailable")
+
+                await enqueue_job(
+                    session,
+                    business_id=connection.business_id,
+                    job_type="process_integration_event",
+                    idempotency_key=f"integration-event:{event.id}",
+                    integration_event_id=event.id,
+                )
+
+            persisted_events.append(event)
+
         await session.flush()
-        return event
+
+        # Preserve the established singular service/API contract. All
+        # normalized events above are durable and queued; the first canonical
+        # event is simply the representative return value for this HTTP call.
+        return persisted_events[0]
+
     except IntegrationPersistenceError:
         raise
     except SQLAlchemyError:
@@ -840,6 +875,11 @@ async def process_integration_webhook_event(
     ))
     if connection is None:
         raise IntegrationNotFoundError("connection_not_found")
+    if (
+        connection.business_id != business_id
+        or connection.id != event.integration_connection_id
+    ):
+        raise IntegrationNotFoundError("connection_not_found")
     occurred_at_value = event.normalized_payload.get("occurred_at")
     try:
         occurred_at = (
@@ -848,8 +888,10 @@ async def process_integration_webhook_event(
         )
     except (TypeError, ValueError):
         raise IntegrationValidationError("event_payload_invalid") from None
-    if event.event_type == "message_received":
+    if event.event_type in {"message_received", "email_received"}:
         await _record_inbound_message(session, connection, event, occurred_at)
+    elif event.event_type == "message_status_updated":
+        await _reconcile_message_delivery(session, connection, event)
     event.status = "processed"
     event.processed_at = datetime.now(UTC)
     event.failure_code = None
@@ -945,12 +987,26 @@ async def ingest_ad_performance(
         conversions=normalized.conversions,
         revenue=normalized.revenue,
     )
-    value = MarketingPerformance(
-        business_id=business_id,
-        **(data.model_dump() | {"data_source": "future_connector"}),
-        **derive_metrics(data),
-    )
-    session.add(value)
+    value = await session.scalar(select(MarketingPerformance).where(
+        MarketingPerformance.business_id == business_id,
+        MarketingPerformance.campaign_id == campaign_id,
+        MarketingPerformance.channel == channel,
+        MarketingPerformance.period_start == normalized.period_start,
+        MarketingPerformance.period_end == normalized.period_end,
+        MarketingPerformance.data_source == "future_connector",
+        MarketingPerformance.external_campaign_reference == normalized.external_campaign_reference,
+    ).with_for_update())
+    values = data.model_dump() | {
+        "data_source": "future_connector",
+        "attribution_class": "provider_attributed",
+        "external_campaign_reference": normalized.external_campaign_reference,
+    } | derive_metrics(data)
+    if value is None:
+        value = MarketingPerformance(business_id=business_id, **values)
+        session.add(value)
+    else:
+        for key, item in values.items():
+            setattr(value, key, item)
     try:
         await session.flush()
     except SQLAlchemyError:
@@ -1016,6 +1072,7 @@ async def _record_inbound_message(
         conversation = Conversation(
             business_id=connection.business_id,
             customer_id=customer_id,
+            integration_connection_id=connection.id,
             channel=channel,
             external_reference=conversation_reference,
             status="open",
@@ -1024,6 +1081,9 @@ async def _record_inbound_message(
         session.add(conversation)
         await session.flush()
     else:
+        if conversation.integration_connection_id not in {None, connection.id}:
+            raise IntegrationValidationError("conversation_connection_conflict")
+        conversation.integration_connection_id = connection.id
         if conversation.customer_id is None and customer_id is not None:
             conversation.customer_id = customer_id
         conversation.last_activity_at = max(conversation.last_activity_at, occurred_at)
@@ -1048,7 +1108,7 @@ async def _record_inbound_message(
     )
     session.add(message)
     await session.flush()
-    record_automation_event(
+    inbound_event = record_automation_event(
         session,
         business_id=connection.business_id,
         event_type="inbound_message_recorded",
@@ -1057,6 +1117,20 @@ async def _record_inbound_message(
         payload={"channel": channel, "status": conversation.status},
         occurred_at=occurred_at,
     )
+
+    # Persist the outbox event before enqueue_job validates its tenant-scoped
+    # reference. The job and inbound message still commit atomically with the
+    # surrounding integration-event transaction.
+    await session.flush()
+
+    await enqueue_job(
+        session,
+        business_id=connection.business_id,
+        job_type="customer_agent_response",
+        idempotency_key=f"customer-agent-response:{message.id}",
+        automation_event_id=inbound_event.id,
+    )
+
     record_audit(
         session,
         business_id=connection.business_id,
@@ -1065,6 +1139,61 @@ async def _record_inbound_message(
         entity_type="conversation_message",
         entity_id=message.id,
         summary=f"Recorded an inbound {channel} message from a verified connector event.",
+    )
+
+
+async def _reconcile_message_delivery(
+    session: AsyncSession,
+    connection: IntegrationConnection,
+    event: IntegrationWebhookEvent,
+) -> None:
+    payload = event.normalized_payload
+    external_reference = str(payload.get("external_message_reference") or "").strip()
+    raw_status = str(payload.get("delivery_status") or "").strip().casefold()
+    normalized = {
+        "accepted": "submitted",
+        "submitted": "submitted",
+        "sent": "sent",
+        "delivered": "delivered",
+        "read": "read",
+        "failed": "failed",
+        "undeliverable": "failed",
+    }.get(raw_status)
+    if not external_reference or len(external_reference) > 255 or normalized is None:
+        raise IntegrationValidationError("message_status_payload_invalid")
+    message = await session.scalar(
+        select(ConversationMessage)
+        .join(
+            Conversation,
+            (Conversation.id == ConversationMessage.conversation_id)
+            & (Conversation.business_id == ConversationMessage.business_id),
+        )
+        .where(
+            ConversationMessage.business_id == connection.business_id,
+            ConversationMessage.direction == "outbound",
+            ConversationMessage.external_reference == external_reference,
+            Conversation.integration_connection_id == connection.id,
+        )
+        .with_for_update()
+    )
+    if message is None:
+        # Provider callbacks may race the transaction that records a
+        # provider-accepted outbound message. Preserve the verified event for
+        # bounded worker retry instead of terminally discarding its evidence.
+        raise IntegrationPersistenceError("outbound_message_not_available")
+    if message.business_id != connection.business_id or message.direction != "outbound":
+        raise IntegrationPersistenceError("outbound_message_scope_conflict")
+    rank = {"recorded": 0, "submitted": 1, "sent": 2, "delivered": 3, "read": 4}
+    if normalized == "failed" or rank.get(normalized, 0) > rank.get(message.delivery_status, -1):
+        message.delivery_status = normalized
+    record_audit(
+        session,
+        business_id=connection.business_id,
+        actor_user_id=None,
+        event_type="integration.message_delivery_updated",
+        entity_type="conversation_message",
+        entity_id=message.id,
+        summary=f"Reconciled outbound message delivery state to {message.delivery_status}.",
     )
 
 

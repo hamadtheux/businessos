@@ -31,7 +31,11 @@ def get_ai_agent_provider() -> OpenAIAgentProvider:
     except AIAgentProviderError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="AI service is temporarily unavailable.",
+            detail={
+                "code": "provider_not_configured",
+                "service": "ai_provider",
+                "message": "The AI provider is not configured. A platform administrator must connect it before generation can run.",
+            },
             headers=_PRIVATE_RESPONSE_HEADERS,
         ) from None
 

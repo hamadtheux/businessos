@@ -32,7 +32,8 @@ from app.models.automation import (
 from app.models.background_job import BackgroundJob, WorkerInstance
 from app.models.billing import BusinessSubscription
 from app.models.integration import IntegrationWebhookEvent
-from app.models.marketing import SocialSchedule
+from app.models.commerce import CommerceFeedDestination, CommerceSyncRun, CommerceWebhookReceipt
+from app.models.marketing import Campaign, SocialSchedule
 from app.models.notification import Notification
 from app.services.operations import record_audit
 
@@ -49,6 +50,10 @@ _REFERENCE_MODELS = {
     "subscription_id": BusinessSubscription,
     "competitor_discovery_run_id": CompetitorDiscoveryRun,
     "marketing_automation_run_id": MarketingAutomationRun,
+    "commerce_sync_run_id": CommerceSyncRun,
+    "commerce_webhook_receipt_id": CommerceWebhookReceipt,
+    "commerce_feed_destination_id": CommerceFeedDestination,
+    "marketing_campaign_id": Campaign,
 }
 
 
@@ -69,6 +74,10 @@ async def enqueue_job(
     subscription_id: UUID | None = None,
     competitor_discovery_run_id: UUID | None = None,
     marketing_automation_run_id: UUID | None = None,
+    commerce_sync_run_id: UUID | None = None,
+    commerce_webhook_receipt_id: UUID | None = None,
+    commerce_feed_destination_id: UUID | None = None,
+    marketing_campaign_id: UUID | None = None,
     scheduled_occurrence_at: datetime | None = None,
 ) -> BackgroundJob:
     """Enqueue one server-defined job without accepting arbitrary payloads."""
@@ -87,6 +96,10 @@ async def enqueue_job(
         "subscription_id": subscription_id,
         "competitor_discovery_run_id": competitor_discovery_run_id,
         "marketing_automation_run_id": marketing_automation_run_id,
+        "commerce_sync_run_id": commerce_sync_run_id,
+        "commerce_webhook_receipt_id": commerce_webhook_receipt_id,
+        "commerce_feed_destination_id": commerce_feed_destination_id,
+        "marketing_campaign_id": marketing_campaign_id,
     }
     if references[policy.reference_field] is None:
         raise BackgroundJobValidationError("job_reference_required")
@@ -240,16 +253,22 @@ async def record_job_failure(
     worker_id: str,
     failure_code: str,
     retryable: bool,
+    retry_after_seconds: int | None = None,
 ) -> BackgroundJob:
     if failure_code not in JOB_FAILURE_CODES:
         raise BackgroundJobValidationError("failure_code_invalid")
+    if retry_after_seconds is not None and not 1 <= retry_after_seconds <= 86_400:
+        raise BackgroundJobValidationError("retry_after_invalid")
     job = await _lock_job(session, job_id=job_id)
     _require_claim_owner(job, worker_id)
     policy = require_job_policy(job.job_type)
     now = datetime.now(UTC)
     if retryable and policy.retryable and job.attempt_count < job.max_attempts:
         job.status = "queued"
-        job.available_at = now + _retry_delay(job.id, job.attempt_count)
+        retry_delay = _retry_delay(job.id, job.attempt_count)
+        if retry_after_seconds is not None:
+            retry_delay = max(retry_delay, timedelta(seconds=retry_after_seconds))
+        job.available_at = now + retry_delay
         job.claimed_at = None
         job.lease_expires_at = None
         job.worker_id = None
@@ -592,6 +611,13 @@ async def _synchronize_linked_run(
             )
             .with_for_update()
         )
+    elif job.commerce_sync_run_id is not None:
+        run = await session.scalar(
+            select(CommerceSyncRun).where(
+                CommerceSyncRun.id == job.commerce_sync_run_id,
+                CommerceSyncRun.business_id == job.business_id,
+            ).with_for_update()
+        )
     else:
         return
     if run is None:
@@ -606,8 +632,22 @@ async def _synchronize_linked_run(
         if run.status == "failed":
             run.status = "queued"
             run.failure_code = None
-            run.started_at = None
+            if not isinstance(run, CommerceSyncRun):
+                run.started_at = None
             run.completed_at = None
+        return
+    if isinstance(run, CommerceSyncRun):
+        # A commerce sync is a chain of bounded page jobs. Completing one page
+        # job must never finalize (or fail) the parent run; the commerce sync
+        # service owns successful completion after the final domain/page.
+        if status == "completed":
+            return
+        if run.status in {"completed", "completed_with_issues", "configuration_required"}:
+            return
+        run.status = "failed"
+        run.started_at = run.started_at or instant
+        run.completed_at = instant
+        run.failure_code = failure_code
         return
     if run.status in terminal:
         return

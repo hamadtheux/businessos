@@ -29,7 +29,7 @@ export type PublicWidgetConfig = {
 };
 
 export type PublicSession = { session_token: string; expires_at: string; locale: string };
-export type ProductCard = { reference: string; item_type: "product" | "service"; name: string; description: string | null; price: string | null; currency: string };
+export type ProductCard = { reference: string; item_type: "product" | "service"; name: string; description: string | null; price: string | null; currency: string; availability: "unknown" | "in_stock" | "out_of_stock" | "preorder" | "backorder"; product_url: string | null };
 export type ChatResponse = { message: string; suggested_actions: PublicChatbotCapability[]; products: ProductCard[]; handoff_status: "none" | "requested"; lead_capture_requested: boolean };
 export type AvailabilitySlot = { slot_reference: string; appointment_type_reference: string; provider_reference: string; provider_display_name: string; starts_at: string; ends_at: string; timezone: string; location_reference: string | null };
 
@@ -51,7 +51,15 @@ export class PublicWidgetApi {
   }
 
   orderStatus(data: { order_reference: string; email: string | null; phone: string | null }) {
-    return this.request<{ order_reference: string; status: string }>("/order-status", data);
+    return this.request<{
+      order_reference: string;
+      status: string;
+      payment_status: string;
+      fulfillment_status: string;
+      refunded_amount: string;
+      refunds: Array<{ amount: string; currency: string; occurred_at: string }>;
+      fulfillments: Array<{ status: string; tracking_company: string | null; tracking_number: string | null; tracking_url: string | null; external_order_line_ids: string[] }>;
+    }>("/order-status", data);
   }
 
   availability(data: { appointment_type_reference: string; window_start: string; window_end: string; desired_results: number }) {

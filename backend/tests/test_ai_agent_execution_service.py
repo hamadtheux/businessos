@@ -49,6 +49,10 @@ USER_ID = UUID(
     "93000000-0000-0000-0000-000000000003"
 )
 
+OPPORTUNITY_ID = UUID(
+    "94000000-0000-0000-0000-000000000004"
+)
+
 CONTEXT_REVISION = "a" * 64
 
 
@@ -88,6 +92,15 @@ class CreateExecutionTests(
         self.assertEqual(
             execution.trigger_type,
             "api",
+        )
+
+        self.assertIsNone(
+            execution.opportunity_id,
+        )
+
+        self.assertEqual(
+            session.scalar_calls,
+            0,
         )
 
         self.assertEqual(
@@ -150,6 +163,116 @@ class CreateExecutionTests(
 
         self.assertEqual(
             session.commit_calls,
+            0,
+        )
+
+    async def test_create_accepts_same_tenant_opportunity(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            stored_opportunity_id=OPPORTUNITY_ID,
+            stored_opportunity_business_id=BUSINESS_A_ID,
+        )
+
+        execution = await create_running_ai_agent_execution(
+            session,
+            business_id=BUSINESS_A_ID,
+            requested_by_user_id=USER_ID,
+            role="sales",
+            task="Analyze this revenue opportunity.",
+            provider_name="openai",
+            model_name="gpt-5.6-terra",
+            trigger_type="system",
+            opportunity_id=OPPORTUNITY_ID,
+        )
+
+        self.assertEqual(
+            execution.opportunity_id,
+            OPPORTUNITY_ID,
+        )
+        self.assertEqual(
+            session.requested_opportunity_id,
+            OPPORTUNITY_ID,
+        )
+        self.assertEqual(
+            session.requested_opportunity_business_id,
+            BUSINESS_A_ID,
+        )
+        self.assertEqual(
+            session.scalar_calls,
+            1,
+        )
+        self.assertEqual(
+            session.flush_calls,
+            1,
+        )
+
+    async def test_create_rejects_cross_tenant_opportunity(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            stored_opportunity_id=OPPORTUNITY_ID,
+            stored_opportunity_business_id=BUSINESS_B_ID,
+        )
+
+        with self.assertRaises(
+            AIAgentExecutionValidationError,
+        ):
+            await create_running_ai_agent_execution(
+                session,
+                business_id=BUSINESS_A_ID,
+                requested_by_user_id=USER_ID,
+                role="sales",
+                task="Analyze this revenue opportunity.",
+                provider_name="openai",
+                model_name="gpt-5.6-terra",
+                trigger_type="system",
+                opportunity_id=OPPORTUNITY_ID,
+            )
+
+        self.assertEqual(
+            session.scalar_calls,
+            1,
+        )
+        self.assertEqual(
+            session.added,
+            [],
+        )
+        self.assertEqual(
+            session.flush_calls,
+            0,
+        )
+
+    async def test_create_rejects_missing_opportunity(
+        self,
+    ) -> None:
+        session = _FakeSession()
+
+        with self.assertRaises(
+            AIAgentExecutionValidationError,
+        ):
+            await create_running_ai_agent_execution(
+                session,
+                business_id=BUSINESS_A_ID,
+                requested_by_user_id=USER_ID,
+                role="sales",
+                task="Analyze this revenue opportunity.",
+                provider_name="openai",
+                model_name="gpt-5.6-terra",
+                trigger_type="system",
+                opportunity_id=OPPORTUNITY_ID,
+            )
+
+        self.assertEqual(
+            session.scalar_calls,
+            1,
+        )
+        self.assertEqual(
+            session.added,
+            [],
+        )
+        self.assertEqual(
+            session.flush_calls,
             0,
         )
 
@@ -876,10 +999,14 @@ class _FakeSession:
         self,
         *,
         stored_execution: AIAgentExecution | None = None,
+        stored_opportunity_id: UUID | None = None,
+        stored_opportunity_business_id: UUID | None = None,
         flush_error: SQLAlchemyError | None = None,
         scalar_error: SQLAlchemyError | None = None,
     ) -> None:
         self.stored_execution = stored_execution
+        self.stored_opportunity_id = stored_opportunity_id
+        self.stored_opportunity_business_id = stored_opportunity_business_id
         self.flush_error = flush_error
         self.scalar_error = scalar_error
 
@@ -889,9 +1016,12 @@ class _FakeSession:
 
         self.flush_calls = 0
         self.commit_calls = 0
+        self.scalar_calls = 0
 
         self.requested_business_id: UUID | None = None
         self.requested_execution_id: UUID | None = None
+        self.requested_opportunity_id: UUID | None = None
+        self.requested_opportunity_business_id: UUID | None = None
 
     def add(
         self,
@@ -923,23 +1053,52 @@ class _FakeSession:
         self,
         statement,
     ):
+        self.scalar_calls += 1
+
         if self.scalar_error is not None:
             raise self.scalar_error
 
-        parameters = (
-            statement.compile().params
-        )
+        compiled = statement.compile()
+        parameters = compiled.params
+        sql = str(compiled)
+
+        requested_id: UUID | None = None
+        requested_business_id: UUID | None = None
 
         for name, value in parameters.items():
             if name.startswith(
                 "id_"
             ):
-                self.requested_execution_id = value
+                requested_id = value
 
             if name.startswith(
                 "business_id_"
             ):
-                self.requested_business_id = value
+                requested_business_id = value
+
+        if "FROM opportunities" in sql:
+            self.requested_opportunity_id = requested_id
+            self.requested_opportunity_business_id = requested_business_id
+
+            if self.stored_opportunity_id is None:
+                return None
+
+            if (
+                self.stored_opportunity_id
+                != requested_id
+            ):
+                return None
+
+            if (
+                self.stored_opportunity_business_id
+                != requested_business_id
+            ):
+                return None
+
+            return self.stored_opportunity_id
+
+        self.requested_execution_id = requested_id
+        self.requested_business_id = requested_business_id
 
         execution = self.stored_execution
 

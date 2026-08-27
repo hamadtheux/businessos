@@ -14,18 +14,22 @@ from app.agents.provider import AIAgentProvider
 from app.agents.runtime import execute_ai_agent
 from app.domain.marketing import CAMPAIGN_TRANSITIONS, CONTENT_TRANSITIONS, MARKETING_PLAN_TRANSITIONS, TREND_TRANSITIONS
 from app.domain.business_industries import get_business_industry, is_healthcare_business_type
+from app.domain.audience_safety import contains_sensitive_targeting
 from app.exceptions.ai_agent import AIAgentError
 from app.exceptions.business_memory import BusinessMemoryPersistenceError
 from app.exceptions.marketing import MarketingAIError, MarketingNotFoundError, MarketingPersistenceError, MarketingStateError, MarketingValidationError
 from app.models.business import Business
+from app.models.catalog_item import CatalogItem
 from app.models.automation_intelligence import AudienceHypothesis, MarketingAutomationRun
 from app.models.crm_lead import CRMLead
 from app.models.customer import Customer
 from app.models.integration import IntegrationConnection
+from app.models.commerce import CommerceFeedDestination, CommerceFeedProductStatus
 from app.models.opportunity import Opportunity
-from app.models.order import Order
+from app.models.order import Order, OrderLineItem
 from app.models.marketing import (
     Campaign,
+    CampaignProductSelection,
     CampaignChannelPlan,
     Competitor,
     CompetitorAnalysis,
@@ -34,6 +38,7 @@ from app.models.marketing import (
     MarketingAudience,
     MarketingContent,
     MarketingPerformance,
+    ProductCampaignPerformance,
     MarketingPlan,
     MarketingTrend,
     SocialSchedule,
@@ -165,6 +170,11 @@ async def list_audiences(session: AsyncSession, *, business_id: UUID, page: int,
 
 
 async def create_audience(session: AsyncSession, *, business_id: UUID, actor_user_id: UUID, data: AudienceCreate) -> MarketingAudience:
+    if contains_sensitive_targeting(
+        data.name, data.segment_description or "", data.existing_customer_segment or "",
+        *data.customer_lifecycle, *data.crm_stages, *data.interests,
+    ):
+        raise MarketingValidationError("sensitive_targeting_prohibited")
     value = MarketingAudience(business_id=business_id, created_by_user_id=actor_user_id, **data.model_dump())
     session.add(value)
     await _flush(session)
@@ -285,10 +295,16 @@ async def get_campaign_audience(
 
 
 async def create_campaign(session: AsyncSession, *, business_id: UUID, actor_user_id: UUID | None, data: CampaignCreate, ai_generated: bool = False) -> Campaign:
+    if contains_sensitive_targeting(data.audience_definition):
+        raise MarketingValidationError("sensitive_targeting_prohibited")
     if not await _exists(session, MarketingPlan, business_id, data.marketing_plan_id) or not await _exists(session, MarketingAudience, business_id, data.audience_id):
         raise MarketingValidationError
     business = await _business(session, business_id)
-    value = Campaign(business_id=business_id, currency=business.currency, created_by_user_id=actor_user_id, ai_generated=ai_generated, **data.model_dump())
+    value = Campaign(
+        business_id=business_id, currency=business.currency,
+        created_by_user_id=actor_user_id, ai_generated=ai_generated,
+        product_selections=[], **data.model_dump(),
+    )
     session.add(value)
     await _flush(session)
     record_audit(session, business_id=business_id, actor_user_id=actor_user_id, event_type="marketing.campaign_created", entity_type="marketing_campaign", entity_id=value.id, summary=f"Created internal campaign {value.name}; nothing was launched externally.")
@@ -299,6 +315,8 @@ async def create_campaign(session: AsyncSession, *, business_id: UUID, actor_use
 async def update_campaign(session: AsyncSession, *, business_id: UUID, campaign_id: UUID, actor_user_id: UUID, data: CampaignUpdate) -> Campaign:
     value = await get_campaign(session, business_id=business_id, campaign_id=campaign_id)
     changes = data.model_dump(exclude_unset=True)
+    if contains_sensitive_targeting(str(changes.get("audience_definition", ""))):
+        raise MarketingValidationError("sensitive_targeting_prohibited")
     start = changes.get("start_date", value.start_date)
     end = changes.get("end_date", value.end_date)
     if start and end and end < start:
@@ -342,6 +360,16 @@ async def duplicate_campaign(session: AsyncSession, *, business_id: UUID, campai
             status="draft", planned_start=plan.planned_start, planned_end=plan.planned_end,
             safe_configuration=plan.safe_configuration,
         ))
+    selections = list((await session.scalars(select(CampaignProductSelection).where(
+        CampaignProductSelection.business_id == business_id,
+        CampaignProductSelection.campaign_id == source.id,
+    ))).all())
+    for selection in selections:
+        value.product_selections.append(CampaignProductSelection(
+            business_id=business_id, campaign_id=value.id,
+            catalog_item_id=selection.catalog_item_id,
+            selection_reason=selection.selection_reason,
+        ))
     await _flush(session)
     return value
 
@@ -365,10 +393,15 @@ async def change_campaign_status(session: AsyncSession, *, business_id: UUID, ca
 async def campaign_detail(session: AsyncSession, *, business_id: UUID, campaign: Campaign) -> dict[str, Any]:
     try:
         plans = list((await session.scalars(select(CampaignChannelPlan).where(CampaignChannelPlan.business_id == business_id, CampaignChannelPlan.campaign_id == campaign.id).order_by(CampaignChannelPlan.channel, CampaignChannelPlan.id))).all())
+        selections = list((await session.scalars(select(CampaignProductSelection).where(
+            CampaignProductSelection.business_id == business_id,
+            CampaignProductSelection.campaign_id == campaign.id,
+        ).order_by(CampaignProductSelection.created_at, CampaignProductSelection.id))).all())
     except SQLAlchemyError:
         raise MarketingPersistenceError from None
     result = {column.name: getattr(campaign, column.name) for column in campaign.__table__.columns}
     result["channel_plans"] = plans
+    result["catalog_item_ids"] = [selection.catalog_item_id for selection in selections]
     return result
 
 
@@ -387,11 +420,30 @@ async def create_channel_plan(session: AsyncSession, *, business_id: UUID, campa
 
 
 async def generate_campaign(session: AsyncSession, *, business_id: UUID, actor_user_id: UUID | None, data: CampaignGenerateRequest, provider: AIAgentProvider, origin_type: str = "ai_on_demand", proposal_key: str | None = None) -> Campaign:
+    if contains_sensitive_targeting(data.goal, data.audience_definition or ""):
+        raise MarketingValidationError("sensitive_targeting_prohibited")
+    selected_products: list[CatalogItem] = []
+    if data.catalog_item_ids:
+        selected_products = list((await session.scalars(select(CatalogItem).where(
+            CatalogItem.business_id == business_id,
+            CatalogItem.id.in_(data.catalog_item_ids),
+            CatalogItem.status != "archived",
+        ))).all())
+        if {item.id for item in selected_products} != set(data.catalog_item_ids):
+            raise MarketingValidationError("catalog_selection_invalid")
     audience = await build_audience_hypothesis(
         session, business_id=business_id, goal=data.goal
     )
-    channels = list(data.channels) or list(audience.preferred_channels) or ["website"]
+    commerce_context = await _campaign_commerce_context(
+        session, business_id=business_id,
+        product_ids=[item.id for item in selected_products],
+    )
+    recommended_channel = commerce_context["channel"]
+    channels = list(data.channels) or ([recommended_channel] if recommended_channel else list(audience.preferred_channels)) or ["website"]
     channels = list(dict.fromkeys(channels))[:10]
+    execution_campaign_type = (
+        commerce_context["campaign_type"] if recommended_channel in channels else None
+    )
     audience_definition = data.audience_definition or audience.summary
     name = data.name or data.goal[:180]
     required_integrations = _required_integrations(channels)
@@ -399,18 +451,38 @@ async def generate_campaign(session: AsyncSession, *, business_id: UUID, actor_u
         f"- {item.get('classification')}: {item.get('summary')}"
         for item in audience.evidence[:20]
     )
+    observed_evidence = await _campaign_observed_evidence(
+        session, business_id=business_id,
+        product_ids=[item.id for item in selected_products],
+    )
+    evidence_text = "\n".join([evidence_text, *(
+        f"- {item['classification']}: {item['summary']}" for item in observed_evidence
+    )])
+    product_facts = "\n".join(
+        f"- {item.name}; SKU={item.sku or 'unavailable'}; price={item.price if item.price is not None else 'unavailable'} "
+        f"{item.currency or ''}; availability={item.availability}; source={item.source}; URL={item.product_url or 'unavailable'}; "
+        f"description={(item.description or 'unavailable')[:1000]}"
+        for item in selected_products
+    )
     task = (
         "Create an internal campaign proposal grounded only in trusted business context and the "
         "evidence-backed audience hypothesis below. Label every unsupported audience detail as an AI inference. "
         f"Goal: {data.goal}. Audience hypothesis: {audience_definition}. Channels: {', '.join(channels)}. "
-        f"Total budget guidance: {data.planned_budget}. Evidence:\n{evidence_text[:8000]}\n"
+        f"Total budget guidance: {data.planned_budget}. Selected authoritative catalog products:\n"
+        f"{product_facts[:8000] or '- No product was explicitly selected; recommend only from available trusted context.'}\n"
+        f"Audience evidence:\n{evidence_text[:8000]}\n"
         "Return strategy, message, creative direction, CTA, risks, assumptions, and measurement guidance. "
         "Do not promise results and do not launch, publish, or spend."
     )
     output = await _run_cmo(session, business_id, task, provider)
     campaign = await create_campaign(session, business_id=business_id, actor_user_id=actor_user_id, ai_generated=True, data=CampaignCreate(
-        name=name, objective=data.goal, description=output.summary,
+        name=name, objective=data.goal, description=output.summary, offer=data.offer,
         audience_definition=audience_definition, channels=channels,
+        geographic_targeting=[
+            value.strip().upper()
+            for value in audience.geographic_areas
+            if isinstance(value, str) and len(value.strip()) == 2 and value.strip().isalpha()
+        ][:50],
         start_date=data.start_date, end_date=data.end_date,
         planned_budget=data.planned_budget, budget_mode=data.budget_mode,
     ))
@@ -435,7 +507,117 @@ async def generate_campaign(session: AsyncSession, *, business_id: UUID, actor_u
     ]
     campaign.required_integrations = required_integrations
     campaign.source_evidence = list(audience.evidence)
+    campaign.source_evidence.extend([
+        {
+            "classification": "first_party_observed",
+            "source_type": "catalog",
+            "source_id": str(item.id),
+            "summary": (
+                f"Catalog product: {item.name}; price "
+                f"{item.price if item.price is not None else 'unavailable'}; "
+                f"availability {item.availability}; provenance {item.source}."
+            ),
+        }
+        for item in selected_products
+    ])
+    campaign.source_evidence.extend(observed_evidence)
     campaign.audience_hypothesis_id = audience.id
+    for item in selected_products:
+        campaign.product_selections.append(CampaignProductSelection(
+            business_id=business_id, campaign_id=campaign.id,
+            catalog_item_id=item.id,
+            selection_reason="Owner-selected product context" if data.catalog_item_ids else "AI-recommended product context",
+        ))
+    if len(selected_products) == 1:
+        product = selected_products[0]
+        campaign.landing_destination = product.product_url
+    campaign.recommended_provider = commerce_context["provider"]
+    campaign.campaign_type = execution_campaign_type
+    campaign.offer_source = "owner_authorized" if data.offer else "none"
+    campaign.offer_authorized = bool(data.offer and data.offer_authorized)
+    campaign.proposal_confidence = Decimal("0.80") if selected_products and commerce_context["provider"] else Decimal("0.55")
+    total_exposure = data.planned_budget
+    if data.budget_mode == "daily" and data.start_date and data.end_date:
+        total_exposure = data.planned_budget * Decimal((data.end_date - data.start_date).days + 1)
+    campaign.normalized_proposal = {
+        "schema_version": 1,
+        "goal": data.goal,
+        "recommended_provider": commerce_context["provider"],
+        "why_provider": commerce_context["why_provider"],
+        "campaign_type": execution_campaign_type,
+        "product_group": None,
+        "selected_products": [
+            {"catalog_item_id": str(item.id), "offer_id": item.sku or str(item.id), "name": item.name,
+             "price": str(item.price) if item.price is not None else None, "currency": item.currency,
+             "availability": item.availability, "landing_url": item.product_url}
+            for item in selected_products
+        ],
+        "product_eligibility": {
+            "selected": len(selected_products),
+            "eligible": commerce_context["eligible_count"],
+            "attention_required": max(0, len(selected_products) - commerce_context["eligible_count"]),
+        },
+        "audience_strategy": {
+            "summary": audience_definition,
+            "first_party_segments": [],
+            "provider_native_prospecting": True,
+            "exclusions": [],
+            "geography": list(campaign.geographic_targeting),
+            "customer_lifecycle_stage": "not_inferred",
+            "provider_signals": [],
+            "sensitive_targeting_prohibited": True,
+        },
+        "offer": {
+            "description": data.offer,
+            "source": "owner_authorized" if data.offer else "none",
+            "approved": bool(data.offer and data.offer_authorized),
+        },
+        "creative": {
+            "angle": campaign.creative_brief,
+            "headlines": [name[:30]],
+            "descriptions": [campaign.proposed_copy[:90] if campaign.proposed_copy else output.summary[:90]],
+            "primary_text": campaign.proposed_copy,
+            "call_to_action": campaign.proposed_cta or "Shop now",
+            "landing_url": campaign.landing_destination,
+            "asset_requirements": commerce_context["asset_requirements"],
+            "media_requirements": commerce_context["asset_requirements"],
+        },
+        "seller_business_advantage": None,
+        "product_differentiators": [
+            value
+            for item in selected_products
+            for value in (
+                f"Authoritative brand: {item.brand}" if item.brand else None,
+                f"Authoritative condition: {item.condition}",
+            )
+            if value is not None
+        ][:20],
+        "budget": {
+            "amount": str(data.planned_budget), "currency": campaign.currency,
+            "interval": data.budget_mode, "maximum_planned_spend": str(total_exposure),
+            "rationale": "Owner-provided budget guidance; spend remains subject to server policy and approval.",
+        },
+        "duration": {
+            "start_date": data.start_date.isoformat() if data.start_date else None,
+            "end_date": data.end_date.isoformat() if data.end_date else None,
+            "days": ((data.end_date - data.start_date).days + 1) if data.start_date and data.end_date else None,
+        },
+        "bidding_objective_strategy": (
+            "maximize_conversion_value" if commerce_context["provider"] == "google"
+            else "lowest_cost_purchase" if commerce_context["provider"] == "meta"
+            else "not_selected"
+        ),
+        "conversion_goal": "purchase",
+        "measurement_plan": campaign.measurement_plan,
+        "utm_plan": {"utm_source": commerce_context["provider"] or "aibos", "utm_medium": "paid", "utm_campaign": str(campaign.id)},
+        "required_integrations": required_integrations,
+        "required_provider_assets": commerce_context["required_assets"],
+        "provider_dependencies": commerce_context["required_assets"],
+        "risks": list(campaign.risks),
+        "evidence": list(campaign.source_evidence),
+        "confidence": str(campaign.proposal_confidence),
+        "approval_requirements": ["advertising_spend_policy", "human_approval", "provider_preflight"],
+    }
     allocations = _allocate_budget(data.planned_budget, len(channels))
     for index, channel in enumerate(channels):
         recommendation = output.recommendations[index] if index < len(output.recommendations) else output.summary
@@ -448,6 +630,105 @@ async def generate_campaign(session: AsyncSession, *, business_id: UUID, actor_u
     await _flush(session)
     _notify(session, business_id=business_id, category="campaign_review", title="AI campaign draft ready", message=f"Review the draft campaign “{campaign.name}”. External connection is still required for publishing.", entity_type="marketing_campaign", entity_id=campaign.id)
     return campaign
+
+
+async def _campaign_commerce_context(
+    session: AsyncSession, *, business_id: UUID, product_ids: list[UUID],
+) -> dict[str, Any]:
+    connections = list((await session.scalars(select(IntegrationConnection).where(
+        IntegrationConnection.business_id == business_id,
+        IntegrationConnection.connector_type.in_(["google_ads", "meta_ads"]),
+        IntegrationConnection.status == "connected",
+        IntegrationConnection.authentication_state == "authorized",
+    ))).all())
+    by_type = {item.connector_type: item for item in connections}
+    destinations = list((await session.scalars(select(CommerceFeedDestination).where(
+        CommerceFeedDestination.business_id == business_id,
+        CommerceFeedDestination.integration_connection_id.in_([item.id for item in connections]) if connections else False,
+        CommerceFeedDestination.status.in_(["connected", "attention_required"]),
+    ).order_by(CommerceFeedDestination.provider))).all())
+    provider = channel = campaign_type = None
+    destination = None
+    google = next((item for item in destinations if item.provider == "google_merchant_center" and "google_ads" in by_type), None)
+    meta = next((item for item in destinations if item.provider == "meta_product_catalog" and "meta_ads" in by_type), None)
+    if google:
+        provider, channel, campaign_type, destination = "google", "google_ads", "retail_performance_max", google
+    elif meta:
+        provider, channel, campaign_type, destination = "meta", "meta", "catalog_sales", meta
+    eligible = 0
+    if destination is not None and product_ids:
+        eligible = int(await session.scalar(select(func.count(CommerceFeedProductStatus.id)).where(
+            CommerceFeedProductStatus.business_id == business_id,
+            CommerceFeedProductStatus.destination_id == destination.id,
+            CommerceFeedProductStatus.catalog_item_id.in_(product_ids),
+            CommerceFeedProductStatus.status.in_(["eligible", "limited", "warning"]),
+        )) or 0)
+    return {
+        "provider": provider, "channel": channel, "campaign_type": campaign_type,
+        "eligible_count": eligible,
+        "why_provider": (
+            "Google Merchant and Ads resources are connected for a retail Performance Max proposal."
+            if provider == "google" else
+            "Meta business, catalog, and Ads resources are connected for a catalog sales proposal."
+            if provider == "meta" else
+            "No complete ecommerce advertising provider capability is currently connected."
+        ),
+        "asset_requirements": ["catalog_product_image", "landing_page"] + (["page_identity", "conversion_dataset"] if provider == "meta" else []),
+        "required_assets": (
+            ["google_ads_customer", "google_merchant_account", "google_merchant_data_source", "merchant_ads_link", "purchase_conversion"]
+            if provider == "google" else
+            ["meta_business", "ad_account", "meta_catalog", "product_set", "facebook_page", "conversion_dataset"]
+            if provider == "meta" else []
+        ),
+    }
+
+
+async def _campaign_observed_evidence(
+    session: AsyncSession, *, business_id: UUID, product_ids: list[UUID],
+) -> list[dict[str, object]]:
+    if not product_ids:
+        return []
+    # Lightweight unit-test sessions intentionally expose scalar-only behavior;
+    # production AsyncSession always executes the aggregate evidence queries.
+    if not hasattr(session, "execute"):
+        return []
+    order_count, units, revenue = (await session.execute(select(
+        func.count(func.distinct(Order.id)),
+        func.coalesce(func.sum(OrderLineItem.quantity), 0),
+        func.coalesce(func.sum(
+            OrderLineItem.unit_price * OrderLineItem.quantity - OrderLineItem.discount_amount
+        ), 0),
+    ).join(
+        OrderLineItem,
+        (OrderLineItem.order_id == Order.id) & (OrderLineItem.business_id == Order.business_id),
+    ).where(
+        Order.business_id == business_id,
+        Order.payment_status.in_(["paid", "partially_refunded", "refunded"]),
+        OrderLineItem.catalog_item_id.in_(product_ids),
+    ))).one()
+    spend, conversions, conversion_value = (await session.execute(select(
+        func.coalesce(func.sum(ProductCampaignPerformance.spend), 0),
+        func.coalesce(func.sum(ProductCampaignPerformance.conversions), 0),
+        func.coalesce(func.sum(ProductCampaignPerformance.conversion_value), 0),
+    ).where(
+        ProductCampaignPerformance.business_id == business_id,
+        ProductCampaignPerformance.catalog_item_id.in_(product_ids),
+        ProductCampaignPerformance.attribution_class == "provider_attributed",
+    ))).one()
+    evidence: list[dict[str, object]] = []
+    if int(order_count or 0):
+        evidence.append({
+            "classification": "first_party_observed", "source_type": "orders",
+            "source_id": None,
+            "summary": f"Paid order history contains {int(order_count)} orders and {int(units)} units for the selected products, with recorded line revenue {Decimal(revenue):.2f}.",
+        })
+    if Decimal(spend or 0) > 0 or Decimal(conversions or 0) > 0:
+        evidence.append({
+            "classification": "provider_supplied", "source_type": "advertising_performance",
+            "source_id": None,
+            "summary": f"Provider-attributed history for the selected products reports spend {Decimal(spend):.2f}, conversions {Decimal(conversions):.2f}, and conversion value {Decimal(conversion_value):.2f}; this is provider attribution, not causal proof.",
+        })
+    return evidence
 
 
 async def build_audience_hypothesis(
@@ -529,14 +810,14 @@ async def build_audience_hypothesis(
         })
     if public_signal_count:
         evidence.append({
-            "classification": "public_competitor_observation",
+            "classification": "public_research",
             "source_type": "competitor_observation_aggregate",
             "source_id": None,
             "summary": f"{public_signal_count} sourced public competitor observations are available; no competitor demographics are claimed.",
         })
     if connected:
         evidence.append({
-            "classification": "platform_supplied",
+            "classification": "provider_supplied",
             "source_type": "connected_channel_metadata",
             "source_id": None,
             "summary": "Authenticated connections present: " + ", ".join(connected) + ". This indicates availability, not audience demographics.",

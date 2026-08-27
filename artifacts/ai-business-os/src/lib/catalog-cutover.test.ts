@@ -30,6 +30,7 @@ import {
   formatCatalogPrice,
   isCurrentCatalogResponse,
   pasteListLines,
+  validateCatalogItemDraft,
 } from "../features/catalog/catalog-model.ts";
 import {
   catalogDraftForSessionStorage,
@@ -289,6 +290,63 @@ test("blank price creates null and never silently becomes zero", () => {
       status: "active",
     },
   );
+});
+
+test("optional commerce details extend the legacy manual payload without spoofing provenance", () => {
+  const payload = catalogCreateFromDraft({
+    ...createCatalogItemDraft(),
+    name: "Feed-ready product",
+    compareAtPrice: "24.99",
+    currency: "pkr",
+    cost: "10.00",
+    productUrl: "https://shop.example.test/products/feed-ready",
+    inventoryQuantity: "12",
+    availability: "in_stock",
+    brand: "Example Brand",
+    vendor: "Example Vendor",
+    gtin: "1234567890123",
+    mpn: "MPN-1",
+    googleProductCategory: "Food, Beverages & Tobacco",
+    tags: "premium, local, premium",
+    published: false,
+  });
+  assert.deepEqual(payload, {
+    item_type: "product",
+    name: "Feed-ready product",
+    description: null,
+    sku: null,
+    price: null,
+    status: "active",
+    compare_at_price: "24.99",
+    currency: "PKR",
+    cost: "10.00",
+    product_url: "https://shop.example.test/products/feed-ready",
+    inventory_quantity: 12,
+    brand: "Example Brand",
+    vendor: "Example Vendor",
+    gtin: "1234567890123",
+    mpn: "MPN-1",
+    google_product_category: "Food, Beverages & Tobacco",
+    tags: ["premium", "local"],
+    availability: "in_stock",
+    published: false,
+  });
+  assert.equal(Object.hasOwn(payload, "source"), false);
+  assert.equal(Object.hasOwn(payload, "sync_state"), false);
+});
+
+test("commerce detail validation rejects unsafe URLs and invalid inventory", () => {
+  assert.match(validateCatalogItemDraft({
+    ...createCatalogItemDraft(), name: "Product",
+    productUrl: "https://user:secret@example.test/product",
+  }) || "", /without embedded credentials/);
+  assert.match(validateCatalogItemDraft({
+    ...createCatalogItemDraft(), name: "Product", inventoryQuantity: "-1",
+  }) || "", /whole number/);
+  assert.equal(validateCatalogItemDraft({
+    ...createCatalogItemDraft(), name: "Product", currency: "PKR",
+    productUrl: "https://shop.example.test/product", inventoryQuantity: "0",
+  }), null);
 });
 
 test("money display uses the active business currency", () => {

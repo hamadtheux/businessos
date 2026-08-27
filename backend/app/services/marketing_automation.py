@@ -4,6 +4,7 @@ from datetime import UTC, datetime, time
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import ValidationError
@@ -362,35 +363,53 @@ async def _create_opportunity_if_missing(
     recommendation: str,
     provenance: list[dict[str, object]],
 ) -> bool:
-    existing = await session.scalar(select(Opportunity.id).where(
-        Opportunity.business_id == business_id,
-        Opportunity.dedupe_key == dedupe_key,
-    ))
-    if existing is not None:
-        return False
-    session.add(Opportunity(
-        business_id=business_id,
-        title=title,
-        description=description,
-        category=category,
-        source=source,
-        priority="medium",
-        estimated_value=None,
-        currency=None,
-        status="open",
-        customer_id=None,
-        lead_id=None,
-        source_entity_type=source_entity_type,
-        source_entity_id=source_entity_id,
-        reason=reason,
-        confidence=confidence,
-        recommendation=recommendation,
-        suggested_action="generate_campaign_proposal",
-        provenance=provenance,
-        dedupe_key=dedupe_key,
-    ))
-    await _flush(session)
-    return True
+    """
+    Atomically create one business-scoped Opportunity.
+
+    The unique (business_id, dedupe_key) database boundary is authoritative.
+    Concurrent workers therefore converge on one canonical Opportunity.
+    """
+    opportunity_id = uuid4()
+
+    try:
+        inserted_id = await session.scalar(
+            pg_insert(Opportunity)
+            .values(
+                id=opportunity_id,
+                business_id=business_id,
+                title=title,
+                description=description,
+                category=category,
+                source=source,
+                priority="medium",
+                estimated_value=None,
+                currency=None,
+                status="open",
+                customer_id=None,
+                lead_id=None,
+                source_entity_type=source_entity_type,
+                source_entity_id=source_entity_id,
+                reason=reason,
+                confidence=confidence,
+                recommendation=recommendation,
+                suggested_action="generate_campaign_proposal",
+                provenance=provenance,
+                dedupe_key=dedupe_key,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    Opportunity.business_id,
+                    Opportunity.dedupe_key,
+                ]
+            )
+            .returning(Opportunity.id)
+        )
+    except SQLAlchemyError:
+        raise AutomationIntelligencePersistenceError(
+            "opportunity_persist_failed"
+        ) from None
+
+    return inserted_id is not None
 
 
 def _content_channel(connected: list[str]) -> str:

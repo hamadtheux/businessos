@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import UTC, datetime
+from hashlib import sha256
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
@@ -33,7 +35,11 @@ from app.integrations.credentials import (
 )
 from app.models.action_execution_attempt import ActionExecutionAttempt
 from app.models.background_job import BackgroundJob
+from app.models.conversation import Conversation, ConversationMessage, CustomerAgentResponse
 from app.models.notification import Notification
+from app.models.automation_intelligence import MarketingActionProposal
+from app.models.integration import IntegrationEntityLink
+from app.models.marketing import Campaign, ExternalCampaignDeployment
 from app.services.action_execution_attempt import (
     claim_action_execution_attempt,
     record_action_execution_failure,
@@ -41,6 +47,7 @@ from app.services.action_execution_attempt import (
     record_action_execution_uncertain,
 )
 from app.services.operations import record_audit
+from app.services.automation_events import record_automation_event
 
 
 logger = logging.getLogger("aibos.action_dispatcher")
@@ -281,6 +288,12 @@ async def dispatch_action_execution_job(
                 attempt_id=context.attempt_id,
                 external_reference_id=result.external_reference_id,
             )
+            await _persist_campaign_provider_result(
+                session, context=context, result=result,
+            )
+            await _persist_customer_message_result(
+                session, context=context, result=result,
+            )
             _add_outcome_records(
                 session,
                 business_id=context.business_id,
@@ -322,6 +335,24 @@ async def _record_definite_failure(
             attempt_id=attempt_id,
             failure_code=code,
         )
+        if action_type in {"create_google_ads_campaign", "create_meta_campaign"}:
+            attempt = await session.scalar(select(ActionExecutionAttempt).where(
+                ActionExecutionAttempt.business_id == business_id,
+                ActionExecutionAttempt.id == attempt_id,
+            ))
+            if attempt is not None:
+                proposal = await session.scalar(select(MarketingActionProposal).where(
+                    MarketingActionProposal.business_id == business_id,
+                    MarketingActionProposal.ai_action_id == attempt.action_id,
+                    MarketingActionProposal.entity_type == "campaign",
+                ))
+                if proposal is not None:
+                    campaign = await session.scalar(select(Campaign).where(
+                        Campaign.business_id == business_id,
+                        Campaign.id == proposal.entity_id,
+                    ).with_for_update())
+                    if campaign is not None:
+                        campaign.status = "failed"
         _add_outcome_records(
             session,
             business_id=business_id,
@@ -364,6 +395,10 @@ async def _record_uncertain(
             business_id=context.business_id,
             attempt_id=context.attempt_id,
         )
+        await _mark_campaign_provider_state(
+            session, context=context, status="unknown_external_state",
+            failure_code="external_state_uncertain",
+        )
         _add_outcome_records(
             session,
             business_id=context.business_id,
@@ -381,6 +416,180 @@ async def _record_uncertain(
         outcome="uncertain",
     )
     _log_outcome(context, "uncertain")
+
+
+async def _persist_campaign_provider_result(session, *, context, result) -> None:
+    if context.action_type not in {"create_google_ads_campaign", "create_meta_campaign"}:
+        return
+    proposal = await session.scalar(select(MarketingActionProposal).where(
+        MarketingActionProposal.business_id == context.business_id,
+        MarketingActionProposal.ai_action_id == context.action_id,
+        MarketingActionProposal.entity_type == "campaign",
+    ))
+    if proposal is None:
+        raise RuntimeError("campaign_proposal_link_missing")
+    campaign = await session.scalar(select(Campaign).where(
+        Campaign.business_id == context.business_id,
+        Campaign.id == proposal.entity_id,
+    ).with_for_update())
+    if campaign is None:
+        raise RuntimeError("campaign_missing")
+    provider = "google" if context.connector_type == "google_ads" else "meta"
+    fingerprint = sha256(context.payload.model_dump_json().encode("utf-8")).hexdigest()
+    deployment = await session.scalar(select(ExternalCampaignDeployment).where(
+        ExternalCampaignDeployment.business_id == context.business_id,
+        ExternalCampaignDeployment.campaign_id == campaign.id,
+        ExternalCampaignDeployment.provider == provider,
+    ).with_for_update())
+    if deployment is None:
+        deployment = ExternalCampaignDeployment(
+            business_id=context.business_id, campaign_id=campaign.id,
+            integration_connection_id=context.connection_id, provider=provider,
+            safe_payload_fingerprint=fingerprint,
+        )
+        session.add(deployment)
+    elif deployment.safe_payload_fingerprint != fingerprint:
+        raise RuntimeError("campaign_payload_conflict")
+    deployment.external_campaign_reference = result.external_reference_id
+    deployment.child_references = {
+        key: value for key, value in result.safe_metadata.items()
+        if key.endswith("_reference") and isinstance(value, str) and len(value) <= 255
+    }
+    deployment.status = "provider_pending"
+    deployment.provider_status = str(result.safe_metadata.get("status") or "provider_pending")[:64]
+    deployment.failure_code = None
+    campaign.status = "provider_pending"
+    existing_link = await session.scalar(select(IntegrationEntityLink).where(
+        IntegrationEntityLink.business_id == context.business_id,
+        IntegrationEntityLink.integration_connection_id == context.connection_id,
+        IntegrationEntityLink.internal_entity_type == "campaign",
+        IntegrationEntityLink.internal_entity_id == campaign.id,
+    ))
+    if existing_link is None:
+        session.add(IntegrationEntityLink(
+            business_id=context.business_id,
+            integration_connection_id=context.connection_id,
+            internal_entity_type="campaign", internal_entity_id=campaign.id,
+            external_resource_reference="campaign",
+            external_entity_id=result.external_reference_id,
+            sync_state="linked",
+        ))
+
+
+async def _persist_customer_message_result(session, *, context, result) -> None:
+    if context.action_type not in {
+        "send_email", "send_whatsapp_message", "send_customer_message",
+    }:
+        return
+    raw_conversation = getattr(context.payload, "conversation_ref", None)
+    if raw_conversation is None:
+        return
+    try:
+        conversation_id = UUID(raw_conversation)
+    except (TypeError, ValueError):
+        raise RuntimeError("conversation_reference_invalid") from None
+    conversation = await session.scalar(select(Conversation).where(
+        Conversation.id == conversation_id,
+        Conversation.business_id == context.business_id,
+        Conversation.integration_connection_id == context.connection_id,
+    ).with_for_update())
+    if conversation is None:
+        raise RuntimeError("conversation_missing")
+    raw_customer = getattr(context.payload, "recipient_ref", None) or getattr(
+        context.payload, "customer_ref", None
+    )
+    if conversation.customer_id is None or raw_customer != str(conversation.customer_id):
+        raise RuntimeError("conversation_customer_conflict")
+    content = getattr(context.payload, "body", None) or getattr(
+        context.payload, "message", None
+    )
+    reference = result.external_reference_id
+    if not isinstance(content, str) or not content.strip() or len(content) > 10_000:
+        raise RuntimeError("outbound_message_invalid")
+    if not isinstance(reference, str) or not reference.strip() or len(reference) > 255:
+        raise RuntimeError("outbound_reference_invalid")
+    existing = await session.scalar(select(ConversationMessage).where(
+        ConversationMessage.business_id == context.business_id,
+        ConversationMessage.action_execution_attempt_id == context.attempt_id,
+    ).with_for_update())
+    if existing is not None:
+        if (
+            existing.business_id != context.business_id
+            or existing.action_execution_attempt_id != context.attempt_id
+            or existing.conversation_id != conversation.id
+            or existing.external_reference != reference
+            or existing.content != content.strip()
+        ):
+            raise RuntimeError("outbound_message_conflict")
+        return
+    instant = datetime.now(UTC)
+    message = ConversationMessage(
+        business_id=context.business_id,
+        conversation_id=conversation.id,
+        action_execution_attempt_id=context.attempt_id,
+        direction="outbound",
+        sender_type="ai",
+        sender_user_id=None,
+        content=content.strip(),
+        sent_at=instant,
+        external_reference=reference.strip(),
+        # A successful send API response proves provider acceptance, not
+        # device delivery or that the recipient read the message.
+        delivery_status="submitted",
+    )
+    session.add(message)
+    conversation.last_activity_at = instant
+    response = await session.scalar(select(CustomerAgentResponse).where(
+        CustomerAgentResponse.business_id == context.business_id,
+        CustomerAgentResponse.ai_action_id == context.action_id,
+    ).with_for_update())
+    if response is not None:
+        response.status = "reply_submitted"
+        response.failure_code = None
+    await session.flush()
+    record_automation_event(
+        session,
+        business_id=context.business_id,
+        event_type="outbound_message_recorded",
+        entity_type="conversation_message",
+        entity_id=message.id,
+        payload={"channel": conversation.channel, "delivery_status": "submitted"},
+    )
+    record_audit(
+        session,
+        business_id=context.business_id,
+        actor_user_id=None,
+        event_type="customer_agent.outbound_message_recorded",
+        entity_type="conversation_message",
+        entity_id=message.id,
+        summary="Recorded a provider-accepted Customer Agent reply as submitted.",
+    )
+
+
+async def _mark_campaign_provider_state(session, *, context, status, failure_code) -> None:
+    if context.action_type not in {"create_google_ads_campaign", "create_meta_campaign"}:
+        return
+    proposal = await session.scalar(select(MarketingActionProposal).where(
+        MarketingActionProposal.business_id == context.business_id,
+        MarketingActionProposal.ai_action_id == context.action_id,
+        MarketingActionProposal.entity_type == "campaign",
+    ))
+    if proposal is None:
+        return
+    campaign = await session.scalar(select(Campaign).where(
+        Campaign.business_id == context.business_id,
+        Campaign.id == proposal.entity_id,
+    ).with_for_update())
+    if campaign is not None:
+        campaign.status = status
+    deployment = await session.scalar(select(ExternalCampaignDeployment).where(
+        ExternalCampaignDeployment.business_id == context.business_id,
+        ExternalCampaignDeployment.campaign_id == proposal.entity_id,
+        ExternalCampaignDeployment.provider == ("google" if context.connector_type == "google_ads" else "meta"),
+    ).with_for_update())
+    if deployment is not None:
+        deployment.status = status
+        deployment.failure_code = failure_code
 
 
 def _add_outcome_records(

@@ -61,7 +61,11 @@ def create_application() -> FastAPI:
     async def billing_configuration_error(_request: Request, _error: BillingConfigurationError):
         return JSONResponse(
             status_code=503,
-            content={"detail": "Billing authorization is temporarily unavailable."},
+            content={"detail": {
+                "code": "temporarily_unavailable",
+                "service": "billing_authorization",
+                "message": "Billing authorization is temporarily unavailable. Please try again.",
+            }},
             headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
         )
 

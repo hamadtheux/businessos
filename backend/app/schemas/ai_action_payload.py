@@ -75,6 +75,7 @@ class SendEmailPayload(ActionPayload):
     recipient_ref: Reference
     subject: str = Field(min_length=1, max_length=200)
     body: MessageText
+    conversation_ref: Reference | None = None
     reply_to_ref: Reference | None = None
     thread_ref: Reference | None = None
 
@@ -223,11 +224,31 @@ class CreateCampaignPayload(ActionPayload):
 
 
 class CreateMetaCampaignPayload(CreateCampaignPayload):
-    pass
+    catalog_ref: Reference | None = None
+    product_set_ref: Reference | None = None
+    page_ref: Reference | None = None
+    conversion_dataset_ref: Reference | None = None
+    primary_text: str | None = Field(default=None, max_length=2_000)
+    headline: str | None = Field(default=None, max_length=255)
+    description: str | None = Field(default=None, max_length=500)
+    call_to_action: str = Field(default="SHOP_NOW", min_length=1, max_length=64)
 
 
 class CreateGoogleAdsCampaignPayload(CreateCampaignPayload):
     network: Literal["search", "display", "shopping", "video", "performance_max"]
+    merchant_account_ref: Reference | None = None
+    conversion_action_ref: Reference | None = None
+    product_offer_ids: list[Reference] = Field(default_factory=list, max_length=1_000)
+    business_name: str | None = Field(default=None, max_length=25)
+    headlines: list[str] = Field(default_factory=list, max_length=15)
+    descriptions: list[str] = Field(default_factory=list, max_length=5)
+
+    @field_validator("product_offer_ids", "headlines", "descriptions")
+    @classmethod
+    def unique_campaign_values(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("campaign values cannot contain duplicates")
+        return value
 
 
 class LaunchCampaignPayload(ActionPayload):

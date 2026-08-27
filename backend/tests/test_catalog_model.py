@@ -38,6 +38,24 @@ class CatalogItemModelTests(unittest.TestCase):
                 "description",
                 "sku",
                 "price",
+                "compare_at_price",
+                "currency",
+                "cost",
+                "product_url",
+                "inventory_quantity",
+                "availability",
+                "brand",
+                "vendor",
+                "gtin",
+                "mpn",
+                "condition",
+                "google_product_category",
+                "tags",
+                "published",
+                "source",
+                "sync_state",
+                "last_synchronized_at",
+                "provider_metadata",
                 "status",
                 "created_at",
                 "updated_at",
@@ -124,13 +142,12 @@ class CatalogItemModelTests(unittest.TestCase):
         self.assertIn("delete-orphan", relationship.cascade)
         self.assertEqual(relationship.back_populates, "business")
 
-    def test_inventory_and_binary_columns_are_absent(self) -> None:
+    def test_legacy_warehouse_and_binary_blobs_remain_absent(self) -> None:
         forbidden = {
             "stock_quantity",
             "warehouse",
             "reserved_stock",
             "inventory_movements",
-            "currency",
             "file",
             "file_data",
             "binary_data",
@@ -210,6 +227,18 @@ class CatalogItemSchemaTests(unittest.TestCase):
                 CatalogItemCreate.model_validate(
                     {"item_type": "product", "name": "Widget", extra: "forbidden"}
                 )
+
+    def test_product_url_cannot_embed_plaintext_credentials(self) -> None:
+        with self.assertRaises(ValidationError):
+            CatalogItemCreate(
+                item_type="product", name="Widget",
+                product_url="https://user:secret@example.com/product",
+            )
+        value = CatalogItemCreate(
+            item_type="product", name="Widget",
+            product_url="https://shop.example.com/product",
+        )
+        self.assertEqual(value.product_url.host, "shop.example.com")
 
     def test_patch_distinguishes_omitted_from_explicit_null(self) -> None:
         omitted = CatalogItemUpdate(name="Updated")

@@ -17,6 +17,7 @@ from app.domain.marketing import CAMPAIGN_TRANSITIONS, CONTENT_TRANSITIONS, MARK
 from app.models.marketing import (  # noqa: E402
     Campaign,
     CampaignChannelPlan,
+    CampaignProductSelection,
     Competitor,
     CompetitorAnalysis,
     CompetitorObservation,
@@ -38,7 +39,8 @@ class MarketingModelTests(unittest.TestCase):
     def test_all_marketing_tables_are_registered_and_tenant_owned(self) -> None:
         expected = {
             MarketingAudience: "marketing_audiences", MarketingPlan: "marketing_plans",
-            Campaign: "marketing_campaigns", CampaignChannelPlan: "campaign_channel_plans",
+            Campaign: "marketing_campaigns", CampaignProductSelection: "campaign_product_selections",
+            CampaignChannelPlan: "campaign_channel_plans",
             MarketingContent: "marketing_content", CreativeAsset: "marketing_creative_assets",
             SocialSchedule: "social_content_schedules", Competitor: "marketing_competitors",
             CompetitorObservation: "competitor_observations", CompetitorAnalysis: "competitor_analyses",
@@ -51,7 +53,7 @@ class MarketingModelTests(unittest.TestCase):
                 self.assertTrue(any(isinstance(item, CheckConstraint) for item in model.__table__.constraints))
 
     def test_cross_domain_marketing_references_are_composite_tenant_keys(self) -> None:
-        for model in (MarketingPlan, Campaign, CampaignChannelPlan, MarketingContent, CreativeAsset, SocialSchedule, CompetitorObservation, CompetitorAnalysis, MarketingTrend, MarketingPerformance):
+        for model in (MarketingPlan, Campaign, CampaignProductSelection, CampaignChannelPlan, MarketingContent, CreativeAsset, SocialSchedule, CompetitorObservation, CompetitorAnalysis, MarketingTrend, MarketingPerformance):
             with self.subTest(model=model.__name__):
                 self.assertTrue(any(isinstance(item, ForeignKeyConstraint) and len(item.column_keys) == 2 for item in model.__table__.constraints))
 

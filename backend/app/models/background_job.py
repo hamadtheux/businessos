@@ -34,14 +34,39 @@ class BackgroundJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="fk_jobs_marketing_automation_run_business",
             ondelete="CASCADE",
         ),
+        ForeignKeyConstraint(
+            ["commerce_sync_run_id", "business_id"],
+            ["commerce_sync_runs.id", "commerce_sync_runs.business_id"],
+            name="fk_jobs_commerce_sync_run_business",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["commerce_webhook_receipt_id", "business_id"],
+            ["commerce_webhook_receipts.id", "commerce_webhook_receipts.business_id"],
+            name="fk_jobs_commerce_webhook_receipt_business",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["commerce_feed_destination_id", "business_id"],
+            ["commerce_feed_destinations.id", "commerce_feed_destinations.business_id"],
+            name="fk_jobs_commerce_feed_destination_business", ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["marketing_campaign_id", "business_id"],
+            ["marketing_campaigns.id", "marketing_campaigns.business_id"],
+            name="fk_jobs_marketing_campaign_business", ondelete="CASCADE",
+        ),
         UniqueConstraint("idempotency_key", name="uq_background_jobs_idempotency_key"),
         CheckConstraint(
             "job_type IN ('process_automation_event','resume_workflow_run',"
-            "'process_scheduled_workflow','process_integration_event',"
+            "'process_scheduled_workflow','process_integration_event','customer_agent_response',"
             "'dispatch_action_execution',"
             "'reconcile_uncertain_attempt','mark_social_schedule_ready',"
             "'maintain_subscription','discover_competitors',"
-            "'generate_content_plan','analyze_campaign_opportunities')",
+            "'generate_content_plan','analyze_campaign_opportunities',"
+            "'commerce_initial_sync','commerce_incremental_sync','commerce_webhook_reconcile',"
+            "'google_merchant_status_sync','meta_catalog_status_sync',"
+            "'google_ads_performance_sync','meta_ads_performance_sync')",
             name="valid_job_type",
         ),
         CheckConstraint(
@@ -144,6 +169,10 @@ class BackgroundJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     competitor_discovery_run_id: Mapped[UUID | None] = mapped_column(nullable=True)
     marketing_automation_run_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    commerce_sync_run_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    commerce_webhook_receipt_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    commerce_feed_destination_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    marketing_campaign_id: Mapped[UUID | None] = mapped_column(nullable=True)
     scheduled_occurrence_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
