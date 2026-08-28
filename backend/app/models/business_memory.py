@@ -11,6 +11,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -86,6 +87,11 @@ class BusinessMemory(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "ix_business_memories_business_content_hash",
             "business_id",
             "content_hash",
+        ),
+        UniqueConstraint(
+            "id",
+            "business_id",
+            name="uq_business_memories_id_business",
         ),
     )
 

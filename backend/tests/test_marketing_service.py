@@ -276,14 +276,15 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(opportunity.suggested_action, "generate_campaign_proposal")
         self.assertEqual(opportunity.provenance[0]["source_id"], str(trend.id))
 
-    async def test_marketing_learning_requires_sufficient_comparison_and_avoids_causal_claims(self) -> None:
+    async def test_descriptive_marketing_totals_cannot_create_durable_learning(self) -> None:
         analytics = SimpleNamespace(impressions=5000, conversions=25, channels=[SimpleNamespace(label="email", roas=Decimal("3"), conversions=15, clicks=100), SimpleNamespace(label="instagram", roas=Decimal("2"), conversions=10, clicks=200)])
-        memory_id = uuid4()
-        with patch("app.services.marketing.marketing_analytics", new=AsyncMock(return_value=analytics)), patch("app.services.marketing.create_system_memory", new=AsyncMock(return_value=SimpleNamespace(id=memory_id))) as memory:
+        with patch("app.services.marketing.marketing_analytics", new=AsyncMock(return_value=analytics)) as aggregate:
             result = await learn_from_performance(SimpleNamespace(), business_id=BUSINESS_ID, period_start=date(2026, 8, 1), period_end=date(2026, 8, 7))
-        self.assertTrue(result.created)
-        self.assertIn("not proof of causation", result.conclusion)
-        self.assertEqual(memory.await_args.kwargs["memory_type"], "ai_learning")
+        self.assertFalse(result.created)
+        self.assertIsNone(result.memory_id)
+        self.assertIn("descriptive only", result.conclusion)
+        self.assertIn("governed growth experiment", result.conclusion)
+        aggregate.assert_awaited_once()
 
 
 class _ScalarSession:

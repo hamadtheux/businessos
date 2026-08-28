@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
+
+
+# Allow direct execution with:
+# uv run python scripts/smoke_business_memory_postgres.py
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 
 from app.core.config import settings
 from app.db.session import AsyncSessionFactory

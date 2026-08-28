@@ -72,6 +72,11 @@ from app.models.integration import (
     IntegrationOAuthState,
     IntegrationWebhookEvent,
 )
+from app.models.growth_learning import (
+    GrowthExperiment,
+    GrowthExperimentResult,
+    GrowthExperimentVariant,
+)
 from app.models.crm_lead import CRMLead
 from app.models.notification import Notification
 from app.models.marketing import (
@@ -178,6 +183,9 @@ __all__ = [
     "IntegrationEntityLink",
     "IntegrationOAuthState",
     "IntegrationWebhookEvent",
+    "GrowthExperiment",
+    "GrowthExperimentResult",
+    "GrowthExperimentVariant",
     "CRMLead",
     "Notification",
     "Campaign",

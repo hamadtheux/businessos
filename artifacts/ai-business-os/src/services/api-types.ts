@@ -1177,3 +1177,134 @@ export type AdvertisingSpendPolicy = {
   created_at: string;
   updated_at: string;
 };
+
+export type GrowthExperimentStatus =
+  | "draft"
+  | "ready"
+  | "running"
+  | "completed"
+  | "evaluated"
+  | "canceled";
+
+export type GrowthMetric = "ctr" | "conversion_rate" | "cpc" | "cpa" | "roas";
+
+export type GrowthAttribution =
+  | "provider_attributed"
+  | "first_party_observed";
+
+export type GrowthVariantMetric = {
+  variant_id: string;
+  variant_key: string;
+  is_control: boolean;
+  performance_row_count: number;
+  sample_basis: string;
+  sample_size: number;
+  minimum_sample_size: number;
+  metric_value: string | null;
+  spend: string;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  revenue: string;
+  data_quality: "complete" | "too_many_rows" | "overlapping_periods";
+  sufficient: boolean;
+};
+
+export type GrowthExperimentResult = {
+  id: string;
+  business_id: string;
+  experiment_id: string;
+  classification:
+    | "insufficient_evidence"
+    | "no_material_difference"
+    | "observed_directional_difference"
+    | "mixed_result";
+  primary_metric: GrowthMetric;
+  attribution_classification: GrowthAttribution;
+  currency: string;
+  control_value: string | null;
+  directional_leader_value: string | null;
+  absolute_difference: string | null;
+  relative_difference: string | null;
+  evidence_quality: string;
+  directional_leader_variant_id: string | null;
+  directional_leader_key: string | null;
+  learning_memory_id: string | null;
+  measurement_start: string;
+  measurement_end: string;
+  evaluation_cutoff: string;
+  evaluated_at: string;
+  evaluation_revision: string;
+  evidence: {
+    formula_version: string;
+    primary_metric: GrowthMetric;
+    metric_direction: "higher_is_better" | "lower_is_better";
+    attribution_classification: GrowthAttribution;
+    currency: string;
+    measurement_start: string;
+    measurement_end: string;
+    evaluation_cutoff: string;
+    fact_created_at_policy: "measurement_start_through_evaluation_cutoff";
+    minimum_sample_size: number;
+    sample_basis: string;
+    material_relative_difference: string;
+    statistical_significance_test: null;
+    causal_claim_allowed: false;
+    variant_metrics: GrowthVariantMetric[];
+  };
+  created_at: string;
+  updated_at: string;
+};
+
+export type GrowthExperimentVariant = {
+  id: string;
+  business_id: string;
+  experiment_id: string;
+  variant_key: string;
+  label: string;
+  is_control: boolean;
+  campaign_id: string;
+  content_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type GrowthExperiment = {
+  id: string;
+  business_id: string;
+  name: string;
+  hypothesis: string;
+  learning_key: string;
+  experiment_type: "campaign" | "content";
+  status: GrowthExperimentStatus;
+  primary_metric: GrowthMetric;
+  attribution_classification: GrowthAttribution;
+  currency: string;
+  evaluation_window_days: number;
+  minimum_sample_size: number;
+  definition_version: number;
+  source_opportunity_id: string | null;
+  source_ai_action_id: string | null;
+  created_by_user_id: string | null;
+  measurement_start: string | null;
+  measurement_end: string | null;
+  evaluation_cutoff: string | null;
+  completed_at: string | null;
+  canceled_at: string | null;
+  variants: GrowthExperimentVariant[];
+  result: GrowthExperimentResult | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type GrowthLearning = {
+  id: string;
+  content: string;
+  confidence: string;
+  importance: number;
+  status: "active" | "superseded" | "archived";
+  occurred_at: string | null;
+  last_reinforced_at: string | null;
+  created_at: string;
+  updated_at: string;
+};

@@ -51,6 +51,8 @@ _AGENT_DEFINITIONS: Final[dict[AIAgentRole, AIAgentDefinition]] = {
             "Do not override human approval requirements.",
             "Do not expose secrets, internal credentials, or private provenance.",
             "Do not treat recommendations as irreversible business decisions.",
+            "Treat growth-learning memory as qualified data; never reinterpret a "
+            "directional comparison as a winner, statistical significance, or causality.",
         ),
     ),
     "cmo": AIAgentDefinition(
@@ -75,6 +77,8 @@ _AGENT_DEFINITIONS: Final[dict[AIAgentRole, AIAgentDefinition]] = {
             "Do not override brand or business policies.",
             "Do not expose internal source metadata or private provenance.",
             "Do not present uncertain assumptions as verified business facts.",
+            "Treat growth-learning memory as qualified data; never reinterpret a "
+            "directional comparison as a winner, statistical significance, or causality.",
         ),
     ),
     "sales": AIAgentDefinition(
@@ -99,6 +103,8 @@ _AGENT_DEFINITIONS: Final[dict[AIAgentRole, AIAgentDefinition]] = {
             "Do not send messages or change CRM records directly.",
             "Do not override business policies or approval requirements.",
             "Do not expose information belonging to another business or customer.",
+            "Treat growth-learning memory as qualified data; never reinterpret a "
+            "directional comparison as a winner, statistical significance, or causality.",
         ),
     ),
     "support": AIAgentDefinition(

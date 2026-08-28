@@ -4,7 +4,7 @@ from hashlib import sha256
 from typing import Final
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -149,6 +149,22 @@ async def _assemble_memory_sources(
     if request.memory_types is not None:
         statement = statement.where(
             BusinessMemory.memory_type.in_(request.memory_types)
+        )
+
+    if request.purpose not in {
+        "business_manager",
+        "marketing",
+        "sales",
+        "analytics",
+    }:
+        # Growth learnings are aggregate commercial evidence. They are useful
+        # to management, CMO, Sales, and Analytics reasoning, but irrelevant to
+        # Support/Operations tasks and must not broaden those contexts.
+        statement = statement.where(
+            or_(
+                BusinessMemory.source_reference.is_(None),
+                ~BusinessMemory.source_reference.like("growth-learning:%"),
+            )
         )
 
     statement = statement.order_by(

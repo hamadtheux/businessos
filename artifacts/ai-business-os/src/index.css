@@ -87,6 +87,125 @@
   .billing-plan-top p { min-height: 0; }
 }
 
+.growth-truth-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.growth-truth-grid .card {
+  display: grid;
+  gap: 7px;
+  align-content: start;
+}
+
+.growth-truth-grid p,
+.growth-experiment-card p {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.growth-experiment-list {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 22px;
+}
+
+.growth-experiment-card {
+  display: grid;
+  gap: 14px;
+}
+
+.growth-meta-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  color: hsl(var(--muted-foreground));
+  font-size: 10px;
+}
+
+.growth-meta-row > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.growth-meta-row svg {
+  width: 13px;
+  height: 13px;
+}
+
+.growth-variant-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.growth-variant {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 11px;
+  background: hsl(var(--muted) / 0.28);
+}
+
+.growth-variant > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.growth-variant > span:not(.status) {
+  color: hsl(var(--muted-foreground));
+  font-size: 10px;
+}
+
+.growth-result-panel {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid #d5e9da;
+  background: #f3faf5;
+}
+
+.growth-result-panel > div {
+  display: grid;
+  gap: 5px;
+}
+
+.growth-result-panel > p {
+  grid-column: 1 / -1;
+  color: hsl(var(--muted-foreground));
+  font-size: 10px;
+}
+
+.growth-actions {
+  justify-content: flex-end;
+}
+
+@media (max-width: 960px) {
+  .growth-truth-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .growth-truth-grid,
+  .growth-result-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .growth-result-panel > p {
+    grid-column: auto;
+  }
+}
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {

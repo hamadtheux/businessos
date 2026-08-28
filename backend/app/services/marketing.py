@@ -16,7 +16,6 @@ from app.domain.marketing import CAMPAIGN_TRANSITIONS, CONTENT_TRANSITIONS, MARK
 from app.domain.business_industries import get_business_industry, is_healthcare_business_type
 from app.domain.audience_safety import contains_sensitive_targeting
 from app.exceptions.ai_agent import AIAgentError
-from app.exceptions.business_memory import BusinessMemoryPersistenceError
 from app.exceptions.marketing import MarketingAIError, MarketingNotFoundError, MarketingPersistenceError, MarketingStateError, MarketingValidationError
 from app.models.business import Business
 from app.models.catalog_item import CatalogItem
@@ -72,7 +71,6 @@ from app.schemas.marketing import (
     TrendOpportunityRequest,
 )
 from app.schemas.operations import OpportunityCreate
-from app.services.business_memory import create_system_memory
 from app.services.operations import create_opportunity, record_audit
 from app.services.automation_events import record_automation_event
 
@@ -1390,24 +1388,25 @@ async def marketing_analytics(session: AsyncSession, *, business_id: UUID, perio
 
 
 async def learn_from_performance(session: AsyncSession, *, business_id: UUID, period_start: date, period_end: date) -> LearningResponse:
-    analytics = await marketing_analytics(session, business_id=business_id, period_start=period_start, period_end=period_end)
-    if analytics.impressions < 1000 or analytics.conversions < 10 or len(analytics.channels) < 2:
-        return LearningResponse(created=False)
-    best = max(analytics.channels, key=lambda item: (item.roas, item.conversions, item.clicks))
-    conclusion = (
-        f"From recorded marketing data between {period_start} and {period_end}, {best.label} showed the strongest observed return among the compared channels for this period. "
-        "Treat this as a useful association, not proof of causation, and validate it against future comparable campaigns."
+    # Retained for API compatibility. Ordinary cross-channel before/after
+    # aggregates do not establish comparable variants, stable cutoffs, or a
+    # defensible attribution contract, so they are no longer promoted into
+    # durable AI memory. Phase 6 learning is created only by the governed,
+    # deterministic GrowthExperiment evaluation path.
+    await marketing_analytics(
+        session,
+        business_id=business_id,
+        period_start=period_start,
+        period_end=period_end,
     )
-    try:
-        memory = await create_system_memory(
-            session, business_id, memory_type="ai_learning", content=conclusion,
-            confidence=Decimal("0.700"), importance=4,
-            source_reference=f"marketing-performance:{period_start}:{period_end}",
-            occurred_at=datetime.now(timezone.utc),
-        )
-    except BusinessMemoryPersistenceError:
-        raise MarketingPersistenceError from None
-    return LearningResponse(created=True, conclusion=conclusion, memory_id=memory.id)
+    return LearningResponse(
+        created=False,
+        conclusion=(
+            "Recorded period totals are descriptive only. Create a governed growth "
+            "experiment with stable variants, attribution, samples, and a measurement "
+            "cutoff before saving a business learning."
+        ),
+    )
 
 
 async def _run_cmo(session: AsyncSession, business_id: UUID, task: str, provider: AIAgentProvider):

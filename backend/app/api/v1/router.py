@@ -18,6 +18,7 @@ from app.api.v1.marketing import router as marketing_router
 from app.api.v1.integrations import router as integrations_router
 from app.api.v1.processing import router as processing_router
 from app.api.v1.billing import router as billing_router
+from app.api.v1.growth_learning import router as growth_learning_router
 
 
 api_router = APIRouter()
@@ -41,6 +42,7 @@ api_router.include_router(marketing_router)
 api_router.include_router(integrations_router)
 api_router.include_router(processing_router)
 api_router.include_router(billing_router)
+api_router.include_router(growth_learning_router)
 
 
 @api_router.get("/status", tags=["System"])
