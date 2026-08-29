@@ -1,0 +1,16 @@
+.git
+.github
+.cache
+.local
+.env
+**/.env
+**/node_modules
+**/dist
+**/.pytest_cache
+**/.venv
+**/__pycache__
+**/*.py[cod]
+backend
+artifacts/api-server
+artifacts/business-os
+attached_assets

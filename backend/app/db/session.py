@@ -7,7 +7,10 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.config import settings
+from app.db.connection import build_asyncpg_connect_args
 
+
+_connect_args = build_asyncpg_connect_args(settings)
 
 engine = create_async_engine(
     settings.sqlalchemy_database_url,
@@ -16,6 +19,9 @@ engine = create_async_engine(
     pool_size=settings.database_pool_size,
     max_overflow=settings.database_max_overflow,
     pool_timeout=settings.database_pool_timeout,
+    pool_recycle=settings.database_pool_recycle_seconds,
+    isolation_level="READ COMMITTED",
+    connect_args=_connect_args,
 )
 
 AsyncSessionFactory = async_sessionmaker(

@@ -1,0 +1,142 @@
+name: ai-business-os-production
+
+# Provider-neutral single-host production contract. Public TLS termination,
+# DNS, distributed edge rate limiting, encrypted backup storage, monitoring,
+# and secret injection are external controls and must exist before the frontend
+# loopback port is exposed through an ingress proxy.
+
+x-backend-environment: &backend-environment
+  AIBOS_ENVIRONMENT: production
+  AIBOS_DEBUG: "false"
+  AIBOS_DOCS_ENABLED: "false"
+  AIBOS_APP_VERSION: ${AIBOS_APP_VERSION:?set a release identifier}
+  AIBOS_AUTH_SECRET_KEY: ${AIBOS_AUTH_SECRET_KEY:?inject through the deployment secret store}
+  AIBOS_AUTH_REFRESH_COOKIE_SECURE: "true"
+  AIBOS_DATABASE_URL: ${AIBOS_DATABASE_URL:?inject the TLS asyncpg database URL}
+  AIBOS_DATABASE_SSL_MODE: ${AIBOS_DATABASE_SSL_MODE:-verify-full}
+  AIBOS_LOG_FORMAT: json
+  AIBOS_LOG_LEVEL: ${AIBOS_LOG_LEVEL:-INFO}
+  AIBOS_EDGE_RATE_LIMITING_ENABLED: ${AIBOS_EDGE_RATE_LIMITING_ENABLED:?confirm a distributed edge policy}
+  AIBOS_REQUEST_MAX_BYTES: ${AIBOS_REQUEST_MAX_BYTES:-2097152}
+  AIBOS_TRUSTED_HOSTS: ${AIBOS_TRUSTED_HOSTS:?set exact public API hosts as JSON}
+  AIBOS_FRONTEND_BASE_URL: ${AIBOS_FRONTEND_BASE_URL:?set the public HTTPS origin}
+  AIBOS_CORS_ORIGINS: ${AIBOS_CORS_ORIGINS:?set exact HTTPS origins as JSON}
+  AIBOS_PUBLIC_API_BASE_URL: ${AIBOS_PUBLIC_API_BASE_URL:?set the public HTTPS origin}
+  AIBOS_WIDGET_LOADER_URL: ${AIBOS_WIDGET_LOADER_URL:?set the public HTTPS loader URL}
+  AIBOS_WIDGET_APP_URL: ${AIBOS_WIDGET_APP_URL:?set the public HTTPS widget URL}
+  AIBOS_STORAGE_BACKEND: s3
+  AIBOS_STORAGE_BUCKET: ${AIBOS_STORAGE_BUCKET:?set the durable asset bucket}
+  AIBOS_STORAGE_REGION: ${AIBOS_STORAGE_REGION:?set the asset region}
+  AIBOS_STORAGE_ENDPOINT_URL: ${AIBOS_STORAGE_ENDPOINT_URL:?set the HTTPS S3 endpoint}
+  AIBOS_STORAGE_ACCESS_KEY_ID: ${AIBOS_STORAGE_ACCESS_KEY_ID:?inject through the deployment secret store}
+  AIBOS_STORAGE_SECRET_ACCESS_KEY: ${AIBOS_STORAGE_SECRET_ACCESS_KEY:?inject through the deployment secret store}
+  AIBOS_STORAGE_PUBLIC_BASE_URL: ${AIBOS_STORAGE_PUBLIC_BASE_URL:?set the public HTTPS asset URL}
+  AIBOS_INTEGRATION_CREDENTIAL_BACKEND: ${AIBOS_INTEGRATION_CREDENTIAL_BACKEND:-disabled}
+  AIBOS_INTEGRATION_SECRET_REGION: ${AIBOS_INTEGRATION_SECRET_REGION:-}
+  AIBOS_EXTERNAL_CONNECTOR_WRITES_ENABLED: ${AIBOS_EXTERNAL_CONNECTOR_WRITES_ENABLED:-false}
+  AIBOS_EXTERNAL_CONNECTOR_WRITE_MODE: ${AIBOS_EXTERNAL_CONNECTOR_WRITE_MODE:-disabled}
+  AIBOS_FIRST_CLIENT_ACTIVATION_ENABLED: ${AIBOS_FIRST_CLIENT_ACTIVATION_ENABLED:-false}
+
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: ${AIBOS_POSTGRES_DB:-aibos}
+      POSTGRES_USER: ${AIBOS_POSTGRES_USER:-aibos}
+      POSTGRES_PASSWORD: ${AIBOS_POSTGRES_PASSWORD:?inject through the deployment secret store}
+      POSTGRES_INITDB_ARGS: --data-checksums
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+  migrate:
+    image: ${AIBOS_BACKEND_IMAGE:?set the immutable backend image digest}
+    command: ["alembic", "upgrade", "head"]
+    environment: *backend-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+
+  api:
+    image: ${AIBOS_BACKEND_IMAGE:?set the immutable backend image digest}
+    environment: *backend-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    expose: ["8000"]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  worker:
+    image: ${AIBOS_BACKEND_IMAGE:?set the immutable backend image digest}
+    command: ["python", "-m", "app.worker"]
+    environment: *backend-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # Worker liveness is recorded in PostgreSQL and surfaced through the
+    # authenticated processing-health endpoint. Do not inherit the API
+    # image's HTTP healthcheck for this non-HTTP process.
+    healthcheck:
+      disable: true
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  scheduler:
+    image: ${AIBOS_BACKEND_IMAGE:?set the immutable backend image digest}
+    command: ["python", "-m", "app.scheduler"]
+    environment: *backend-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # Scheduler liveness uses the same durable heartbeat contract as workers.
+    healthcheck:
+      disable: true
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  frontend:
+    image: ${AIBOS_FRONTEND_IMAGE:?set the immutable frontend image digest}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${AIBOS_FRONTEND_BIND_PORT:-8080}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx:uid=101,gid=101,mode=0755
+      - /var/run:uid=101,gid=101,mode=0755
+      # nginx-unprivileged runs as uid/gid 101 and renders the static
+      # template into this otherwise read-only directory during startup.
+      - /etc/nginx/conf.d:uid=101,gid=101,mode=0775
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 20s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

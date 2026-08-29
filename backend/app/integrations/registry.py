@@ -26,7 +26,8 @@ class ConnectorDefinition:
     capabilities: tuple[str, ...]
     read_capabilities: tuple[str, ...]
     future_write_capabilities: tuple[str, ...]
-    oauth_scopes: tuple[str, ...]
+    oauth_read_scopes: tuple[str, ...]
+    oauth_write_scopes: tuple[str, ...]
     webhook_support: bool
     external_writes_enabled: Literal[False]
     resource_types: tuple[str, ...]
@@ -34,6 +35,17 @@ class ConnectorDefinition:
     resource_selection_required: bool
     trusted_authorization_hosts: tuple[str, ...]
     foundation_only: bool = False
+
+    @property
+    def oauth_scopes(self) -> tuple[str, ...]:
+        """Complete supported scope set retained for validation compatibility."""
+        return tuple(dict.fromkeys((*self.oauth_read_scopes, *self.oauth_write_scopes)))
+
+    def requested_oauth_scopes(self, write_mode: str) -> tuple[str, ...]:
+        scopes = self.oauth_read_scopes
+        if write_mode != "disabled":
+            scopes = (*scopes, *self.oauth_write_scopes)
+        return tuple(dict.fromkeys(scopes))
 
 
 def _connector(
@@ -46,6 +58,7 @@ def _connector(
     reads: tuple[str, ...],
     future_writes: tuple[str, ...],
     scopes: tuple[str, ...],
+    write_scopes: tuple[str, ...] = (),
     resources: tuple[str, ...] = (),
     webhook: bool = False,
     foundation_only: bool = False,
@@ -60,7 +73,8 @@ def _connector(
         capabilities=(*reads, *future_writes),
         read_capabilities=reads,
         future_write_capabilities=future_writes,
-        oauth_scopes=scopes,
+        oauth_read_scopes=scopes,
+        oauth_write_scopes=write_scopes,
         webhook_support=webhook,
         external_writes_enabled=False,
         resource_types=resources,
@@ -80,22 +94,24 @@ _DEFINITIONS: Final[tuple[ConnectorDefinition, ...]] = (
         "whatsapp_business", "WhatsApp Business", "Receive customer messages and read approved business resources.",
         "communication", "meta", reads=("receive_messages", "read_templates"),
         future_writes=("future_send_messages",),
-        scopes=("business_management", "whatsapp_business_management", "whatsapp_business_messaging"),
+        scopes=("business_management", "whatsapp_business_management"),
+        write_scopes=("whatsapp_business_messaging",),
         resources=("meta_business", "whatsapp_business_account", "phone_number"), webhook=True,
     ),
     _connector(
         "gmail", "Gmail", "Read mailbox metadata and explicitly selected mail.",
         "communication", "google", reads=("read_mail_metadata", "read_selected_mail"),
         future_writes=("future_send_email",),
-        scopes=("openid", "email", "https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send"),
-        resources=("mailbox",), webhook=True,
+        scopes=("openid", "email", "https://www.googleapis.com/auth/gmail.readonly"),
+        write_scopes=("https://www.googleapis.com/auth/gmail.send",),
+        resources=("mailbox",), webhook=False,
     ),
     _connector(
         "google_calendar", "Google Calendar", "Read calendars and events for selected calendars.",
         "calendar", "google", reads=("read_calendars", "read_events"),
         future_writes=("future_create_event", "future_update_event"),
         scopes=("openid", "email", "https://www.googleapis.com/auth/calendar.readonly"),
-        resources=("calendar",), webhook=True,
+        resources=("calendar",), webhook=False,
     ),
     _connector(
         "google_ads", "Google Commerce & Ads", "Connect Merchant Center and Google Ads, select business assets, synchronize products, and execute governed retail campaigns.",
@@ -108,20 +124,23 @@ _DEFINITIONS: Final[tuple[ConnectorDefinition, ...]] = (
         "meta_ads", "Meta Commerce & Ads", "Select Meta business assets, synchronize a catalog, and execute governed sales campaigns.",
         "advertising", "meta", reads=("read_accounts", "read_catalog", "read_campaign_performance"),
         future_writes=("future_sync_catalog", "future_create_campaign", "future_launch_campaign", "future_change_budget"),
-        scopes=("business_management", "catalog_management", "ads_read", "ads_management"),
+        scopes=("business_management", "catalog_management", "ads_read"),
+        write_scopes=("ads_management",),
         resources=("meta_business", "ad_account", "meta_catalog", "facebook_page", "conversion_dataset"), webhook=True,
     ),
     _connector(
         "facebook", "Facebook", "Read selected Pages and content performance.",
         "social", "meta", reads=("read_pages", "read_content_performance"),
         future_writes=("future_publish_content",),
-        scopes=("pages_show_list", "pages_read_engagement", "pages_manage_posts"), resources=("facebook_page",), webhook=True,
+        scopes=("pages_show_list", "pages_read_engagement"),
+        write_scopes=("pages_manage_posts",), resources=("facebook_page",), webhook=True,
     ),
     _connector(
         "instagram", "Instagram", "Read selected professional accounts and content performance.",
         "social", "meta", reads=("read_accounts", "read_content_performance"),
         future_writes=("future_publish_content",),
-        scopes=("instagram_basic", "instagram_manage_insights", "instagram_content_publish", "pages_show_list"),
+        scopes=("instagram_basic", "instagram_manage_insights", "pages_show_list"),
+        write_scopes=("instagram_content_publish",),
         resources=("facebook_page", "instagram_account"), webhook=True,
     ),
     _connector(
@@ -129,7 +148,7 @@ _DEFINITIONS: Final[tuple[ConnectorDefinition, ...]] = (
         "productivity", "microsoft", reads=("read_mail", "read_calendars", "read_events"),
         future_writes=("future_send_email", "future_create_event", "future_update_event"),
         scopes=("openid", "email", "offline_access", "User.Read", "Mail.Read", "Calendars.Read"),
-        resources=("mailbox", "calendar"), webhook=True, foundation_only=True,
+        resources=("mailbox", "calendar"), webhook=False, foundation_only=True,
     ),
 )
 

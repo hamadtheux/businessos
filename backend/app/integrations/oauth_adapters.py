@@ -147,7 +147,9 @@ class ConfiguredOAuthConnector:
         material = _token_material(response)
         scopes = _scopes(response.get("scope")) or CONNECTOR_REGISTRY[
             self.connector_type
-        ].oauth_scopes
+        ].requested_oauth_scopes(
+            self._configuration.external_connector_write_mode
+        )
         return AuthorizationExchange(
             credentials=material,
             granted_scopes=tuple(scopes),

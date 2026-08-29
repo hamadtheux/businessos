@@ -21,8 +21,14 @@ from app.exceptions.automation import (
     AutomationValidationError,
 )
 from app.exceptions.ai_agent import AIAgentError
+from app.exceptions.ai_action import AIActionValidationError, UnsupportedAIActionError
 from app.models.ai_agent_execution import AIAgentExecution
+from app.models.ai_action import AIAction
 from app.models.approval_request import ApprovalRequest
+from app.models.conversation import Conversation
+from app.models.crm_lead import CRMLead
+from app.models.customer import Customer
+from app.models.order import Order
 from app.models.automation import (
     AutomationEdge,
     AutomationEvent,
@@ -58,6 +64,7 @@ from app.schemas.operations import (
     ReportGenerateRequest,
 )
 from app.services.action_governance import govern_materialized_ai_actions
+from app.services.action_registry import ACTION_REGISTRY
 from app.services.ai_action import materialize_ai_actions
 from app.services.ai_agent_execution import (
     create_running_ai_agent_execution,
@@ -253,7 +260,7 @@ async def transition_workflow(
             await require_feature(session, business_id=business_id, key="automations")
             await require_capacity(session, business_id=business_id, key="max_active_workflows")
         _, nodes, edges = await load_graph(session, workflow=workflow)
-        errors = validate_graph(nodes, edges)
+        errors = validate_graph(nodes, edges) + _activation_setup_errors(nodes)
         if errors:
             raise AutomationValidationError(",".join(errors))
     workflow.status = target_status
@@ -262,6 +269,18 @@ async def transition_workflow(
     event = {"active": "activated", "paused": "paused", "archived": "archived"}[target_status]
     _audit(session, workflow, actor_user_id, f"automation.workflow_{event}", f"Workflow {event}.")
     return workflow
+
+
+def _activation_setup_errors(nodes: list[AutomationNode]) -> list[str]:
+    for node in nodes:
+        if (
+            node.node_type == "approval"
+            and isinstance(node.configuration, dict)
+            and node.configuration.get("reason_code")
+            == "external_communication_setup_required"
+        ):
+            return ["workflow_setup_required"]
+    return []
 
 
 async def create_node(
@@ -741,22 +760,51 @@ async def cancel_workflow_run(
         return run
     if run.status not in RUN_CANCELABLE_STATUSES:
         raise AutomationStateError("Workflow run cannot be canceled")
+    if run.waiting_reason == "action_execution":
+        raise AutomationStateError(
+            "Workflow run cannot be canceled after provider dispatch was queued"
+        )
     now = datetime.now(UTC)
-    run.status, run.completed_at, run.waiting_reason = "canceled", now, None
     waiting = await session.scalar(select(AutomationNodeRun).where(
         AutomationNodeRun.business_id == business_id,
         AutomationNodeRun.workflow_run_id == run_id,
         AutomationNodeRun.status == "waiting",
     ).with_for_update())
     if waiting is not None:
-        waiting.status, waiting.completed_at = "canceled", now
+        action = None
+        if waiting.action_id is not None:
+            action = await session.scalar(select(AIAction).where(
+                AIAction.id == waiting.action_id,
+                AIAction.business_id == business_id,
+            ).with_for_update())
+            if action is None:
+                raise AutomationStateError("Waiting action reference is missing")
+            if action.status in {"ready", "queued", "executing", "succeeded", "failed", "uncertain"}:
+                raise AutomationStateError(
+                    "Workflow run cannot be canceled after action approval was decided"
+                )
+        approval_target = (
+            ApprovalRequest.action_id == waiting.action_id
+            if waiting.action_id is not None
+            else ApprovalRequest.workflow_node_run_id == waiting.id
+        )
         approval = await session.scalar(select(ApprovalRequest).where(
             ApprovalRequest.business_id == business_id,
-            ApprovalRequest.workflow_node_run_id == waiting.id,
+            approval_target,
             ApprovalRequest.status == "pending",
-        ))
+        ).with_for_update())
+        if action is not None and action.status == "pending_approval" and approval is None:
+            raise AutomationStateError("Pending action approval is missing")
         if approval is not None:
-            approval.status, approval.decided_at = "canceled", now
+            approval.status = "canceled"
+            approval.decided_at = now
+            approval.decided_by_user_id = actor_user_id
+            approval.decision_actor_id = actor_user_id
+            approval.decision_note = "Canceled with its workflow run."
+            if action is not None and action.status == "pending_approval":
+                action.status = "canceled"
+        waiting.status, waiting.completed_at = "canceled", now
+    run.status, run.completed_at, run.waiting_reason = "canceled", now, None
     workflow = await get_workflow(session, business_id=business_id, workflow_id=run.workflow_id)
     _audit(session, workflow, actor_user_id, "automation.workflow_run_canceled", "Canceled queued or waiting workflow run.")
     await _flush(session)
@@ -1000,8 +1048,122 @@ async def _resume_waiting_node(
             waiting.status, waiting.completed_at, waiting.failure_code = "failed", instant, f"approval_{approval.status}"
             await _fail_run(session, run, "approval_rejected" if approval.status == "rejected" else "approval_expired", run.requested_by_user_id)
             return False
+        if waiting.action_id is not None:
+            action = await session.scalar(select(AIAction).where(
+                AIAction.id == waiting.action_id,
+                AIAction.business_id == run.business_id,
+            ))
+            if action is None:
+                waiting.status = "failed"
+                waiting.completed_at = instant
+                waiting.failure_code = "action_not_found"
+                await _fail_run(
+                    session,
+                    run,
+                    "action_not_found",
+                    run.requested_by_user_id,
+                )
+                return False
+            if action.status in {"queued", "executing"}:
+                run.waiting_reason = "action_execution"
+                waiting.result_summary = (
+                    "Approval granted; durable provider dispatch is queued."
+                    if action.status == "queued"
+                    else "Approval granted; governed provider dispatch is in progress."
+                )
+                return False
+            if action.status == "ready":
+                waiting.status = "failed"
+                waiting.completed_at = instant
+                waiting.failure_code = "action_dispatch_not_queued"
+                waiting.result_summary = (
+                    "Approval was recorded, but dispatch prerequisites were not met."
+                )
+                await _fail_run(
+                    session,
+                    run,
+                    "action_dispatch_not_queued",
+                    run.requested_by_user_id,
+                )
+                return False
+            if action.status == "succeeded":
+                waiting.result_summary = (
+                    action.result_summary
+                    or "The provider accepted the governed action."
+                )
+            elif action.status in {"failed", "uncertain", "canceled"}:
+                code = (
+                    "action_dispatch_uncertain"
+                    if action.status == "uncertain"
+                    else action.failure_code or f"action_dispatch_{action.status}"
+                )
+                waiting.status = "failed"
+                waiting.completed_at = instant
+                waiting.failure_code = code[:64]
+                waiting.result_summary = (
+                    action.result_summary
+                    or "The governed provider action did not complete successfully."
+                )
+                await _fail_run(
+                    session,
+                    run,
+                    code,
+                    run.requested_by_user_id,
+                )
+                return False
+            else:
+                waiting.result_summary = (
+                    "Approval granted; governed dispatch preparation is still pending."
+                )
+                return False
+    elif run.waiting_reason == "action_execution":
+        if waiting.action_id is None:
+            raise AutomationStateError("Waiting action reference is missing")
+        action = await session.scalar(select(AIAction).where(
+            AIAction.id == waiting.action_id,
+            AIAction.business_id == run.business_id,
+        ))
+        if action is None:
+            waiting.status = "failed"
+            waiting.completed_at = instant
+            waiting.failure_code = "action_not_found"
+            await _fail_run(
+                session, run, "action_not_found", run.requested_by_user_id
+            )
+            return False
+        if action.status in {"queued", "executing", "ready", "pending_approval"}:
+            waiting.result_summary = {
+                "queued": "Approval granted; durable provider dispatch is queued.",
+                "executing": "Approval granted; governed provider dispatch is in progress.",
+                "ready": "Approval granted; dispatch preparation is pending.",
+                "pending_approval": "Governed action is waiting for approval.",
+            }[action.status]
+            return False
+        if action.status == "succeeded":
+            waiting.result_summary = (
+                action.result_summary
+                or "The provider accepted the governed action."
+            )
+        else:
+            code = (
+                "action_dispatch_uncertain"
+                if action.status == "uncertain"
+                else action.failure_code or f"action_dispatch_{action.status}"
+            )
+            waiting.status = "failed"
+            waiting.completed_at = instant
+            waiting.failure_code = code[:64]
+            waiting.result_summary = (
+                action.result_summary
+                or "The governed provider action did not complete successfully."
+            )
+            await _fail_run(session, run, code, run.requested_by_user_id)
+            return False
     waiting.status, waiting.completed_at = "succeeded", instant
-    waiting.result_summary = "Approval granted; no external dispatch occurred." if run.waiting_reason == "approval" else "Durable delay elapsed."
+    if run.waiting_reason == "approval" and waiting.action_id is None:
+        waiting.result_summary = "Internal approval granted."
+    elif run.waiting_reason == "delay":
+        waiting.result_summary = "Durable delay elapsed."
     run.current_node_key = next_node_key(node, edges)
     run.status, run.waiting_reason = "running", None
     return True
@@ -1034,6 +1196,12 @@ async def _create_governed_action_intent(
     session: AsyncSession, *, run: AutomationWorkflowRun, config: ExternalActionNodeConfig,
     actor_user_id: UUID | None, instant: datetime
 ):
+    resolved_payload = await _resolve_action_payload(
+        session,
+        run=run,
+        config=config,
+    )
+
     execution = AIAgentExecution(
         business_id=run.business_id, requested_by_user_id=actor_user_id,
         role="operations", trigger_type="automation", status="completed",
@@ -1044,15 +1212,22 @@ async def _create_governed_action_intent(
         recommendations=[], proposed_actions=[{
             "action_type": config.action_type, "description": config.description,
             "risk_level": config.risk_level, "requires_approval": config.requires_approval,
-            "action_payload": config.payload,
+            "action_payload": resolved_payload,
         }], failure_code=None, provider_request_id=None, duration_ms=0,
         input_tokens=0, output_tokens=0, estimated_cost_usd=None, completed_at=instant,
     )
     session.add(execution)
     await _flush(session)
-    actions = await materialize_ai_actions(session, business_id=run.business_id, execution_id=execution.id)
+    actions = await materialize_ai_actions(
+        session,
+        business_id=run.business_id,
+        execution_id=execution.id,
+    )
     governed = await govern_materialized_ai_actions(
-        session, business_id=run.business_id, actions=actions, requested_by_user_id=actor_user_id
+        session,
+        business_id=run.business_id,
+        actions=actions,
+        requested_by_user_id=actor_user_id,
     )
     return governed[0]
 
@@ -1096,6 +1271,130 @@ async def _execute_internal_operation(
         raise
     except Exception:
         raise AutomationValidationError("internal_operation_failed") from None
+
+
+async def _resolve_action_payload(
+    session: AsyncSession,
+    *,
+    run: AutomationWorkflowRun,
+    config: ExternalActionNodeConfig,
+) -> dict[str, Any]:
+    payload = dict(config.payload)
+
+    for target, binding in config.context_bindings.items():
+        if target in payload:
+            raise AutomationValidationError("action_context_binding_conflict")
+
+        if binding == "event_customer_ref":
+            value = await _resolve_event_customer_ref(
+                session,
+                business_id=run.business_id,
+                payload=run.context_payload,
+            )
+        elif binding == "event_conversation_ref":
+            value = await _resolve_event_conversation_ref(
+                session,
+                business_id=run.business_id,
+                payload=run.context_payload,
+            )
+        else:
+            raise AutomationValidationError("action_context_binding_unsupported")
+
+        payload[target] = value
+
+    try:
+        validated = ACTION_REGISTRY.validate_payload(
+            config.action_type,
+            payload,
+        )
+    except (AIActionValidationError, UnsupportedAIActionError):
+        raise AutomationValidationError(
+            "action_context_payload_invalid"
+        ) from None
+
+    return validated.model_dump(mode="json")
+
+
+async def _resolve_event_conversation_ref(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    payload: dict[str, Any],
+) -> str:
+    event = payload.get("event")
+    if not isinstance(event, dict):
+        raise AutomationValidationError("action_context_event_invalid")
+    if event.get("entity_type") != "conversation":
+        raise AutomationValidationError("action_context_conversation_required")
+
+    try:
+        conversation_id = UUID(str(event.get("entity_id")))
+    except (TypeError, ValueError):
+        raise AutomationValidationError(
+            "action_context_conversation_invalid"
+        ) from None
+
+    conversation = await session.scalar(
+        select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.business_id == business_id,
+        )
+    )
+    if conversation is None or conversation.business_id != business_id:
+        raise AutomationValidationError("action_context_conversation_not_found")
+    return str(conversation.id)
+
+
+async def _resolve_event_customer_ref(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    payload: dict[str, Any],
+) -> str:
+    event = payload.get("event")
+    if not isinstance(event, dict):
+        raise AutomationValidationError("action_context_event_invalid")
+
+    entity_type = event.get("entity_type")
+    model_by_entity_type = {
+        "order": Order,
+        "lead": CRMLead,
+        "conversation": Conversation,
+    }
+    entity_model = model_by_entity_type.get(entity_type)
+    if entity_model is None:
+        raise AutomationValidationError("action_context_entity_unsupported")
+
+    raw_entity_id = event.get("entity_id")
+    try:
+        entity_id = UUID(str(raw_entity_id))
+    except (TypeError, ValueError):
+        raise AutomationValidationError("action_context_entity_invalid") from None
+
+    entity = await session.scalar(
+        select(entity_model).where(
+            entity_model.id == entity_id,
+            entity_model.business_id == business_id,
+        )
+    )
+    if entity is None:
+        raise AutomationValidationError("action_context_entity_not_found")
+
+    customer_id = entity.customer_id
+    if customer_id is None:
+        raise AutomationValidationError("action_context_customer_unavailable")
+
+    customer = await session.scalar(
+        select(Customer).where(
+            Customer.id == customer_id,
+            Customer.business_id == business_id,
+            Customer.status != "archived",
+        )
+    )
+    if customer is None:
+        raise AutomationValidationError("action_context_customer_unavailable")
+
+    return str(customer.id)
 
 
 def _context_uuid(parameters: dict[str, Any], payload: dict[str, Any], key: str) -> UUID:

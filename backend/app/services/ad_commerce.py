@@ -11,6 +11,10 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.domain.integrations import (
+    ExternalConnectorWritesDisabledError,
+    require_external_connector_writes_enabled,
+)
 from app.exceptions.commerce import (
     CommerceConflictError,
     CommerceConfigurationRequiredError,
@@ -61,7 +65,10 @@ async def synchronize_destination(
     reconcile_only: bool = False,
     adapters: Mapping[str, object] | None = None,
     credentials: IntegrationCredentialStore = credential_store,
+    configuration=settings,
 ) -> CommerceFeedDestination:
+    if not reconcile_only:
+        _require_feed_writes(configuration)
     destination = await _destination(
         session, business_id=business_id, destination_id=destination_id, for_update=True,
     )
@@ -79,6 +86,8 @@ async def synchronize_destination(
         and destination.managed
         and not destination.external_resource_id
     ):
+        if reconcile_only:
+            raise CommerceConfigurationRequiredError("asset_selection_required")
         available = await adapter.list_destinations(
             material, account_reference=destination.external_account_id,
         )
@@ -291,7 +300,9 @@ async def synchronize_product_group(
     idempotency_key: str,
     adapters: Mapping[str, object] | None = None,
     credentials: IntegrationCredentialStore = credential_store,
+    configuration=settings,
 ) -> ProductGroupDestination:
+    _require_feed_writes(configuration)
     group = await session.scalar(select(ProductGroup).where(
         ProductGroup.id == product_group_id,
         ProductGroup.business_id == business_id,
@@ -399,6 +410,18 @@ async def _authorized_material(session, *, business_id, destination, credentials
         connector_type=connection.connector_type, purpose="oauth_credentials",
     )
     return connection, material
+
+
+def _require_feed_writes(configuration) -> None:
+    try:
+        require_external_connector_writes_enabled(
+            configuration.external_connector_writes_enabled
+            and configuration.external_connector_write_mode == "enabled"
+        )
+    except ExternalConnectorWritesDisabledError:
+        raise CommerceConfigurationRequiredError(
+            "external_writes_disabled"
+        ) from None
 
 
 def _normalize_product(product, images, destination):

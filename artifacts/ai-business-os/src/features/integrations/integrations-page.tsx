@@ -26,6 +26,7 @@ import {
   SectionTitle,
 } from "@/components/product-ui";
 import { recommendedIntegrationConnectors } from "@/lib/business-features";
+import { providerReadinessBadges } from "@/lib/phase8b-readiness";
 import { humanizeApiError } from "@/services/api-client";
 import {
   integrationsApi,
@@ -365,6 +366,11 @@ export function IntegrationsPage() {
                   <div className="chip-list integration-capabilities">
                     {definition.read_capabilities.slice(0, 2).map((item) => (
                       <Badge key={item}>{humanize(item)}</Badge>
+                    ))}
+                  </div>
+                  <div className="chip-list integration-capabilities">
+                    {providerReadinessBadges(definition, connection).map((item) => (
+                      <Badge key={item.id} tone={item.tone}>{item.label}</Badge>
                     ))}
                   </div>
                   {connection ? (

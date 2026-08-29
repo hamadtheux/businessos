@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import signal
 
 from app.core.config import settings
+from app.core.logging import configure_logging
 from app.db.session import AsyncSessionFactory, engine
 from app.services.background_jobs import upsert_worker_heartbeat
 from app.services.job_scheduler import enqueue_due_work
@@ -24,7 +24,8 @@ async def run_scheduler() -> None:
             loop.add_signal_handler(signum, stop.set)
         except NotImplementedError:
             pass
-    logging.basicConfig(level=logging.INFO)
+    configure_logging(role="scheduler")
+    logger.info("scheduler_started", extra={"scheduler_id": scheduler_id})
     try:
         while not stop.is_set():
             try:
@@ -40,16 +41,21 @@ async def run_scheduler() -> None:
                     )
                     await session.commit()
                 if any(counts.values()):
-                    logger.info(json.dumps({
-                        "event": "scheduler_enqueued_due_work",
+                    logger.info(
+                        "scheduler_enqueued_due_work",
+                        extra={
+                            "scheduler_id": scheduler_id,
+                            "enqueued_total": sum(counts.values()),
+                        },
+                    )
+            except Exception as exc:
+                logger.error(
+                    "scheduler_iteration_failed",
+                    extra={
                         "scheduler_id": scheduler_id,
-                        "counts": counts,
-                    }))
-            except Exception:
-                logger.exception(json.dumps({
-                    "event": "scheduler_iteration_failed",
-                    "scheduler_id": scheduler_id,
-                }))
+                        "exception_type": type(exc).__name__,
+                    },
+                )
             if not stop.is_set():
                 try:
                     await asyncio.wait_for(
@@ -70,6 +76,7 @@ async def run_scheduler() -> None:
                 await session.commit()
         finally:
             await engine.dispose()
+            logger.info("scheduler_stopped", extra={"scheduler_id": scheduler_id})
 
 
 if __name__ == "__main__":

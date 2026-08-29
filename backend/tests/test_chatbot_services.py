@@ -14,6 +14,7 @@ os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 from app.domain.chatbot import hash_public_session_token  # noqa: E402
 from app.exceptions.chatbot import (  # noqa: E402
     ChatbotAuthorizationError,
+    ChatbotOriginError,
     ChatbotPersistenceError,
     ChatbotValidationError,
 )
@@ -40,6 +41,7 @@ from app.services.chatbot import (  # noqa: E402
     chatbot_analytics,
     load_public_session,
     lookup_public_order,
+    resolve_public_widget,
     run_public_ai,
     search_public_catalog,
 )
@@ -50,6 +52,20 @@ CONFIG_ID = UUID("d2000000-0000-4000-8000-000000000002")
 WIDGET_ID = "w" * 43
 TOKEN = "t" * 64
 NOW = datetime(2026, 8, 23, 12, tzinfo=UTC)
+
+
+class PublicWidgetOriginTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unapproved_embed_origin_is_rejected(self) -> None:
+        _, config, business = _records()
+        session = _DomainSession(execute_row=(config, business, None))
+
+        with self.assertRaises(ChatbotOriginError):
+            await resolve_public_widget(
+                session,
+                widget_public_id=WIDGET_ID,
+                origin="https://attacker.example",
+                referer=None,
+            )
 
 
 class PublicSessionServiceTests(unittest.IsolatedAsyncioTestCase):

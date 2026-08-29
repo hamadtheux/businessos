@@ -410,6 +410,7 @@ class Competitor(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             ["source_candidate_id", "business_id"],
             ["competitor_candidates.id", "competitor_candidates.business_id"],
             name="fk_mkt_competitors_source_candidate_business",
+            use_alter=True,
         ),
         CheckConstraint("char_length(btrim(name)) BETWEEN 1 AND 180", name="valid_name"),
         CheckConstraint("website_domain IS NULL OR website_domain ~ '^[A-Za-z0-9.-]{1,253}$'", name="valid_website_domain"),

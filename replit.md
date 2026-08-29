@@ -1,51 +1,77 @@
 # AI Business OS
 
-AI Business OS is a multi-business command center where owners supervise an AI team across sales, support, operations, marketing, customers, orders, automations, approvals, and analytics.
+AI Business OS is a multi-business SaaS where owners supervise an AI workforce
+across sales, support, operations, marketing, commerce, automations, approvals,
+analytics, Business Brain, and persistent memory.
 
-## Run & Operate
+This repository is no longer a browser-persistence/Express prototype. The
+authoritative production backend is the FastAPI application under `backend/`;
+the production frontend is `artifacts/ai-business-os/`. Do not use
+`artifacts/api-server/` or Drizzle schema-push commands as the production API or
+database authority.
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+## Run locally
 
-## Stack
+Backend (Python 3.12, uv, PostgreSQL):
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+```bash
+cd backend
+uv sync --frozen
+uv run alembic upgrade head
+uv run fastapi dev app/main.py
+```
 
-## Where things live
+Run worker and scheduler separately against the same database:
 
-- `artifacts/ai-business-os/src/App.tsx` — main SPA shell, route rendering, seeded business data, local persistence, and feature interactions.
-- `artifacts/ai-business-os/src/index.css` — application theme and responsive visual system.
-- `attached_assets/Pasted-PROJECT-AI-BUSINESS-OS-COMPLETE-FRONTEND-REQUIREMENT-0-_1786996796521.txt` — product requirements and feature scope.
-- `attached_assets/Image_18-08-2026_at_12.38_AM_1786996820303.png` — visual reference supplied for the clean dashboard direction.
+```bash
+uv run python -m app.worker
+uv run python -m app.scheduler
+```
 
-## Architecture decisions
+Frontend (React, TypeScript, Vite):
 
-- The first release is a frontend-complete prototype with deterministic AI responses and browser persistence, so the full product loop is usable without external credentials or third-party APIs.
-- Business switching is modeled as a first-class state change; business-scoped data resets and persists independently for the seeded workspace experience.
-- High-risk AI actions remain visible in approvals, while low-risk actions provide direct feedback through the UI.
+```bash
+cd artifacts/ai-business-os
+pnpm install --frozen-lockfile
+PORT=5174 BASE_PATH=/ pnpm dev
+```
 
-## Product
+The Vite development server proxies `/api` to `http://127.0.0.1:8000` by
+default. Production uses the same-origin `/api` and widget model documented in
+`docs/production-deployment.md`.
 
-The product includes a responsive dashboard, AI command center, unified inbox, orders, customers, CRM pipeline, AI CMO, agent management, automations, approval center, opportunity center, analytics, integrations, Business Brain, and settings.
+## Production authority
 
-## User preferences
+- Settings and fail-fast validation: `backend/app/core/config.py`
+- API/liveness/readiness: `backend/app/main.py`
+- Durable jobs: `backend/app/worker.py` and `backend/app/scheduler.py`
+- Schema: SQLAlchemy models plus Alembic migrations under `backend/alembic/`
+- Deployment runbook: `docs/production-deployment.md`
+- Provider truth/evidence rules: `docs/provider-acceptance.md`
+- Controlled acceptance: `docs/phase7-acceptance-checklist.md`
+- Local production-like topology: `docker-compose.production-like.yml`
 
-- Keep the experience clean and visually close to the supplied dashboard screenshot.
-- Use the uploaded product requirement as the source of truth for scope and interactions.
+All business-owned data is tenant-scoped by `business_id`. External provider
+writes are disabled by default and may occur only through the governed action
+execution boundary with both global write controls enabled. Never introduce
+browser-stored credentials, fabricated provider success, or client-controlled
+tenant/resource identity.
 
-## Gotchas
+## Verification
 
-- The web artifact's Vite config expects `PORT` and `BASE_PATH`; use the managed workflow for previews or provide both when running a manual production build.
+```bash
+cd backend
+uv run python -m pytest -q
+uv run python -m compileall app scripts
+uv run alembic heads
+uv run alembic current
+uv run alembic check
 
-## Pointers
+cd ../artifacts/ai-business-os
+pnpm typecheck
+pnpm test
+PORT=5174 BASE_PATH=/ pnpm build
+```
 
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+Keep the UI clean and consistent with the supplied design references, but the
+production API/database contracts—not old prototype notes—are authoritative.

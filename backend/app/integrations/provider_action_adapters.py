@@ -477,6 +477,7 @@ def build_configured_action_adapters(
 ) -> dict[str, ProviderConnectorActionAdapter]:
     if (
         not configuration.external_connector_writes_enabled
+        or configuration.external_connector_write_mode != "enabled"
         or configuration.integration_credential_backend == "disabled"
     ):
         return {}

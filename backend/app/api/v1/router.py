@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.v1.ai_agents import router as ai_agents_router
+from app.api.v1.activation_readiness import router as activation_readiness_router
 from app.api.v1.ai_workforce import router as ai_workforce_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.approvals import router as approvals_router
@@ -25,6 +26,7 @@ api_router = APIRouter()
 
 api_router.include_router(auth_router)
 api_router.include_router(businesses_router)
+api_router.include_router(activation_readiness_router)
 api_router.include_router(catalog_router)
 api_router.include_router(commerce_router)
 api_router.include_router(commerce_webhook_router)

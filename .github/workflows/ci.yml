@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17.6-alpine
+        env:
+          POSTGRES_DB: aibos_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d aibos_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      AIBOS_ENVIRONMENT: testing
+      AIBOS_DEBUG: "false"
+      AIBOS_DATABASE_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/aibos_test
+      AIBOS_DATABASE_SSL_MODE: disable
+      AIBOS_AUTH_SECRET_KEY: ci-only-auth-secret-4Jm8Qp2Vx7Nt5Ks9Df3Ha6Zr1Wc0
+      AIBOS_LOG_LEVEL: WARNING
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.5"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - run: uv sync --frozen --dev
+      - run: uv run alembic upgrade head
+      - run: uv run python -m pytest -q
+      - run: uv run python -m compileall app scripts
+      - run: uv run alembic heads
+      - run: uv run alembic current
+      - run: uv run alembic check
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: artifacts/ai-business-os
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.14.1"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: .
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+        env:
+          PORT: "5174"
+          BASE_PATH: /
+          VITE_API_BASE_URL: ""
+          VITE_WIDGET_API_BASE_URL: ""
+          VITE_WIDGET_APP_URL: ""
+          VITE_ENABLE_DEMO_DATA: "false"
+
+  packaging:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -f docker-compose.production-like.yml config --quiet
+      - run: docker build --file backend/Dockerfile backend
+      - run: docker build --file artifacts/ai-business-os/Dockerfile .

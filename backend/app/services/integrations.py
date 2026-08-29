@@ -129,7 +129,9 @@ def connector_catalog(configuration: Settings = settings) -> list[ConnectorDefin
             capabilities=definition.capabilities,
             read_capabilities=definition.read_capabilities,
             future_write_capabilities=definition.future_write_capabilities,
-            requested_scopes=definition.oauth_scopes,
+            requested_scopes=definition.requested_oauth_scopes(
+                configuration.external_connector_write_mode
+            ),
             webhook_support=definition.webhook_support,
             external_writes_enabled=writes_enabled,
             resource_types=definition.resource_types,
@@ -224,7 +226,9 @@ async def begin_authorization(
             state=state,
             code_challenge=challenge,
             redirect_uri=str(configuration.integration_oauth_callback_url),
-            scopes=definition.oauth_scopes,
+            scopes=definition.requested_oauth_scopes(
+                configuration.external_connector_write_mode
+            ),
         ))
     except Exception as exc:
         await _best_effort_revoke(
@@ -296,14 +300,13 @@ async def begin_authorization(
 async def complete_authorization(
     session: AsyncSession,
     *,
-    connector_type: str,
+    connector_type: str | None,
     state: str,
     code: str,
     adapters: ConnectorAdapterRegistry = connector_adapters,
     credentials: IntegrationCredentialStore = credential_store,
     configuration: Settings = settings,
 ) -> AuthorizationCallbackResponse:
-    definition = require_connector(connector_type)
     if not state or len(state) > 512 or not code or len(code) > 4096:
         raise IntegrationValidationError("authorization_callback_invalid")
     if configuration.integration_oauth_callback_url is None:
@@ -320,11 +323,17 @@ async def complete_authorization(
     now = datetime.now(UTC)
     if (
         oauth_state is None
-        or oauth_state.connector_type != connector_type
+        or (
+            connector_type is not None
+            and oauth_state.connector_type != connector_type
+        )
         or oauth_state.consumed_at is not None
         or oauth_state.expires_at <= now
     ):
         raise IntegrationStateError("authorization_state_invalid")
+
+    connector_type = oauth_state.connector_type
+    definition = require_connector(connector_type)
 
     pkce_material = await credentials.retrieve(
         oauth_state.pkce_verifier_reference,
@@ -758,6 +767,10 @@ async def ingest_webhook(
         raise IntegrationPersistenceError("webhook_unavailable") from None
     if connection is None:
         raise IntegrationNotFoundError("connection_not_found")
+    if not _webhook_matches_selected_resources(
+        connector_type, payload, connection.selected_resources
+    ):
+        raise IntegrationWebhookVerificationError("webhook_account_mismatch")
     adapter = adapters.get(connector_type)
     try:
         normalize_many = getattr(adapter, "normalize_webhooks", None)
@@ -823,7 +836,10 @@ async def ingest_webhook(
             else:
                 event = await session.scalar(
                     select(IntegrationWebhookEvent)
-                    .where(IntegrationWebhookEvent.id == inserted_id)
+                    .where(
+                        IntegrationWebhookEvent.id == inserted_id,
+                        IntegrationWebhookEvent.business_id == connection.business_id,
+                    )
                     .with_for_update()
                 )
                 if event is None:
@@ -1281,6 +1297,56 @@ def _record_health_change(
             related_entity_type="integration_connection",
             related_entity_id=connection.id,
         ))
+
+
+def _webhook_matches_selected_resources(
+    connector_type: str,
+    payload: Mapping[str, object],
+    selected_resources: list[dict[str, object]],
+) -> bool:
+    """Bind signed Meta webhook evidence to the selected tenant resources."""
+    if connector_type not in {
+        "whatsapp_business", "facebook", "instagram", "meta_ads"
+    }:
+        return True
+    selected: dict[str, set[str]] = {}
+    for item in selected_resources:
+        resource_type = item.get("resource_type")
+        reference = item.get("external_reference")
+        if isinstance(resource_type, str) and isinstance(reference, str):
+            selected.setdefault(resource_type, set()).add(reference)
+    raw_entries = payload.get("entry")
+    if not isinstance(raw_entries, list) or not raw_entries:
+        return False
+    entry_ids = {
+        str(entry.get("id"))
+        for entry in raw_entries
+        if isinstance(entry, Mapping) and entry.get("id") is not None
+    }
+    if not entry_ids:
+        return False
+    if connector_type == "whatsapp_business":
+        if not entry_ids.issubset(selected.get("whatsapp_business_account", set())):
+            return False
+        phone_ids: set[str] = set()
+        for entry in raw_entries:
+            changes = entry.get("changes") if isinstance(entry, Mapping) else None
+            if not isinstance(changes, list):
+                continue
+            for change in changes:
+                value = change.get("value") if isinstance(change, Mapping) else None
+                metadata = value.get("metadata") if isinstance(value, Mapping) else None
+                phone_id = metadata.get("phone_number_id") if isinstance(metadata, Mapping) else None
+                if phone_id is not None:
+                    phone_ids.add(str(phone_id))
+        return not phone_ids or phone_ids.issubset(selected.get("phone_number", set()))
+    allowed_types = {
+        "facebook": ("facebook_page",),
+        "instagram": ("instagram_account", "facebook_page"),
+        "meta_ads": ("meta_business", "ad_account"),
+    }[connector_type]
+    allowed = set().union(*(selected.get(item, set()) for item in allowed_types))
+    return bool(allowed) and entry_ids.issubset(allowed)
 
 
 def _safe_webhook_payload(normalized: NormalizedIntegrationEvent) -> dict[str, object]:

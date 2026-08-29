@@ -105,6 +105,7 @@ from app.models.order import (
     OrderRefund,
     OrderRefundLine,
 )
+from app.models.provider_write_acceptance import ProviderWriteAcceptance
 from app.models.provider_appointment_type import ProviderAppointmentType
 from app.models.provider_availability_exception import ProviderAvailabilityException
 from app.models.provider_availability_rule import ProviderAvailabilityRule
@@ -210,6 +211,7 @@ __all__ = [
     "OrderLineItem",
     "OrderRefund",
     "OrderRefundLine",
+    "ProviderWriteAcceptance",
     "ProviderAppointmentType",
     "ProviderAvailabilityException",
     "ProviderAvailabilityRule",

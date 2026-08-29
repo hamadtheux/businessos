@@ -443,9 +443,13 @@ class WebhookSecurityTests(unittest.TestCase):
         body = json.dumps({"id": 77, "updated_at": "2026-08-01T12:00:00Z"}, separators=(",", ":")).encode()
         signature = base64.b64encode(hmac.new(b"secret", body, hashlib.sha256).digest()).decode()
         event = ShopifyCommerceAdapter().verify_and_parse_webhook(
-            CredentialMaterial({"webhook_secret": "secret"}),
+            CredentialMaterial({
+                "webhook_secret": "secret",
+                "store_url": "https://shop.example.test",
+            }),
             CommerceWebhookRequest(headers={
                 "x-shopify-hmac-sha256": signature,
+                "x-shopify-shop-domain": "shop.example.test",
                 "x-shopify-webhook-id": "delivery-1", "x-shopify-topic": "orders/updated",
             }, body=body),
         )
@@ -456,19 +460,49 @@ class WebhookSecurityTests(unittest.TestCase):
                 CredentialMaterial({"webhook_secret": "secret"}),
                 CommerceWebhookRequest(headers={"x-shopify-hmac-sha256": "bad"}, body=body),
             )
+        with self.assertRaises(CommerceProviderError):
+            ShopifyCommerceAdapter().verify_and_parse_webhook(
+                CredentialMaterial({
+                    "webhook_secret": "secret",
+                    "store_url": "https://shop.example.test",
+                }),
+                CommerceWebhookRequest(headers={
+                    "x-shopify-hmac-sha256": signature,
+                    "x-shopify-shop-domain": "other.example.test",
+                    "x-shopify-webhook-id": "delivery-1",
+                    "x-shopify-topic": "orders/updated",
+                }, body=body),
+            )
 
     def test_other_provider_webhooks_verify_and_normalize(self) -> None:
         body = json.dumps({"id": 88, "date_modified_gmt": "2026-08-01T12:00:00Z"}, separators=(",", ":")).encode()
         signature = base64.b64encode(hmac.new(b"secret", body, hashlib.sha256).digest()).decode()
         woo = WooCommerceAdapter().verify_and_parse_webhook(
-            CredentialMaterial({"webhook_secret": "secret"}),
+            CredentialMaterial({
+                "webhook_secret": "secret",
+                "store_url": "https://woo.example.test",
+            }),
             CommerceWebhookRequest(headers={
                 "x-wc-webhook-signature": signature,
                 "x-wc-webhook-delivery-id": "woo-1",
                 "x-wc-webhook-topic": "order.updated",
+                "x-wc-webhook-source": "https://woo.example.test/",
             }, body=body),
         )
         self.assertEqual(woo.reconciliation_domain, "orders")
+        with self.assertRaises(CommerceProviderError):
+            WooCommerceAdapter().verify_and_parse_webhook(
+                CredentialMaterial({
+                    "webhook_secret": "secret",
+                    "store_url": "https://woo.example.test",
+                }),
+                CommerceWebhookRequest(headers={
+                    "x-wc-webhook-signature": signature,
+                    "x-wc-webhook-delivery-id": "woo-1",
+                    "x-wc-webhook-topic": "order.updated",
+                    "x-wc-webhook-source": "https://other.example.test/",
+                }, body=body),
+            )
 
         event_id, timestamp = "big-1", str(int(time.time()))
         big_body = json.dumps({"producer": "stores/abc123", "scope": "store/order/updated", "data": {"id": 99}, "created_at": int(timestamp)}, separators=(",", ":")).encode()

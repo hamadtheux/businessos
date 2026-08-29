@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies.business import BusinessAccessDependency
+from app.api.dependencies.business import BusinessAccessDependency, require_business_role
 from app.api.response_materialization import materialize_response_before_commit
 from app.db.session import get_db_session
 from app.exceptions.commerce import (
@@ -85,6 +85,7 @@ async def add_connection(
     data: CommerceConnectionCreate, access: BusinessAccessDependency,
     response: Response, session: SessionDependency,
 ):
+    require_business_role(access)
     return await _write(session, response, lambda: service.create_connection(
         session, business_id=access.business.id, actor_user_id=access.user.id, data=data,
     ))
@@ -102,6 +103,7 @@ async def configure_connection(
     connection_id: UUID, data: CommerceConnectionConfigure,
     access: BusinessAccessDependency, response: Response, session: SessionDependency,
 ):
+    require_business_role(access)
     return await _write(session, response, lambda: service.configure_connection(
         session, business_id=access.business.id, connection_id=connection_id,
         actor_user_id=access.user.id, data=data,
@@ -113,6 +115,7 @@ async def request_sync(
     connection_id: UUID, data: CommerceSyncRequest, access: BusinessAccessDependency,
     response: Response, session: SessionDependency,
 ):
+    require_business_role(access)
     run, _created = await _write(session, response, lambda: service.request_sync(
         session, business_id=access.business.id, connection_id=connection_id,
         mode=data.mode, idempotency_key=data.idempotency_key,
@@ -301,6 +304,7 @@ async def add_feed_destination(
     data: FeedDestinationCreate, access: BusinessAccessDependency,
     response: Response, session: SessionDependency,
 ):
+    require_business_role(access)
     return await _write(session, response, lambda: service.create_feed_destination(
         session, business_id=access.business.id, actor_user_id=access.user.id, data=data,
     ))
@@ -330,6 +334,7 @@ async def synchronize_feed_destination(
     destination_id: UUID, data: FeedDestinationSyncRequest,
     access: BusinessAccessDependency, response: Response, session: SessionDependency,
 ):
+    require_business_role(access)
     return await _write(session, response, lambda: ad_commerce_service.synchronize_destination(
         session, business_id=access.business.id, destination_id=destination_id,
         actor_user_id=access.user.id, idempotency_key=data.idempotency_key,
@@ -361,6 +366,7 @@ async def synchronize_product_group(
     product_group_id: UUID, data: ProductGroupSyncRequest,
     access: BusinessAccessDependency, response: Response, session: SessionDependency,
 ):
+    require_business_role(access)
     return await _write(session, response, lambda: ad_commerce_service.synchronize_product_group(
         session, business_id=access.business.id, product_group_id=product_group_id,
         destination_id=data.destination_id, actor_user_id=access.user.id,

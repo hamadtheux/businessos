@@ -1118,12 +1118,25 @@ async def compile_workflow(
             "kind": "delay", "mode": "duration", "seconds": wait_seconds,
             "until": None, "context_field": None, "offset_seconds": 0,
         }))
-    if _requests_external_action(normalized):
-        specifications.append(("approval", "Review external communication", {
-            "kind": "approval", "reason_code": "external_communication",
+    action_specifications = _action_node_specifications(
+        normalized,
+        trigger_type=trigger_type,
+    )
+    if action_specifications:
+        specifications.extend(action_specifications)
+    elif _requests_external_action(normalized):
+        # Keep unsupported external-action requests safely review-only until a
+        # trusted runtime binding exists. Never pretend an executable action
+        # was compiled.
+        specifications.append(("approval", "Review unsupported external communication", {
+            "kind": "approval",
+            "reason_code": "external_communication_setup_required",
             "expires_in_seconds": None,
         }))
-    specifications.append(("end", "Safe completion", {"kind": "end", "outcome": "success"}))
+
+    specifications.append(
+        ("end", "Safe completion", {"kind": "end", "outcome": "success"})
+    )
     nodes: list[AutomationNode] = []
     for index, (node_type, name, raw) in enumerate(specifications):
         node = AutomationNode(
@@ -1213,6 +1226,47 @@ async def refine_workflow(
         )
     elif "email instead" in normalized or "whatsapp instead" in normalized:
         requested = "email" if "email instead" in normalized else "whatsapp"
+        context = _refinement_context(workflow.description or "", normalized)
+        action_specifications = _action_node_specifications(
+            context,
+            trigger_type=workflow.trigger_type,
+        )
+        replacement = next(
+            (
+                item
+                for item in action_specifications
+                if item[2].get("action_type")
+                == ("send_email" if requested == "email" else "send_whatsapp_message")
+            ),
+            None,
+        )
+        if replacement is None:
+            code = (
+                "copilot_refinement_whatsapp_setup_required"
+                if requested == "whatsapp"
+                else "copilot_refinement_action_setup_required"
+            )
+            raise AutomationValidationError(code)
+        action_node = next(
+            (node for node in nodes if node.node_type == "action"),
+            None,
+        )
+        if action_node is None:
+            raise AutomationValidationError(
+                "copilot_refinement_action_unavailable"
+            )
+        _node_type, replacement_name, replacement_config = replacement
+        await update_node(
+            session,
+            business_id=business_id,
+            workflow_id=workflow_id,
+            node_key=action_node.node_key,
+            actor_user_id=actor_user_id,
+            data=NodeUpdate(
+                name=replacement_name,
+                configuration=replacement_config,
+            ),
+        )
         await update_workflow(
             session, business_id=business_id, workflow_id=workflow_id,
             actor_user_id=actor_user_id,
@@ -1234,11 +1288,34 @@ async def refine_workflow(
 
 
 def _response(detail, normalized, required, missing, stops, proposed_actions):
+    compiled_action_types = {
+        str(configuration.get("action_type"))
+        for node in detail.get("nodes", [])
+        if (configuration := _node_configuration(node))
+        and isinstance(configuration, dict)
+        and configuration.get("kind") == "action"
+    }
+    response_actions = [
+        {
+            **action,
+            "execution_state": (
+                "governed_action_compiled_pending_approval"
+                if action["action_type"] in compiled_action_types
+                else "withheld_pending_authoritative_inputs"
+            ),
+        }
+        for action in proposed_actions
+    ]
     explanation = (
         "This draft uses a trusted trigger, deterministic conditions, durable delays, and the existing approval queue. "
         "No message, provider write, or spend occurs during compilation or dry-run."
     )
-    if _requests_external_action(normalized):
+    if compiled_action_types:
+        explanation += (
+            " A governed action node was compiled, but it remains subject to "
+            "runtime tenant identity resolution, mandatory approval, and provider dispatch."
+        )
+    elif _requests_external_action(normalized):
         explanation += " The requested external action is intentionally withheld until its provider, recipient identity, consent, and policy inputs are authoritative."
     return {
         "workflow": detail,
@@ -1246,9 +1323,18 @@ def _response(detail, normalized, required, missing, stops, proposed_actions):
         "required_integrations": required,
         "missing_information": missing,
         "stop_conditions": stops,
-        "proposed_actions": proposed_actions,
+        "proposed_actions": response_actions,
         "executable_actions_withheld": _requests_external_action(normalized),
     }
+
+
+def _node_configuration(node: object) -> dict[str, object] | None:
+    value = (
+        node.get("configuration")
+        if isinstance(node, dict)
+        else getattr(node, "configuration", None)
+    )
+    return value if isinstance(value, dict) else None
 
 
 def _trigger_type(value: str) -> str:
@@ -1354,6 +1440,92 @@ def _proposed_actions(value: str) -> list[dict[str, str]]:
             "execution_state": "withheld_pending_authoritative_inputs",
         }))
     return [item for _, item in sorted(candidates, key=lambda candidate: candidate[0])]
+
+
+def _action_node_specifications(
+    value: str,
+    *,
+    trigger_type: str,
+) -> list[tuple[str, str, dict[str, object]]]:
+    """
+    Compile deterministic, governed external-action nodes only when the
+    trusted workflow event can resolve a tenant-owned customer at runtime.
+
+    Recipient identity is never embedded in the workflow definition.
+    It is bound from trusted event context during execution.
+    """
+    supported_customer_triggers = {
+        "order_created",
+        "order_status_changed",
+        "lead_created",
+    }
+    if trigger_type not in supported_customer_triggers:
+        return []
+
+    normalized = value.casefold()
+    proposals = _proposed_actions(normalized)
+    specifications: list[tuple[str, str, dict[str, object]]] = []
+
+    for proposal in proposals:
+        action_type = proposal["action_type"]
+
+        if action_type == "send_email":
+            if trigger_type == "order_created":
+                name = "Send order confirmation email"
+                subject = "Order received"
+                body = (
+                    "We received your order. "
+                    "Thank you for your purchase."
+                )
+            elif trigger_type == "order_status_changed" and (
+                "review" in normalized or "deliver" in normalized
+            ):
+                name = "Send delivery follow-up email"
+                subject = "How did your order go?"
+                body = (
+                    "Your order has been delivered. "
+                    "We would appreciate your feedback."
+                )
+            elif trigger_type == "lead_created":
+                name = "Send new lead follow-up email"
+                subject = "Thanks for reaching out"
+                body = (
+                    "Thanks for your interest. "
+                    "We will follow up with you shortly."
+                )
+            else:
+                name = "Send customer email"
+                subject = "A message from us"
+                body = "We are following up with you."
+
+            specifications.append(
+                (
+                    "action",
+                    name,
+                    {
+                        "kind": "action",
+                        "action_type": "send_email",
+                        "description": proposal["condition"],
+                        "payload": {
+                            "subject": subject,
+                            "body": body,
+                        },
+                        "context_bindings": {
+                            "recipient_ref": "event_customer_ref",
+                        },
+                        "risk_level": "medium",
+                        "requires_approval": True,
+                    },
+                )
+            )
+            continue
+
+        # Proactive WhatsApp is deliberately not compiled. The current
+        # provider boundary requires a trusted conversation binding and an
+        # open 24-hour customer-service window; order and lead triggers do not
+        # prove either condition. Keep those requests setup-required.
+
+    return specifications
 
 
 def _stop_conditions(value: str) -> list[str]:

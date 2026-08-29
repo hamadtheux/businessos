@@ -50,8 +50,13 @@ def validate_node_configuration(node_type: str, raw: object, *, workflow_trigger
     elif parsed.kind in {"condition", "branch"}:
         validate_condition(parsed.condition)
     elif parsed.kind == "action":
+        validation_payload = dict(parsed.payload)
+        for target in parsed.context_bindings:
+            if target in validation_payload:
+                raise AutomationValidationError("node_configuration_invalid")
+            validation_payload[target] = "00000000-0000-0000-0000-000000000000"
         try:
-            ACTION_REGISTRY.validate_payload(parsed.action_type, parsed.payload)
+            ACTION_REGISTRY.validate_payload(parsed.action_type, validation_payload)
         except Exception:
             raise AutomationValidationError("node_configuration_invalid") from None
     return parsed.model_dump(mode="json")

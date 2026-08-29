@@ -412,14 +412,14 @@ export function OnboardingPage() {
     if (!createdBusinessId || setupState !== "success") return;
     selectBusiness(createdBusinessId);
     sessionStorage.removeItem(ONBOARDING_DRAFT_KEY);
-    setLocation("/dashboard");
+    setLocation(form.channels.length ? "/integrations" : "/dashboard");
   };
 
   const stepTitles: Record<number, string> = {
     0: "Business basics",
     1: "Products & services",
     2: "Brand voice",
-    3: "Connect channels",
+    3: "Plan connections",
     4: "Brand identity",
     5: "AI team setup",
   };
@@ -438,7 +438,7 @@ export function OnboardingPage() {
     step !== 5
       ? stepTitles[step]
       : setupState === "success"
-        ? "Your AI Business Team is ready!"
+        ? "Your workspace is ready"
         : setupState === "failed"
           ? businessSavedBeforeFailure
             ? catalogSaveFailed
@@ -454,11 +454,11 @@ export function OnboardingPage() {
         : step === 2
           ? "Your AI team will use this voice whenever it writes, replies, or recommends."
           : step === 3
-            ? "Choose the channels your team should be ready to work across."
+            ? "Choose which real provider connections you want to configure after the workspace exists. Nothing connects on this step."
             : step === 4
               ? "Add your brand identity and we'll personalize your workspace while keeping everything clear, accessible, and professional."
               : setupState === "success"
-                ? "Your workspace is configured and your AI team has a clear starting point."
+                ? "Your core workspace is saved. The live readiness checklist will show what still needs configuration."
                 : setupState === "failed"
                   ? businessSavedBeforeFailure
                     ? catalogSaveFailed
@@ -672,13 +672,13 @@ export function OnboardingPage() {
             <div className="onboarding-panel">
               <div className="channel-grid onboarding-channel-grid">
                 {onboardingChannels.map(({ name, description, icon: Icon }) => {
-                  const connected = form.channels.includes(name);
+                  const selected = form.channels.includes(name);
                   return (
                     <button
                       key={name}
                       className={cx(
                         "onboarding-channel-card",
-                        connected && "connected",
+                        selected && "connected",
                       )}
                       onClick={() => toggleChannel(name)}
                       data-testid={`button-onboarding-channel-${name.toLowerCase()}`}
@@ -690,9 +690,9 @@ export function OnboardingPage() {
                         <div className="row-title">{name}</div>
                         <div className="row-copy">{description}</div>
                       </div>
-                      <span className={cx("channel-toggle", connected && "on")}>
+                      <span className={cx("channel-toggle", selected && "on")}>
                         <i />
-                        {connected ? "Connected" : "Connect"}
+                        {selected ? "In setup plan" : "Add to plan"}
                       </span>
                     </button>
                   );
@@ -701,8 +701,8 @@ export function OnboardingPage() {
               <div className="onboarding-tip">
                 <Link2 size={16} />
                 <span>
-                  Connections are safe to change later. For this setup, each
-                  card is ready as soon as you choose it.
+                  This records setup intent only. OAuth, account selection, and
+                  health verification happen in Integrations after creation.
                 </span>
               </div>
             </div>
@@ -779,11 +779,12 @@ export function OnboardingPage() {
                   <div className="success-mark">
                     <Check />
                   </div>
-                  <div className="eyebrow">Setup complete</div>
-                  <h2>Your AI Business Team is ready!</h2>
+                  <div className="eyebrow">Core setup complete</div>
+                  <h2>Your workspace is saved</h2>
                   <p>
-                    Five focused agents are ready to help you move{" "}
-                    {form.name || "your business"} forward.
+                    Business facts, catalog choices, and brand settings for{" "}
+                    {form.name || "your business"} are saved. Provider
+                    connections and AI autonomy are verified separately.
                   </p>
                 </div>
               )}
@@ -909,7 +910,7 @@ export function OnboardingPage() {
                 onClick={openDashboard}
                 data-testid="button-finish-onboarding"
               >
-                Open my dashboard <ArrowRight />
+                {form.channels.length ? "Configure real connections" : "Open readiness dashboard"} <ArrowRight />
               </Button>
             )}
             {step === 4 && (

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies.business import BusinessAccessDependency
+from app.api.dependencies.business import BusinessAccessDependency, require_business_role
 from app.api.response_materialization import materialize_response_before_commit
 from app.core.config import settings
 from app.db.session import get_db_session
@@ -99,6 +99,7 @@ async def authorize_connector(
     response: Response,
     session: SessionDependency,
 ):
+    require_business_role(access)
     return await _mutate(
         response,
         session,
@@ -123,6 +124,7 @@ async def reconnect_connector(
     response: Response,
     session: SessionDependency,
 ):
+    require_business_role(access)
     connection = await _read(
         response,
         service.get_connection(
@@ -143,10 +145,33 @@ async def reconnect_connector(
 
 
 @router.get(
-    "/integrations/oauth/{connector_type}/callback",
+    "/integrations/oauth/callback",
     response_model=AuthorizationCallbackResponse,
 )
 async def oauth_callback(
+    state: Annotated[str, Query(min_length=1, max_length=512)],
+    code: Annotated[str, Query(min_length=1, max_length=4096)],
+    response: Response,
+    session: SessionDependency,
+):
+    return await _mutate(
+        response,
+        session,
+        service.complete_authorization(
+            session,
+            connector_type=None,
+            state=state,
+            code=code,
+        ),
+    )
+
+
+@router.get(
+    "/integrations/oauth/{connector_type}/callback",
+    response_model=AuthorizationCallbackResponse,
+    deprecated=True,
+)
+async def legacy_oauth_callback(
     connector_type: ConnectorType,
     state: Annotated[str, Query(min_length=1, max_length=512)],
     code: Annotated[str, Query(min_length=1, max_length=4096)],
@@ -194,6 +219,7 @@ async def select_connection_resource(
     response: Response,
     session: SessionDependency,
 ):
+    require_business_role(access)
     return await _mutate(
         response,
         session,
@@ -217,6 +243,8 @@ async def check_connection_health(
     response: Response,
     session: SessionDependency,
 ):
+    require_business_role(access)
+
     return await _mutate(
         response,
         session,
@@ -239,6 +267,7 @@ async def disconnect_connection(
     response: Response,
     session: SessionDependency,
 ):
+    require_business_role(access)
     return await _mutate(
         response,
         session,
@@ -288,6 +317,7 @@ async def create_entity_link(
     response: Response,
     session: SessionDependency,
 ):
+    require_business_role(access)
     return await _mutate(
         response,
         session,

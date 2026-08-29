@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import unittest
 from hashlib import sha256
 from unittest.mock import patch
 from uuid import uuid4
 
-from openai import OpenAIError
+import httpx
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AuthenticationError,
+    InternalServerError,
+    OpenAIError,
+    RateLimitError,
+)
 from pydantic import SecretStr, ValidationError
 
 
@@ -441,6 +450,46 @@ class OpenAIProviderExecutionTests(
             str(raised.exception),
         )
 
+    async def test_specific_sdk_failure_classes_are_sanitized(self) -> None:
+        request = httpx.Request("POST", "https://api.openai.invalid/v1/responses")
+        response = httpx.Response(
+            500,
+            request=request,
+            headers={"x-request-id": "private-provider-request-id"},
+        )
+        failures = (
+            APIConnectionError(message="private connection detail", request=request),
+            APITimeoutError(request),
+            RateLimitError("private rate detail", response=response, body={"secret": "x"}),
+            InternalServerError("private server detail", response=response, body={"secret": "x"}),
+            AuthenticationError("private auth detail", response=response, body={"secret": "x"}),
+        )
+
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                provider = OpenAIAgentProvider(
+                    client=_FakeClient(error=failure),  # type: ignore[arg-type]
+                    model="gpt-5.6-terra",
+                )
+
+                with self.assertRaises(AIAgentProviderError) as raised:
+                    await provider.generate(_provider_request())
+
+                self.assertEqual(
+                    str(raised.exception),
+                    "OpenAI provider could not complete the request",
+                )
+                self.assertNotIn("private", str(raised.exception))
+
+    async def test_task_cancellation_is_not_converted_to_provider_failure(self) -> None:
+        provider = OpenAIAgentProvider(
+            client=_FakeClient(error=asyncio.CancelledError()),  # type: ignore[arg-type]
+            model="gpt-5.6-terra",
+        )
+
+        with self.assertRaises(asyncio.CancelledError):
+            await provider.generate(_provider_request())
+
     async def test_unexpected_error_is_sanitized(
         self,
     ) -> None:
@@ -844,7 +893,7 @@ class _FakeResponses:
         self,
         response=None,
         *,
-        error: Exception | None = None,
+        error: BaseException | None = None,
     ) -> None:
         self.response = response
         self.error = error
@@ -868,7 +917,7 @@ class _FakeClient:
         response=None,
         *,
         responses=None,
-        error: Exception | None = None,
+        error: BaseException | None = None,
     ) -> None:
         if responses is not None:
             self.responses = responses

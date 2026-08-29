@@ -22,6 +22,7 @@ from app.exceptions.background_jobs import (
     BackgroundJobValidationError,
 )
 from app.models.action_execution_attempt import ActionExecutionAttempt
+from app.models.ai_agent_execution import AIAgentExecution
 from app.models.automation_intelligence import CompetitorDiscoveryRun, MarketingAutomationRun
 from app.models.automation import (
     AutomationEvent,
@@ -31,8 +32,13 @@ from app.models.automation import (
 )
 from app.models.background_job import BackgroundJob, WorkerInstance
 from app.models.billing import BusinessSubscription
-from app.models.integration import IntegrationWebhookEvent
-from app.models.commerce import CommerceFeedDestination, CommerceSyncRun, CommerceWebhookReceipt
+from app.models.integration import IntegrationConnection, IntegrationWebhookEvent
+from app.models.commerce import (
+    CommerceConnection,
+    CommerceFeedDestination,
+    CommerceSyncRun,
+    CommerceWebhookReceipt,
+)
 from app.models.marketing import Campaign, SocialSchedule
 from app.models.notification import Notification
 from app.models.opportunity import Opportunity
@@ -492,6 +498,7 @@ async def processing_health(
     session: AsyncSession, *, business_id: UUID,
 ) -> dict[str, object]:
     now = datetime.now(UTC)
+    recent_since = now - timedelta(hours=24)
     counts = {
         status: int(value)
         for status, value in (await session.execute(
@@ -517,6 +524,107 @@ async def processing_health(
             AutomationEvent.status.in_(("pending", "processing", "failed")),
         )
     ) or 0)
+    attention = (
+        await session.execute(
+            select(
+                select(func.count())
+                .select_from(ActionExecutionAttempt)
+                .where(
+                    ActionExecutionAttempt.business_id == business_id,
+                    ActionExecutionAttempt.status == "uncertain",
+                )
+                .scalar_subquery()
+                .label("uncertain_actions"),
+                select(func.count())
+                .select_from(ActionExecutionAttempt)
+                .where(
+                    ActionExecutionAttempt.business_id == business_id,
+                    ActionExecutionAttempt.status == "failed",
+                    ActionExecutionAttempt.completed_at >= recent_since,
+                )
+                .scalar_subquery()
+                .label("failed_actions_24h"),
+                select(func.count())
+                .select_from(AutomationWorkflowRun)
+                .where(
+                    AutomationWorkflowRun.business_id == business_id,
+                    AutomationWorkflowRun.status == "failed",
+                    AutomationWorkflowRun.created_at >= recent_since,
+                )
+                .scalar_subquery()
+                .label("failed_workflows_24h"),
+                select(func.count())
+                .select_from(IntegrationWebhookEvent)
+                .where(
+                    IntegrationWebhookEvent.business_id == business_id,
+                    IntegrationWebhookEvent.status == "failed",
+                    IntegrationWebhookEvent.received_at >= recent_since,
+                )
+                .scalar_subquery()
+                .label("failed_webhooks_24h"),
+                select(func.count())
+                .select_from(IntegrationWebhookEvent)
+                .where(
+                    IntegrationWebhookEvent.business_id == business_id,
+                    IntegrationWebhookEvent.status == "received",
+                )
+                .scalar_subquery()
+                .label("webhook_backlog"),
+                select(func.count())
+                .select_from(IntegrationConnection)
+                .where(
+                    IntegrationConnection.business_id == business_id,
+                    or_(
+                        IntegrationConnection.status.in_(
+                            ("degraded", "reauth_required", "revoked")
+                        ),
+                        IntegrationConnection.authentication_state.in_(
+                            ("failed", "revoked")
+                        ),
+                        IntegrationConnection.health.in_(
+                            ("degraded", "reauth_required", "revoked")
+                        ),
+                    ),
+                )
+                .scalar_subquery()
+                .label("provider_connections_attention"),
+                select(func.count())
+                .select_from(CommerceConnection)
+                .where(
+                    CommerceConnection.business_id == business_id,
+                    or_(
+                        CommerceConnection.status.in_(
+                            (
+                                "attention_required",
+                                "authentication_expired",
+                                "rate_limited",
+                                "failed",
+                            )
+                        ),
+                        CommerceConnection.health.in_(
+                            (
+                                "degraded",
+                                "reauth_required",
+                                "rate_limited",
+                                "failed",
+                            )
+                        ),
+                    ),
+                )
+                .scalar_subquery()
+                .label("commerce_connections_attention"),
+                select(func.count())
+                .select_from(AIAgentExecution)
+                .where(
+                    AIAgentExecution.business_id == business_id,
+                    AIAgentExecution.status == "failed",
+                    AIAgentExecution.created_at >= recent_since,
+                )
+                .scalar_subquery()
+                .label("ai_failures_24h"),
+            )
+        )
+    ).one()._mapping
     heartbeat_rows = (await session.execute(
         select(
             WorkerInstance.role,
@@ -529,6 +637,19 @@ async def processing_health(
             "queued", "processing", "succeeded", "failed", "dead_letter", "canceled",
         )},
         "automation_event_backlog": event_backlog,
+        "attention": {
+            key: int(attention[key])
+            for key in (
+                "uncertain_actions",
+                "failed_actions_24h",
+                "failed_workflows_24h",
+                "failed_webhooks_24h",
+                "webhook_backlog",
+                "provider_connections_attention",
+                "commerce_connections_attention",
+                "ai_failures_24h",
+            )
+        },
         "oldest_queued_job_age_seconds": (
             max(0.0, (now - oldest).total_seconds()) if oldest else None
         ),

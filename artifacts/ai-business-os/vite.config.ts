@@ -27,25 +27,35 @@ if (!basePath) {
   );
 }
 
+if (!basePath.startsWith('/') || !basePath.endsWith('/') || basePath.includes('..')) {
+  throw new Error('BASE_PATH must be an absolute, normalized public path ending in /.');
+}
+
+const developmentPlugins =
+  process.env.NODE_ENV !== 'production'
+    ? [
+        runtimeErrorOverlay(),
+        ...(process.env.REPL_ID !== undefined
+          ? [
+              await import('@replit/vite-plugin-cartographer').then((m) =>
+                m.cartographer({
+                  root: path.resolve(import.meta.dirname, '..'),
+                }),
+              ),
+              await import('@replit/vite-plugin-dev-banner').then((m) =>
+                m.devBanner(),
+              ),
+            ]
+          : []),
+      ]
+    : [];
+
 export default defineConfig({
   base: basePath,
   plugins: [
     react(),
     tailwindcss(),
-    runtimeErrorOverlay(),
-    ...(process.env.NODE_ENV !== 'production' &&
-    process.env.REPL_ID !== undefined
-      ? [
-          await import('@replit/vite-plugin-cartographer').then((m) =>
-            m.cartographer({
-              root: path.resolve(import.meta.dirname, '..'),
-            }),
-          ),
-          await import('@replit/vite-plugin-dev-banner').then((m) =>
-            m.devBanner(),
-          ),
-        ]
-      : []),
+    ...developmentPlugins,
   ],
   resolve: {
     alias: {

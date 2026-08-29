@@ -102,6 +102,16 @@ class ProcessingApiTests(unittest.IsolatedAsyncioTestCase):
         data = {
             "counts": {"queued": 2, "processing": 1, "succeeded": 5, "failed": 0, "dead_letter": 1, "canceled": 0},
             "automation_event_backlog": 3,
+            "attention": {
+                "uncertain_actions": 1,
+                "failed_actions_24h": 2,
+                "failed_workflows_24h": 1,
+                "failed_webhooks_24h": 0,
+                "webhook_backlog": 3,
+                "provider_connections_attention": 1,
+                "commerce_connections_attention": 0,
+                "ai_failures_24h": 1,
+            },
             "oldest_queued_job_age_seconds": 12.0,
             "average_processing_latency_seconds": 1.5,
             "worker_last_heartbeat_at": NOW,
@@ -112,6 +122,7 @@ class ProcessingApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(response.json()["status"], {"healthy", "degraded", "unavailable"})
         self.assertNotIn("worker_id", response.text)
+        self.assertEqual(response.json()["attention"]["uncertain_actions"], 1)
         api_health = await self.client.get("/health")
         self.assertEqual(api_health.status_code, 200)
 

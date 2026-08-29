@@ -10,12 +10,23 @@ from uuid import UUID, uuid4
 import httpx
 from fastapi import HTTPException
 
-os.environ.setdefault("AIBOS_DATABASE_URL", "postgresql+asyncpg://database.invalid/test")
-os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
+os.environ.setdefault(
+    "AIBOS_DATABASE_URL",
+    "postgresql+asyncpg://database.invalid/test",
+)
+os.environ.setdefault(
+    "AIBOS_AUTH_SECRET_KEY",
+    "x" * 32,
+)
 
-from app.api.dependencies.business import BusinessAccessContext, get_business_access  # noqa: E402
+from app.api.dependencies.business import (  # noqa: E402
+    BusinessAccessContext,
+    get_business_access,
+)
 from app.db.session import get_db_session  # noqa: E402
-from app.exceptions.integration import IntegrationProviderUnavailableError  # noqa: E402
+from app.exceptions.integration import (  # noqa: E402
+    IntegrationProviderUnavailableError,
+)
 from app.main import app  # noqa: E402
 from app.models.integration import IntegrationConnection  # noqa: E402
 
@@ -37,90 +48,328 @@ class IntegrationsApiTests(unittest.IsolatedAsyncioTestCase):
         async def override_access(business_id: UUID):
             if business_id != BUSINESS_ID:
                 raise HTTPException(404, "Business not found.")
+
             return BusinessAccessContext(
                 user=SimpleNamespace(id=USER_ID),
-                business=SimpleNamespace(id=business_id, status="active"),
-                membership=SimpleNamespace(business_id=business_id, user_id=USER_ID, status="active"),
+                business=SimpleNamespace(
+                    id=business_id,
+                    status="active",
+                ),
+                membership=SimpleNamespace(
+                    business_id=business_id,
+                    user_id=USER_ID,
+                    status="active",
+                    role="owner",
+                ),
             )
 
         self.override_access = override_access
         app.dependency_overrides[get_db_session] = override_session
         app.dependency_overrides[get_business_access] = override_access
-        self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
+
+        self.client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        )
 
     async def asyncTearDown(self) -> None:
         await self.client.aclose()
         app.dependency_overrides.clear()
         app.dependency_overrides.update(self.original)
 
-    def test_openapi_exposes_secure_business_lifecycle_and_public_callbacks(self) -> None:
+    def test_openapi_exposes_secure_business_lifecycle_and_public_callbacks(
+        self,
+    ) -> None:
         root = "/api/v1/businesses/{business_id}/integrations"
         schema = app.openapi()
-        for tail in ("/registry", "/connections", "/{connector_type}/authorize"):
-            operations = schema["paths"][root + tail]
-            self.assertTrue(all(item["security"] for item in operations.values()))
-        self.assertIn("/api/v1/integrations/oauth/{connector_type}/callback", schema["paths"])
-        self.assertIn("/api/v1/integrations/webhooks/{connector_type}/{connection_id}", schema["paths"])
 
-    async def test_registry_is_tenant_authorized_and_contains_no_provider_secrets(self) -> None:
+        for tail in (
+            "/registry",
+            "/connections",
+            "/{connector_type}/authorize",
+        ):
+            operations = schema["paths"][root + tail]
+            self.assertTrue(
+                all(item["security"] for item in operations.values())
+            )
+
+        self.assertIn(
+            "/api/v1/integrations/oauth/callback",
+            schema["paths"],
+        )
+
+        legacy = schema["paths"][
+            "/api/v1/integrations/oauth/{connector_type}/callback"
+        ]["get"]
+        self.assertTrue(legacy["deprecated"])
+
+        self.assertIn(
+            "/api/v1/integrations/webhooks/{connector_type}/{connection_id}",
+            schema["paths"],
+        )
+
+    async def test_registry_is_tenant_authorized_and_contains_no_provider_secrets(
+        self,
+    ) -> None:
         response = await self.client.get(self._url("registry"))
+
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json()), 8)
+
         serialized = response.text.lower()
         self.assertNotIn("client_secret", serialized)
         self.assertNotIn("access_token", serialized)
-        self.assertTrue(all(item["external_writes_enabled"] is False for item in response.json()))
+
+        self.assertTrue(
+            all(
+                item["external_writes_enabled"] is False
+                for item in response.json()
+            )
+        )
+
         self._private(response)
 
     async def test_cross_tenant_access_fails_before_service(self) -> None:
-        with patch("app.api.v1.integrations.service.list_connections", new=AsyncMock(return_value=[])) as operation:
-            response = await self.client.get(self._url("connections", OTHER_BUSINESS_ID))
+        with patch(
+            "app.api.v1.integrations.service.list_connections",
+            new=AsyncMock(return_value=[]),
+        ) as operation:
+            response = await self.client.get(
+                self._url(
+                    "connections",
+                    OTHER_BUSINESS_ID,
+                )
+            )
+
         self.assertEqual(response.status_code, 404)
         operation.assert_not_awaited()
 
-    async def test_connection_response_excludes_opaque_credential_reference(self) -> None:
+    async def test_connection_response_excludes_opaque_credential_reference(
+        self,
+    ) -> None:
         connection = _connection()
-        with patch("app.api.v1.integrations.service.list_connections", new=AsyncMock(return_value=[connection])) as operation:
-            response = await self.client.get(self._url("connections"))
+
+        with patch(
+            "app.api.v1.integrations.service.list_connections",
+            new=AsyncMock(return_value=[connection]),
+        ) as operation:
+            response = await self.client.get(
+                self._url("connections")
+            )
+
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(operation.await_args.kwargs["business_id"], BUSINESS_ID)
-        self.assertNotIn("credential_reference", response.json()[0])
-        self.assertNotIn("server-only-reference", response.text)
+        self.assertEqual(
+            operation.await_args.kwargs["business_id"],
+            BUSINESS_ID,
+        )
+        self.assertNotIn(
+            "credential_reference",
+            response.json()[0],
+        )
+        self.assertNotIn(
+            "server-only-reference",
+            response.text,
+        )
+
         self._private(response)
 
-    async def test_authorization_fails_safely_when_provider_setup_is_unavailable(self) -> None:
+    async def test_authorization_fails_safely_when_provider_setup_is_unavailable(
+        self,
+    ) -> None:
         with patch(
             "app.api.v1.integrations.service.begin_authorization",
-            new=AsyncMock(side_effect=IntegrationProviderUnavailableError("private-provider-detail")),
+            new=AsyncMock(
+                side_effect=IntegrationProviderUnavailableError(
+                    "private-provider-detail"
+                )
+            ),
         ):
-            response = await self.client.post(self._url("gmail/authorize"), json={"redirect_target": "/integrations"})
+            response = await self.client.post(
+                self._url("gmail/authorize"),
+                json={
+                    "redirect_target": "/integrations",
+                },
+            )
+
         self.assertEqual(response.status_code, 503)
-        self.assertNotIn("private-provider-detail", response.text)
-        self.assertEqual(self.session.rollback_calls, 1)
+        self.assertNotIn(
+            "private-provider-detail",
+            response.text,
+        )
+        self.assertEqual(
+            self.session.rollback_calls,
+            1,
+        )
+
         self._private(response)
 
-    async def test_authorization_rejects_open_redirects_and_unknown_connectors(self) -> None:
-        response = await self.client.post(self._url("gmail/authorize"), json={"redirect_target": "https://attacker.invalid"})
-        self.assertEqual(response.status_code, 422)
-        response = await self.client.post(self._url("unknown/authorize"), json={"redirect_target": "/integrations"})
+    async def test_authorization_rejects_open_redirects_and_unknown_connectors(
+        self,
+    ) -> None:
+        response = await self.client.post(
+            self._url("gmail/authorize"),
+            json={
+                "redirect_target": "https://attacker.invalid",
+            },
+        )
         self.assertEqual(response.status_code, 422)
 
-    async def test_webhook_rejects_invalid_payload_before_processing(self) -> None:
+        response = await self.client.post(
+            self._url("unknown/authorize"),
+            json={
+                "redirect_target": "/integrations",
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+
+    async def test_member_cannot_change_sensitive_integration_configuration(
+        self,
+    ) -> None:
+        async def member_access(business_id: UUID):
+            return BusinessAccessContext(
+                user=SimpleNamespace(id=USER_ID),
+                business=SimpleNamespace(
+                    id=business_id,
+                    status="active",
+                ),
+                membership=SimpleNamespace(
+                    business_id=business_id,
+                    user_id=USER_ID,
+                    status="active",
+                    role="member",
+                ),
+            )
+
+        app.dependency_overrides[get_business_access] = member_access
+
+        with patch(
+            "app.api.v1.integrations.service.begin_authorization",
+            new=AsyncMock(),
+        ) as operation:
+            response = await self.client.post(
+                self._url("gmail/authorize"),
+                json={
+                    "redirect_target": "/integrations",
+                },
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "permission_missing",
+        )
+        operation.assert_not_awaited()
+
+    async def test_member_cannot_trigger_connection_health_mutation(
+        self,
+    ) -> None:
+        async def member_access(business_id: UUID):
+            return BusinessAccessContext(
+                user=SimpleNamespace(id=USER_ID),
+                business=SimpleNamespace(
+                    id=business_id,
+                    status="active",
+                ),
+                membership=SimpleNamespace(
+                    business_id=business_id,
+                    user_id=USER_ID,
+                    status="active",
+                    role="member",
+                ),
+            )
+
+        app.dependency_overrides[get_business_access] = member_access
+        connection_id = uuid4()
+
+        with patch(
+            "app.api.v1.integrations.service.check_health",
+            new=AsyncMock(return_value=_connection()),
+        ) as operation:
+            response = await self.client.post(
+                self._url(
+                    f"connections/{connection_id}/health"
+                )
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "permission_missing",
+        )
+        operation.assert_not_awaited()
+
+    async def test_member_cannot_trigger_commerce_provider_sync(self) -> None:
+        async def member_access(business_id: UUID):
+            return BusinessAccessContext(
+                user=SimpleNamespace(id=USER_ID),
+                business=SimpleNamespace(id=business_id, status="active"),
+                membership=SimpleNamespace(
+                    business_id=business_id,
+                    user_id=USER_ID,
+                    status="active",
+                    role="member",
+                ),
+            )
+
+        app.dependency_overrides[get_business_access] = member_access
+        connection_id = uuid4()
+
+        with patch(
+            "app.api.v1.commerce.service.request_sync",
+            new=AsyncMock(),
+        ) as operation:
+            response = await self.client.post(
+                f"/api/v1/businesses/{BUSINESS_ID}/commerce/"
+                f"connections/{connection_id}/sync",
+                json={
+                    "mode": "incremental",
+                    "idempotency_key": "member-sync-denied",
+                },
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "permission_missing",
+        )
+        operation.assert_not_awaited()
+
+    async def test_webhook_rejects_invalid_payload_before_processing(
+        self,
+    ) -> None:
         response = await self.client.post(
             f"/api/v1/integrations/webhooks/facebook/{uuid4()}",
             content=b"not-json",
-            headers={"content-type": "application/json"},
+            headers={
+                "content-type": "application/json",
+            },
         )
+
         self.assertEqual(response.status_code, 422)
         self._private(response)
 
     @staticmethod
-    def _url(path: str, business_id: UUID = BUSINESS_ID) -> str:
-        return f"/api/v1/businesses/{business_id}/integrations/{path}"
+    def _url(
+        path: str,
+        business_id: UUID = BUSINESS_ID,
+    ) -> str:
+        return (
+            f"/api/v1/businesses/{business_id}"
+            f"/integrations/{path}"
+        )
 
-    def _private(self, response: httpx.Response) -> None:
-        self.assertEqual(response.headers["Cache-Control"], "no-store")
-        self.assertEqual(response.headers["Pragma"], "no-cache")
+    def _private(
+        self,
+        response: httpx.Response,
+    ) -> None:
+        self.assertEqual(
+            response.headers["Cache-Control"],
+            "no-store",
+        )
+        self.assertEqual(
+            response.headers["Pragma"],
+            "no-cache",
+        )
 
 
 class _Session:

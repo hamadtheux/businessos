@@ -8,7 +8,11 @@ import './index.css';
 createRoot(document.getElementById('root')!, {
   // Keeps caught errors off reportError(), which would raise the dev overlay.
   onCaughtError: (error, errorInfo) => {
-    console.error(error, errorInfo.componentStack);
+    if (import.meta.env.DEV) {
+      console.error(error, errorInfo.componentStack);
+    } else {
+      console.error('A rendered application component failed.');
+    }
   },
 }).render(
   <ErrorBoundary>

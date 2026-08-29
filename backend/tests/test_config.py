@@ -77,6 +77,130 @@ class SettingsValidationTests(unittest.TestCase):
         self.assertFalse(config.debug)
         self.assertTrue(config.auth_refresh_cookie_secure)
 
+    def test_production_rejects_postgresql_without_tls(self) -> None:
+        public_settings = self._public_widget_settings()
+        public_settings["database_ssl_mode"] = "disable"
+
+        with self.assertRaises(ValidationError):
+            self._settings(
+                environment="production",
+                debug=False,
+                auth_refresh_cookie_secure=True,
+                **self._s3_settings(),
+                **public_settings,
+            )
+
+    def test_production_requires_asyncpg_postgresql_url(self) -> None:
+        for database_url in (
+            "sqlite+aiosqlite:///production.db",
+            "postgresql://database.example.test/aibos",
+            "postgresql+asyncpg:///aibos",
+        ):
+            with self.subTest(database_url=database_url):
+                with self.assertRaises(ValidationError):
+                    self._settings(
+                        environment="production",
+                        debug=False,
+                        auth_refresh_cookie_secure=True,
+                        database_url=database_url,
+                        **self._s3_settings(),
+                        **self._public_widget_settings(),
+                    )
+
+    def test_production_rejects_wildcard_trusted_hosts(self) -> None:
+        public = self._public_widget_settings()
+        public["trusted_hosts"] = ["*.example.test"]
+        with self.assertRaises(ValidationError):
+            self._settings(
+                environment="production",
+                debug=False,
+                auth_refresh_cookie_secure=True,
+                **self._s3_settings(),
+                **public,
+            )
+
+    def test_production_rejects_extra_local_cors_origin(self) -> None:
+        public = self._public_widget_settings()
+        public["cors_origins"] = [
+            "https://widgets.example.test",
+            "https://localhost",
+        ]
+        with self.assertRaises(ValidationError):
+            self._settings(
+                environment="production",
+                debug=False,
+                auth_refresh_cookie_secure=True,
+                **self._s3_settings(),
+                **public,
+            )
+
+    def test_production_rejects_unexpected_public_url_paths(self) -> None:
+        public = self._public_widget_settings()
+        public["frontend_base_url"] = "https://widgets.example.test/dashboard"
+        with self.assertRaises(ValidationError):
+            self._settings(
+                environment="production",
+                debug=False,
+                auth_refresh_cookie_secure=True,
+                **self._s3_settings(),
+                **public,
+            )
+
+    def test_production_rejects_configured_provider_placeholders(self) -> None:
+        for field_name, value in (
+            ("openai_api_key", "sk-test-not-a-real-key"),
+            ("storage_secret_access_key", "change-me-storage-secret"),
+        ):
+            with self.subTest(field_name=field_name):
+                storage = self._s3_settings()
+                if field_name in storage:
+                    storage[field_name] = value
+                with self.assertRaises(ValidationError):
+                    self._settings(
+                        environment="production",
+                        debug=False,
+                        auth_refresh_cookie_secure=True,
+                        **storage,
+                        **self._public_widget_settings(),
+                        **({field_name: value} if field_name not in storage else {}),
+                    )
+
+    def test_production_rejects_private_public_hosts_and_insecure_storage(self) -> None:
+        invalid_overrides = (
+            {"public_api_base_url": "https://10.0.0.4"},
+            {"storage_public_base_url": "http://cdn.example.test"},
+            {"storage_endpoint_url": "http://objects.example.test"},
+        )
+        for overrides in invalid_overrides:
+            with self.subTest(overrides=overrides):
+                storage = {**self._s3_settings()}
+                public = {**self._public_widget_settings()}
+                for key, value in overrides.items():
+                    if key.startswith("storage_"):
+                        storage[key] = value
+                    else:
+                        public[key] = value
+                with self.assertRaises(ValidationError):
+                    self._settings(
+                        environment="production",
+                        debug=False,
+                        auth_refresh_cookie_secure=True,
+                        **storage,
+                        **public,
+                    )
+
+    def test_database_runtime_bounds(self) -> None:
+        invalid_values = {
+            "database_connect_timeout_seconds": 0,
+            "database_command_timeout_seconds": 0,
+            "database_pool_recycle_seconds": 59,
+        }
+
+        for field_name, value in invalid_values.items():
+            with self.subTest(field_name=field_name):
+                with self.assertRaises(ValidationError):
+                    self._settings(**{field_name: value})
+
     def test_production_rejects_insecure_refresh_cookie(self) -> None:
         with self.assertRaises(ValidationError):
             self._settings(
@@ -101,6 +225,7 @@ class SettingsValidationTests(unittest.TestCase):
     def test_s3_storage_requires_complete_durable_configuration(self) -> None:
         required_fields = (
             "storage_bucket",
+            "storage_region",
             "storage_access_key_id",
             "storage_secret_access_key",
             "storage_public_base_url",
@@ -181,6 +306,13 @@ class SettingsValidationTests(unittest.TestCase):
     @staticmethod
     def _public_widget_settings() -> dict[str, object]:
         return {
+            "docs_enabled": False,
+            "database_ssl_mode": "require",
+            "log_format": "json",
+            "edge_rate_limiting_enabled": True,
+            "trusted_hosts": ["widgets.example.test"],
+            "frontend_base_url": "https://widgets.example.test",
+            "cors_origins": ["https://widgets.example.test"],
             "public_api_base_url": "https://widgets.example.test",
             "widget_loader_url": "https://widgets.example.test/widget-loader.js",
             "widget_app_url": "https://widgets.example.test/widget.html",

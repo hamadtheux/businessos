@@ -7,7 +7,7 @@ from types import TracebackType
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 
 
 os.environ["AIBOS_DATABASE_URL"] = "postgresql+asyncpg://database.invalid/test"
@@ -30,6 +30,7 @@ from app.services.business import (  # noqa: E402
     CreatedBusinessContext,
     create_business_from_onboarding,
 )
+from app.services.billing import BillingEntitlementError  # noqa: E402
 from app.utils.slug import add_uuid_slug_suffix, create_slug_base  # noqa: E402
 
 
@@ -524,6 +525,29 @@ class BusinessOnboardingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.memberships, [])
         self.assertEqual(session.brandings, {})
 
+    async def test_owner_business_limit_maps_to_safe_entitlement_error(
+        self,
+    ) -> None:
+        session = _FakeAsyncSession(
+            flush_errors=[_owner_business_entitlement_error()]
+        )
+
+        with self.assertRaises(BillingEntitlementError) as raised:
+            await create_business_from_onboarding(
+                session,
+                uuid4(),
+                self._onboarding(),
+            )
+
+        self.assertEqual(raised.exception.code, "usage_limit_reached")
+        self.assertEqual(raised.exception.entitlement_key, "max_businesses")
+        self.assertTrue(session.savepoint_rollbacks)
+        self.assertFalse(session.transaction_broken)
+        self.assertEqual(session.commit_calls, 0)
+        self.assertEqual(session.businesses, {})
+        self.assertEqual(session.memberships, [])
+        self.assertEqual(session.brandings, {})
+
     async def test_database_read_failure_maps_to_persistence_error(self) -> None:
         session = _FakeAsyncSession(
             scalar_error=SQLAlchemyError("private database failure")
@@ -577,6 +601,22 @@ def _integrity_error(constraint_name: str) -> IntegrityError:
     )
 
 
+class _OwnerBusinessEntitlementViolation(Exception):
+    def __init__(self) -> None:
+        super().__init__("database policy rejected the write")
+        self.sqlstate = "P0001"
+        self.detail = "max_businesses"
+
+
+def _owner_business_entitlement_error() -> DBAPIError:
+    return DBAPIError(
+        "statement omitted",
+        {},
+        _OwnerBusinessEntitlementViolation(),
+        False,
+    )
+
+
 class _FakeNestedTransaction:
     def __init__(self, session: "_FakeAsyncSession") -> None:
         self.session = session
@@ -610,7 +650,7 @@ class _FakeAsyncSession:
         businesses: list[Business] | None = None,
         memberships: list[BusinessMembership] | None = None,
         brandings: list[BusinessBranding] | None = None,
-        flush_errors: list[IntegrityError] | None = None,
+        flush_errors: list[SQLAlchemyError] | None = None,
         rollback_actions: list[Callable[["_FakeAsyncSession"], None]] | None = None,
         scalar_error: SQLAlchemyError | None = None,
     ) -> None:

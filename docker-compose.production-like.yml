@@ -1,0 +1,163 @@
+name: ai-business-os-production-like
+
+# Local/staging acceptance topology only. Values below are deliberately
+# non-production fixtures. Real deployments inject secrets and use managed
+# PostgreSQL/object storage with TLS, backups, monitoring, and an HTTPS edge.
+
+x-backend-environment: &backend-environment
+  AIBOS_ENVIRONMENT: staging
+  AIBOS_DEBUG: "false"
+  AIBOS_DOCS_ENABLED: "false"
+  AIBOS_APP_VERSION: phase7-production-like
+  AIBOS_AUTH_SECRET_KEY: local-compose-only-8Kj2vQ7mP4xN9cR6tY3wL5sH1fD0aZ
+  AIBOS_AUTH_REFRESH_COOKIE_SECURE: "false"
+  AIBOS_DATABASE_URL: postgresql+asyncpg://aibos:local-postgres-only@postgres:5432/aibos
+  AIBOS_DATABASE_SSL_MODE: disable
+  AIBOS_DATABASE_CONNECT_TIMEOUT_SECONDS: "5"
+  AIBOS_DATABASE_COMMAND_TIMEOUT_SECONDS: "60"
+  AIBOS_LOG_FORMAT: json
+  AIBOS_LOG_LEVEL: INFO
+  AIBOS_TRUSTED_HOSTS: '["localhost","127.0.0.1","api","frontend"]'
+  AIBOS_FRONTEND_BASE_URL: http://localhost:8080
+  AIBOS_CORS_ORIGINS: '["http://localhost:8080"]'
+  AIBOS_PUBLIC_API_BASE_URL: http://localhost:8080
+  AIBOS_WIDGET_LOADER_URL: http://localhost:8080/widget-loader.js
+  AIBOS_WIDGET_APP_URL: http://localhost:8080/widget.html
+  AIBOS_STORAGE_BACKEND: s3
+  AIBOS_STORAGE_BUCKET: aibos-assets
+  AIBOS_STORAGE_REGION: us-east-1
+  AIBOS_STORAGE_ENDPOINT_URL: http://minio:9000
+  AIBOS_STORAGE_ACCESS_KEY_ID: local-minio-user
+  AIBOS_STORAGE_SECRET_ACCESS_KEY: local-minio-password-only
+  AIBOS_STORAGE_PUBLIC_BASE_URL: http://localhost:9000/aibos-assets
+  AIBOS_INTEGRATION_CREDENTIAL_BACKEND: disabled
+  AIBOS_EXTERNAL_CONNECTOR_WRITES_ENABLED: "false"
+  AIBOS_EXTERNAL_CONNECTOR_WRITE_MODE: disabled
+  AIBOS_EDGE_RATE_LIMITING_ENABLED: "false"
+
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: aibos
+      POSTGRES_USER: aibos
+      POSTGRES_PASSWORD: local-postgres-only
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aibos -d aibos"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: local-minio-user
+      MINIO_ROOT_PASSWORD: local-minio-password-only
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - object-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  storage-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        mc alias set local http://minio:9000 local-minio-user local-minio-password-only
+        mc mb --ignore-existing local/aibos-assets
+    restart: "no"
+
+  migrate:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["alembic", "upgrade", "head"]
+    environment: *backend-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment: *backend-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8000:8000"
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.worker"]
+    environment: *backend-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # This long-running consumer intentionally exposes no HTTP socket. Docker
+    # already restarts it on process exit; operational readiness is reported by
+    # its database heartbeat through the authenticated processing API.
+    healthcheck:
+      disable: true
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.scheduler"]
+    environment: *backend-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # The scheduler has the same process/heartbeat contract as the worker and
+    # must not inherit the API image's HTTP healthcheck.
+    healthcheck:
+      disable: true
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: artifacts/ai-business-os/Dockerfile
+      args:
+        VITE_API_BASE_URL: ""
+        VITE_WIDGET_API_BASE_URL: ""
+        VITE_WIDGET_APP_URL: ""
+        VITE_ENABLE_DEMO_DATA: "false"
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    stop_grace_period: 20s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  object-data:

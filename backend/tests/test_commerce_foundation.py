@@ -4,7 +4,8 @@ import os
 import unittest
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
@@ -14,6 +15,7 @@ os.environ.setdefault("AIBOS_DATABASE_URL", "postgresql+asyncpg://database.inval
 os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 
 from app.exceptions.commerce import CommerceValidationError  # noqa: E402
+from app.exceptions.automation import AutomationValidationError  # noqa: E402
 from app.integrations.commerce_registry import CommerceConnectorRegistry  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.commerce import (  # noqa: E402
@@ -34,6 +36,10 @@ from app.models.commerce import (  # noqa: E402
     ExternalProductMapping,
 )
 from app.models.order import OrderAddress, OrderFulfillment, OrderRefund, OrderRefundLine  # noqa: E402
+from app.schemas.automation import (  # noqa: E402
+    AutomationCopilotCompileRequest,
+    AutomationCopilotRefineRequest,
+)
 from app.schemas.commerce import (  # noqa: E402
     AudienceRule,
     AudienceRuleCondition,
@@ -42,6 +48,7 @@ from app.schemas.commerce import (  # noqa: E402
     CommerceEventCreate,
     NormalizedProduct,
 )
+from app.services import automation_copilot as automation_copilot_service  # noqa: E402
 from app.services.automation_copilot import (  # noqa: E402
     _condition,
     _missing_information,
@@ -353,7 +360,90 @@ class CommerceServiceSafetyTests(unittest.IsolatedAsyncioTestCase):
             )
 
 
-class AutomationCopilotCompilerTests(unittest.TestCase):
+class AutomationCopilotCompilerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_compile_order_confirmation_persists_governed_action_without_duplicate_approval(self) -> None:
+        business_id = uuid4()
+        actor_user_id = uuid4()
+        workflow_id = uuid4()
+        version_id = uuid4()
+
+        added = []
+        added_many = []
+
+        session = SimpleNamespace()
+        session.scalar = AsyncMock(
+            return_value=SimpleNamespace(
+                id=version_id,
+                workflow_id=workflow_id,
+                business_id=business_id,
+                version=1,
+            )
+        )
+        session.add = added.append
+        session.add_all = lambda values: added_many.extend(values)
+        session.flush = AsyncMock()
+
+        workflow = SimpleNamespace(
+            id=workflow_id,
+            business_id=business_id,
+            current_version=1,
+        )
+
+        with (
+            patch.object(
+                automation_copilot_service,
+                "create_workflow",
+                AsyncMock(return_value=workflow),
+            ),
+            patch.object(
+                automation_copilot_service,
+                "workflow_detail",
+                AsyncMock(side_effect=lambda *_args, **_kwargs: {
+                    "id": str(workflow_id),
+                    "nodes": [
+                        item
+                        for item in added
+                        if getattr(item, "node_type", None) is not None
+                    ],
+                }),
+            ),
+        ):
+            result = await automation_copilot_service.compile_workflow(
+                session,
+                business_id=business_id,
+                actor_user_id=actor_user_id,
+                data=AutomationCopilotCompileRequest(
+                    prompt="when an order is created, prepare a confirmation email",
+                ),
+            )
+
+        nodes = [
+            item
+            for item in added
+            if getattr(item, "node_type", None) is not None
+        ]
+
+        self.assertEqual(
+            [node.node_type for node in nodes],
+            ["trigger", "action", "end"],
+        )
+        self.assertNotIn("approval", [node.node_type for node in nodes])
+
+        action = nodes[1]
+        self.assertEqual(action.configuration["action_type"], "send_email")
+        self.assertEqual(
+            action.configuration["context_bindings"],
+            {"recipient_ref": "event_customer_ref"},
+        )
+        self.assertNotIn("recipient_ref", action.configuration["payload"])
+        self.assertTrue(action.configuration["requires_approval"])
+
+        self.assertEqual(result["workflow"]["id"], str(workflow_id))
+        self.assertEqual(
+            result["proposed_actions"][0]["execution_state"],
+            "governed_action_compiled_pending_approval",
+        )
+
     def test_abandoned_checkout_prompt_compiles_safe_deterministic_requirements(self) -> None:
         prompt = "When someone abandons checkout, wait two hours, send a WhatsApp message and stop after purchase"
         self.assertEqual(_trigger_type(prompt.casefold()), "checkout_abandoned")
@@ -377,6 +467,166 @@ class AutomationCopilotCompilerTests(unittest.TestCase):
         )
         self.assertIn("no purchase has been recorded", actions[1]["condition"])
         self.assertTrue(all(action["execution_state"].startswith("withheld") for action in actions))
+
+    def test_order_confirmation_builds_real_governed_email_action_specification(self) -> None:
+        prompt = "when an order is created, prepare a confirmation email"
+
+        specifications = automation_copilot_service._action_node_specifications(
+            prompt,
+            trigger_type="order_created",
+        )
+
+        self.assertEqual(len(specifications), 1)
+
+        node_type, name, configuration = specifications[0]
+
+        self.assertEqual(node_type, "action")
+        self.assertEqual(name, "Send order confirmation email")
+        self.assertEqual(configuration["kind"], "action")
+        self.assertEqual(configuration["action_type"], "send_email")
+        self.assertEqual(
+            configuration["context_bindings"],
+            {"recipient_ref": "event_customer_ref"},
+        )
+        self.assertNotIn("recipient_ref", configuration["payload"])
+        self.assertTrue(configuration["payload"]["subject"])
+        self.assertTrue(configuration["payload"]["body"])
+        self.assertEqual(configuration["risk_level"], "medium")
+        self.assertTrue(configuration["requires_approval"])
+
+    def test_proactive_whatsapp_and_checkout_actions_remain_setup_required(self) -> None:
+        self.assertEqual(
+            automation_copilot_service._action_node_specifications(
+                "when a lead is created send whatsapp",
+                trigger_type="lead_created",
+            ),
+            [],
+        )
+        self.assertEqual(
+            automation_copilot_service._action_node_specifications(
+                "when checkout is abandoned send whatsapp",
+                trigger_type="checkout_abandoned",
+            ),
+            [],
+        )
+
+    async def test_refinement_replaces_persisted_action_configuration(self) -> None:
+        workflow_id = uuid4()
+        business_id = uuid4()
+        actor_user_id = uuid4()
+        workflow = SimpleNamespace(
+            id=workflow_id,
+            business_id=business_id,
+            trigger_type="lead_created",
+            description="Automation Copilot draft: send WhatsApp when a lead arrives",
+        )
+        action_node = SimpleNamespace(
+            node_key=uuid4(),
+            node_type="action",
+            name="Old action",
+            configuration={
+                "kind": "action",
+                "action_type": "send_whatsapp_message",
+                "description": "Old action",
+                "payload": {"message": "Hello"},
+                "context_bindings": {"customer_ref": "event_customer_ref"},
+                "risk_level": "medium",
+                "requires_approval": True,
+            },
+        )
+
+        async def persist_replacement(*_args, **kwargs):
+            update = kwargs["data"]
+            action_node.name = update.name
+            action_node.configuration = update.configuration
+            return action_node
+
+        with (
+            patch.object(
+                automation_copilot_service,
+                "get_workflow",
+                AsyncMock(return_value=workflow),
+            ),
+            patch.object(
+                automation_copilot_service,
+                "load_graph",
+                AsyncMock(return_value=(SimpleNamespace(), [action_node], [])),
+            ),
+            patch.object(
+                automation_copilot_service,
+                "update_node",
+                AsyncMock(side_effect=persist_replacement),
+            ) as update_node_mock,
+            patch.object(
+                automation_copilot_service,
+                "update_workflow",
+                AsyncMock(return_value=workflow),
+            ),
+            patch.object(
+                automation_copilot_service,
+                "workflow_detail",
+                AsyncMock(return_value={"id": str(workflow_id), "nodes": [action_node]}),
+            ),
+        ):
+            result = await automation_copilot_service.refine_workflow(
+                SimpleNamespace(),
+                business_id=business_id,
+                workflow_id=workflow_id,
+                actor_user_id=actor_user_id,
+                data=AutomationCopilotRefineRequest(instruction="use email instead"),
+            )
+
+        update_node_mock.assert_awaited_once()
+        self.assertEqual(
+            action_node.configuration["action_type"],
+            "send_email",
+        )
+        self.assertEqual(
+            action_node.configuration["context_bindings"],
+            {"recipient_ref": "event_customer_ref"},
+        )
+        self.assertNotIn("recipient_ref", action_node.configuration["payload"])
+        self.assertEqual(
+            result["proposed_actions"][0]["execution_state"],
+            "governed_action_compiled_pending_approval",
+        )
+
+    async def test_refinement_to_proactive_whatsapp_fails_closed(self) -> None:
+        workflow = SimpleNamespace(
+            id=uuid4(),
+            business_id=uuid4(),
+            trigger_type="lead_created",
+            description="Automation Copilot draft: email a new lead",
+        )
+        action_node = SimpleNamespace(
+            node_key=uuid4(),
+            node_type="action",
+        )
+        with (
+            patch.object(
+                automation_copilot_service,
+                "get_workflow",
+                AsyncMock(return_value=workflow),
+            ),
+            patch.object(
+                automation_copilot_service,
+                "load_graph",
+                AsyncMock(return_value=(SimpleNamespace(), [action_node], [])),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                AutomationValidationError,
+                "copilot_refinement_whatsapp_setup_required",
+            ):
+                await automation_copilot_service.refine_workflow(
+                    SimpleNamespace(),
+                    business_id=workflow.business_id,
+                    workflow_id=workflow.id,
+                    actor_user_id=uuid4(),
+                    data=AutomationCopilotRefineRequest(
+                        instruction="use WhatsApp instead"
+                    ),
+                )
 
     def test_refinement_retains_original_requirements_and_replaces_channel(self) -> None:
         description = "Automation Copilot draft: send WhatsApp after checkout abandonment"

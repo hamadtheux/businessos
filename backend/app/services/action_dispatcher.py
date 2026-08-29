@@ -39,6 +39,7 @@ from app.models.conversation import Conversation, ConversationMessage, CustomerA
 from app.models.notification import Notification
 from app.models.automation_intelligence import MarketingActionProposal
 from app.models.integration import IntegrationEntityLink
+from app.models.provider_write_acceptance import ProviderWriteAcceptance
 from app.models.marketing import Campaign, ExternalCampaignDeployment
 from app.services.action_execution_attempt import (
     claim_action_execution_attempt,
@@ -287,12 +288,32 @@ async def dispatch_action_execution_job(
 
     try:
         async with AsyncSessionFactory() as session:
-            await record_action_execution_success(
+            succeeded_attempt = await record_action_execution_success(
                 session,
                 business_id=context.business_id,
                 attempt_id=context.attempt_id,
                 external_reference_id=result.external_reference_id,
             )
+            if succeeded_attempt.completed_at is None:
+                raise RuntimeError(
+                    "successful_attempt_missing_completion_time"
+                )
+
+            # Structured, tenant-scoped evidence that this exact provider
+            # connection accepted a governed external write. This is provider
+            # acceptance only; it must never be interpreted as message
+            # delivery, read, conversion, or business-outcome evidence.
+            session.add(
+                ProviderWriteAcceptance(
+                    business_id=context.business_id,
+                    integration_connection_id=context.connection_id,
+                    action_execution_attempt_id=context.attempt_id,
+                    connector_type=context.connector_type,
+                    action_type=context.action_type,
+                    accepted_at=succeeded_attempt.completed_at,
+                )
+            )
+
             await _persist_campaign_provider_result(
                 session, context=context, result=result,
             )

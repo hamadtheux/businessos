@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "wouter";
 import {
   AlertCircle,
   ArrowDown,
@@ -34,6 +35,12 @@ import {
 } from "@/components/product-ui";
 import { humanizeApiError } from "@/services/api-client";
 import { isBusinessFeatureEnabled } from "@/lib/business-features";
+import {
+  AUTOPILOT_PACKS,
+  hasHealthyConnection,
+  hasWriteReadyConnection,
+} from "@/lib/phase8a-product";
+import { integrationsApi } from "@/services/integrations";
 import { processingApi } from "@/services/processing";
 import {
   automationsApi,
@@ -85,6 +92,17 @@ const when = (value: string | null) =>
       }).format(new Date(value))
     : "—";
 
+const waitingReasonLabels: Record<string, string> = {
+  approval: "waiting for approval",
+  action_execution: "waiting for provider result",
+  delay: "waiting for scheduled time",
+  retry: "waiting for safe retry",
+};
+const waitingReasonLabel = (value: string | null) =>
+  waitingReasonLabels[value ?? ""] ??
+  value?.replaceAll("_", " ") ??
+  "completed path";
+
 function defaultConfiguration(
   type: AutomationNodeType,
   triggerType: string,
@@ -107,7 +125,8 @@ function defaultConfiguration(
       kind: "action",
       action_type: "send_customer_message",
       description: "Prepare a customer message for governed review.",
-      payload: { customer_ref: "test-customer", message: "Draft message" },
+      payload: { message: "Draft message" },
+      context_bindings: { customer_ref: "event_customer_ref" },
       risk_level: "medium",
       requires_approval: true,
     };
@@ -183,13 +202,27 @@ export function WorkflowBuilderPage() {
     queryFn: ({ signal }) =>
       automationsApi.runs.list(activeBusinessId, selectedId, signal),
     enabled: Boolean(activeBusinessId && selectedId),
+    refetchInterval: 5_000,
   });
   const nodeHistory = useQuery({
     queryKey: ["automations", activeBusinessId, "run-nodes", selectedRun?.id],
     queryFn: ({ signal }) =>
       automationsApi.runs.nodes(activeBusinessId, selectedRun!.id, signal),
     enabled: Boolean(activeBusinessId && selectedRun),
+    refetchInterval: 5_000,
   });
+  useEffect(() => {
+    if (!selectedRun) return;
+    const current = runs.data?.items.find((run) => run.id === selectedRun.id);
+    if (
+      current &&
+      (current.status !== selectedRun.status ||
+        current.waiting_reason !== selectedRun.waiting_reason ||
+        current.failure_code !== selectedRun.failure_code)
+    ) {
+      setSelectedRun(current);
+    }
+  }, [runs.data, selectedRun]);
   const processing = useQuery({
     queryKey: ["processing", activeBusinessId],
     queryFn: ({ signal }) => processingApi.health(activeBusinessId, signal),
@@ -202,7 +235,40 @@ export function WorkflowBuilderPage() {
     enabled: Boolean(activeBusinessId),
     refetchInterval: 15_000,
   });
+  const connections = useQuery({
+    queryKey: ["integrations", activeBusinessId, "connections", "automation-packs"],
+    queryFn: ({ signal }) => integrationsApi.connections(activeBusinessId, signal),
+    enabled: Boolean(activeBusinessId),
+  });
+  const connectorRegistry = useQuery({
+    queryKey: ["integrations", activeBusinessId, "registry", "automation-packs"],
+    queryFn: ({ signal }) => integrationsApi.registry(activeBusinessId, signal),
+    enabled: Boolean(activeBusinessId),
+  });
   const selected = detail.data;
+  const compiledGovernedAction = copilotResult?.proposed_actions.some(
+    (action) =>
+      action.execution_state ===
+      "governed_action_compiled_pending_approval",
+  ) ?? false;
+  const requestedExternalAction = Boolean(
+    copilotResult?.proposed_actions.length,
+  );
+  const preparedPack = AUTOPILOT_PACKS.find(
+    (pack) => pack.title === copilotResult?.workflow.name,
+  );
+  const preparedConnectionOptions = preparedPack?.connectionOptions ??
+    copilotResult?.required_integrations.flatMap((requirement) =>
+      requirement === "gmail_or_outlook"
+        ? ["gmail", "microsoft_outlook"]
+        : [requirement],
+    ) ?? [];
+  const preparedWriteReady = preparedConnectionOptions.length === 0 ||
+    hasWriteReadyConnection(
+      connections.data ?? [],
+      connectorRegistry.data ?? [],
+      preparedConnectionOptions,
+    );
   const processingState = processing.isError
     ? "unavailable"
     : (processing.data?.status ?? "checking");
@@ -250,18 +316,17 @@ export function WorkflowBuilderPage() {
       ),
   });
   const copilot = useMutation({
-    mutationFn: (event: FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-      const form = new FormData(event.currentTarget);
+    mutationFn: ({ prompt, name }: { prompt: string; name?: string }) => {
       return automationsApi.copilot.compile(activeBusinessId, {
-        prompt: String(form.get("prompt")),
+        prompt,
+        name,
         timezone: activeBusiness?.timezone || "UTC",
       });
     },
     onSuccess: (result) => {
       setCopilotResult(result);
       setSelectedId(result.workflow.id);
-      setNotice("Automation Copilot created a deterministic draft. Review the withheld requirements, then dry-run it before activation.");
+      setNotice("The automation is prepared as a deterministic draft. Review its prerequisites and dry-run it before activation; no external action was sent.");
       setError("");
       refresh();
     },
@@ -430,9 +495,9 @@ export function WorkflowBuilderPage() {
   return (
     <>
       <PageHeader
-        eyebrow="Operations · Automation 2.0"
-        title="Automation Copilot"
-        subtitle={`Describe the outcome. AI Business OS compiles a governed, dry-runnable workflow for ${activeBusiness?.name || "this business"}.`}
+        eyebrow="Operations · Easy automation"
+        title="Business Autopilot"
+        subtitle={`Turn common business routines into governed, dry-runnable workflows for ${activeBusiness?.name || "this business"}.`}
         action={
           <div className="toolbar">
             <Button
@@ -491,38 +556,66 @@ export function WorkflowBuilderPage() {
           </Button>
         </div>
       )}
+      <Card data-testid="recommended-automation-packs">
+        <SectionTitle title="Recommended automation packs · Choose an autopilot" action={<Badge tone="info">Uses the existing workflow engine</Badge>} />
+        <p className="detail-copy">“Turn on” prepares a tenant-owned workflow for safety review. Provider delivery remains withheld until identity, consent, connection, policy, and approval checks pass.</p>
+        <div className="autopilot-grid">
+          {AUTOPILOT_PACKS.map((pack) => {
+            const connected = hasHealthyConnection(connections.data ?? [], pack.connectionOptions);
+            const writeReady = hasWriteReadyConnection(
+              connections.data ?? [],
+              connectorRegistry.data ?? [],
+              pack.connectionOptions,
+            );
+            const providerState = pack.support === "setup_required"
+              ? "Setup required"
+              : connections.isPending || connectorRegistry.isPending
+                ? "Checking provider"
+                : connections.isError || connectorRegistry.isError
+                  ? "Provider unavailable"
+                  : writeReady
+                    ? "Provider write ready"
+                    : connected
+                      ? "Provider write blocked"
+                      : "Connection needed";
+            const preparing = copilot.isPending && copilot.variables?.name === pack.title;
+            return <div className={`autopilot-pack pack-${pack.support}`} key={pack.id}>
+              <div className="autopilot-pack-head"><span className="autopilot-icon"><Zap /></span><Badge tone={pack.support === "setup_required" ? "neutral" : writeReady ? "success" : "warning"}>{providerState}</Badge></div>
+              <h3>{pack.title}</h3>
+              <p>{pack.outcome}</p>
+              <div className="autopilot-trigger"><strong>Starts when</strong><span>{pack.trigger}</span></div>
+              {pack.setupReason && <div className="row-copy">{pack.setupReason}</div>}
+              <div className="autopilot-actions">
+                {pack.support === "preparation_supported" && pack.prompt ? <Button variant="green" className="btn-sm" disabled={copilot.isPending} onClick={() => copilot.mutate({ prompt: pack.prompt!, name: pack.title })}><Zap /> {preparing ? "Preparing…" : "Turn on"}</Button> : <Link href={pack.id === "social-recommendation" ? "/marketing/social" : "/integrations"} className="btn btn-sm btn-secondary">View setup</Link>}
+                {pack.connectionOptions.length > 0 && <span className="subtle">{writeReady ? "Healthy connection and write capability verified" : connected ? "Connection is healthy; provider writes are not accepted" : pack.connectionOptions.map((item) => item.replaceAll("_", " ")).join(" or ")}</span>}
+              </div>
+            </div>;
+          })}
+        </div>
+      </Card>
       <Card className="intelligence-hero" data-testid="automation-copilot">
         <div className="intelligence-hero-icon"><Bot /></div>
         <div className="row-main">
-          <div className="eyebrow">What should AI Business OS automate?</div>
-          <form onSubmit={(event) => copilot.mutate(event)}>
+          <div className="eyebrow">Need something different?</div>
+          <h2>Describe the routine in plain language</h2>
+          <form onSubmit={(event) => { event.preventDefault(); copilot.mutate({ prompt: copilotPrompt }); }}>
             <div className="field">
-              <textarea name="prompt" required minLength={8} maxLength={4000} value={copilotPrompt} onChange={(event) => setCopilotPrompt(event.target.value)} placeholder="When someone abandons checkout, wait two hours, send WhatsApp if they consented, and stop immediately after purchase." />
+              <textarea name="prompt" required minLength={8} maxLength={4000} value={copilotPrompt} onChange={(event) => setCopilotPrompt(event.target.value)} placeholder="When someone abandons checkout, wait two hours, prepare WhatsApp if they consented, and stop immediately after purchase." />
             </div>
-            <div className="toolbar"><Button variant="green" type="submit" disabled={copilot.isPending}><Bot /> {copilot.isPending ? "Compiling safely…" : "Create automation draft"}</Button><Button type="button" onClick={() => setAdvanced((value) => !value)}><Settings2 /> {advanced ? "Hide advanced editor" : "Advanced editor"}</Button></div>
+            <div className="toolbar"><Button variant="green" type="submit" disabled={copilot.isPending || copilotPrompt.trim().length < 8}><Bot /> {copilot.isPending ? "Compiling safely…" : "Prepare custom automation"}</Button><Button type="button" onClick={() => setAdvanced((value) => !value)}><Settings2 /> {advanced ? "Hide advanced editor" : "Advanced editor"}</Button></div>
           </form>
         </div>
       </Card>
-      <Card data-testid="recommended-automation-packs">
-        <SectionTitle title="Recommended automation packs" action={<Badge tone="info">Starts as a reviewable draft</Badge>} />
-        <div className="toolbar">
-          {[
-            ["Recover checkout", "When someone abandons checkout, wait 2 hours, send WhatsApp if allowed, then email them if they have not purchased."],
-            ["Follow up leads", "When a lead is created, wait 1 hour, then send an email if allowed."],
-            ["Request a review", "When an order is delivered, wait 2 days, then ask for a review if allowed."],
-          ].map(([label, prompt]) => <Button type="button" key={label} onClick={() => setCopilotPrompt(prompt)}>{label}</Button>)}
-        </div>
-      </Card>
       {copilotResult && <Card>
-        <SectionTitle title="Copilot safety review" action={<Badge tone={copilotResult.executable_actions_withheld ? "warning" : "success"}>{copilotResult.executable_actions_withheld ? "External action withheld" : "Internal draft"}</Badge>} />
+        <SectionTitle title="Turn-on review" action={<Badge tone={requestedExternalAction ? compiledGovernedAction && preparedWriteReady ? "success" : "warning" : "success"}>{requestedExternalAction ? compiledGovernedAction ? preparedWriteReady ? "Approval + provider required" : "Connection or write access required" : "Setup required" : "Internal draft"}</Badge>} />
         <p className="detail-copy">{copilotResult.explanation}</p>
         <div className="analysis-grid">
           <div><div className="eyebrow">Required connections</div><p>{copilotResult.required_integrations.join(", ") || "None"}</p></div>
           <div><div className="eyebrow">Missing information</div><p>{copilotResult.missing_information.join(" · ") || "None"}</p></div>
           <div><div className="eyebrow">Stop conditions</div><p>{copilotResult.stop_conditions.join(" · ")}</p></div>
         </div>
-        {copilotResult.proposed_actions.length > 0 && <><div className="eyebrow">Planned governed actions</div>{copilotResult.proposed_actions.map((action, index) => <div className="list-row" key={`${action.action_type}-${index}`}><div className="row-main"><strong>{index + 1}. {action.channel.replaceAll("_", " ")}</strong><div className="row-copy">{action.condition} {action.policy_behavior}</div></div><Badge tone="warning">withheld</Badge></div>)}</>}
-        <div className="toolbar"><Button variant="soft" onClick={() => simulate.mutate()} disabled={simulate.isPending}><TestTube2 /> Run safe dry-run</Button><Button onClick={() => setAdvanced(true)}><GitBranch /> Review visual workflow</Button></div>
+        {copilotResult.proposed_actions.length > 0 && <><div className="eyebrow">Planned governed actions</div>{copilotResult.proposed_actions.map((action, index) => { const compiled = action.execution_state === "governed_action_compiled_pending_approval"; return <div className="list-row" key={`${action.action_type}-${index}`}><div className="row-main"><strong>{index + 1}. {action.channel.replaceAll("_", " ")}</strong><div className="row-copy">{action.condition} {action.policy_behavior}</div></div><Badge tone={compiled ? "info" : "warning"}>{compiled ? "Governed action compiled" : "Setup required"}</Badge></div>; })}</>}
+        <div className="toolbar"><Button variant="soft" onClick={() => simulate.mutate()} disabled={simulate.isPending || !selected}><TestTube2 /> Run safe dry-run</Button><Button onClick={() => setAdvanced(true)}><GitBranch /> Review visual workflow</Button><Button variant="green" disabled={mutation.isPending || (requestedExternalAction && !compiledGovernedAction)} onClick={() => mutation.mutate(async () => { const validation = await automationsApi.workflows.validate(activeBusinessId, copilotResult.workflow.id); if (!validation.valid) throw new Error(`Validation failed: ${validation.errors.join(", ")}`); await automationsApi.workflows.status(activeBusinessId, copilotResult.workflow.id, "active"); setNotice(preparedWriteReady ? "Business Autopilot is active. Runs create governed actions that wait for mandatory approval before durable provider dispatch; no message was sent during activation." : "Business Autopilot is active — connection or provider write access is still required. Runs remain governed and provider delivery will fail closed until setup is accepted."); })}><Check /> {requestedExternalAction && !compiledGovernedAction ? "Setup required" : preparedWriteReady ? "Complete turn on" : "Activate — connection required"}</Button></div>
       </Card>}
       <Card className={`processing-card processing-${processingState}`}>
         <div className="processing-card-head">
@@ -899,9 +992,7 @@ export function WorkflowBuilderPage() {
                         </strong>
                         <span>
                           {when(run.started_at || run.created_at)} ·{" "}
-                          {run.waiting_reason ||
-                            run.failure_code ||
-                            "completed path"}
+                          {run.failure_code || waitingReasonLabel(run.waiting_reason)}
                         </span>
                       </div>
                       <Badge
@@ -1077,20 +1168,22 @@ export function WorkflowBuilderPage() {
           {selectedRun.status === "waiting" ||
           selectedRun.status === "queued" ? (
             <div className="modal-foot">
-              <Button
-                variant="danger"
-                onClick={() =>
-                  mutation.mutate(() =>
-                    automationsApi.runs
-                      .cancel(activeBusinessId, selectedRun.id)
-                      .then(() => setSelectedRun(null)),
-                  )
-                }
-              >
-                Cancel run
-              </Button>
+              {selectedRun.waiting_reason !== "action_execution" && <Button
+                  variant="danger"
+                  onClick={() =>
+                    mutation.mutate(() =>
+                      automationsApi.runs
+                        .cancel(activeBusinessId, selectedRun.id)
+                        .then(() => setSelectedRun(null)),
+                    )
+                  }
+                >
+                  Cancel run
+                </Button>}
               <p className="subtle">
-                Waiting and queued runs resume automatically when eligible.
+                {selectedRun.waiting_reason === "action_execution"
+                  ? "Provider dispatch has already been queued or started, so canceling the workflow cannot safely retract it. The run will resume from the durable provider result."
+                  : "Waiting and queued runs resume automatically when eligible."}
               </p>
             </div>
           ) : null}

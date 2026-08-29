@@ -53,6 +53,7 @@ from app.services.business_logo import (
     prepare_business_logo_deletion,
     prepare_business_logo_upload,
 )
+from app.services.billing import BillingEntitlementError
 from app.services.automation_intelligence import (
     schedule_competitor_discovery,
     schedule_marketing_automation,
@@ -125,6 +126,10 @@ async def create_business(
             status_code=status.HTTP_409_CONFLICT,
             detail="Business onboarding conflicts with an existing resource.",
         ) from None
+    except BillingEntitlementError:
+        if not await _rollback_safely(session):
+            raise _onboarding_unavailable_exception() from None
+        raise
     except BusinessOnboardingPersistenceError:
         await _rollback_safely(session)
         raise _onboarding_unavailable_exception() from None

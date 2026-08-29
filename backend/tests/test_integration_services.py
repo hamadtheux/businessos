@@ -97,7 +97,7 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
             clock.now.return_value = NOW
             result = await service.complete_authorization(
                 session,  # type: ignore[arg-type]
-                connector_type="gmail",
+                connector_type=None,
                 state=raw_state,
                 code="one-use-code",
                 adapters=adapters,
@@ -217,15 +217,16 @@ class IntegrationLifecycleServiceTests(unittest.IsolatedAsyncioTestCase):
 
 class IntegrationWebhookServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_signature_normalization_tenant_resolution_and_duplicate_dedup(self) -> None:
-        connection = _connection()
+        connection = _connection(connector_type="facebook")
         adapter = _FakeConnector()
+        adapter.connector_type = "facebook"
         adapter.webhook_event = NormalizedIntegrationEvent(
-            external_event_id="provider-event-1", event_type="email_received", occurred_at=datetime.now(UTC),
+            external_event_id="provider-event-1", event_type="message_received", occurred_at=datetime.now(UTC),
             safe_payload={"sender_email": "USER@EXAMPLE.TEST", "unknown_provider_blob": "drop-me"},
         )
         event = IntegrationWebhookEvent(
             id=uuid4(), business_id=BUSINESS_ID, integration_connection_id=connection.id,
-            connector_type="gmail", external_event_id="provider-event-1", event_type="email_received",
+            connector_type="facebook", external_event_id="provider-event-1", event_type="message_received",
             status="received", normalized_payload={"sender_email": "user@example.test", "occurred_at": NOW.isoformat()},
             received_at=NOW, processed_at=None, failure_code=None, created_at=NOW,
         )
@@ -234,9 +235,9 @@ class IntegrationWebhookServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.services.integrations.enqueue_job", new=AsyncMock()) as enqueue:
             first = await service.ingest_webhook(
                 first_session,  # type: ignore[arg-type]
-                connector_type="gmail", connection_id=connection.id, body=b"{}",
-                headers={}, payload={"business_id": str(uuid4())}, verifier=verifier,
-                adapters=ConnectorAdapterRegistry({"gmail": adapter}),
+                connector_type="facebook", connection_id=connection.id, body=b"{}",
+                headers={}, payload={"entry": [{"id": "page-1"}]}, verifier=verifier,
+                adapters=ConnectorAdapterRegistry({"facebook": adapter}),
             )
         self.assertEqual(first.business_id, BUSINESS_ID)
         self.assertEqual(first.status, "received")
@@ -245,16 +246,16 @@ class IntegrationWebhookServiceTests(unittest.IsolatedAsyncioTestCase):
         enqueue.assert_awaited_once()
         duplicate = await service.ingest_webhook(
             _Session([connection, None, first]),  # type: ignore[arg-type]
-            connector_type="gmail", connection_id=connection.id, body=b"{}", headers={},
-            payload={"business_id": str(uuid4())}, verifier=verifier,
-            adapters=ConnectorAdapterRegistry({"gmail": adapter}),
+            connector_type="facebook", connection_id=connection.id, body=b"{}", headers={},
+            payload={"entry": [{"id": "page-1"}]}, verifier=verifier,
+            adapters=ConnectorAdapterRegistry({"facebook": adapter}),
         )
         self.assertIs(duplicate, first)
         with self.assertRaises(IntegrationWebhookVerificationError):
             await service.ingest_webhook(
                 _Session(),  # type: ignore[arg-type]
-                connector_type="gmail", connection_id=connection.id, body=b"{}", headers={},
-                payload={}, verifier=_Verifier(False), adapters=ConnectorAdapterRegistry({"gmail": adapter}),
+                connector_type="facebook", connection_id=connection.id, body=b"{}", headers={},
+                payload={}, verifier=_Verifier(False), adapters=ConnectorAdapterRegistry({"facebook": adapter}),
             )
 
     async def test_verified_whatsapp_status_webhook_fans_out_and_replay_is_idempotent(
@@ -874,12 +875,27 @@ def _connection(
     health: str = "healthy",
     credential_reference: str = "test-credential:opaque",
 ) -> IntegrationConnection:
+    selected_resources = (
+        [{
+            "resource_type": "whatsapp_business_account",
+            "external_reference": "123456789",
+            "display_name": "Test WhatsApp account",
+        }]
+        if connector_type == "whatsapp_business"
+        else [{
+            "resource_type": "facebook_page",
+            "external_reference": "page-1",
+            "display_name": "Test Page",
+        }]
+        if connector_type == "facebook"
+        else []
+    )
     return IntegrationConnection(
         id=uuid4(), business_id=BUSINESS_ID, connector_type=connector_type,
         display_name=connector_type.replace("_", " ").title(), status=status,
         authentication_state=authentication_state, health=health,
         credential_reference=credential_reference, external_account_reference="account-1",
-        external_account_display_name="Business account", selected_resources=[],
+        external_account_display_name="Business account", selected_resources=selected_resources,
         scopes_granted=["openid"], connected_by_user_id=USER_ID, connected_at=NOW,
         last_health_check_at=NOW, last_successful_sync_at=None, failure_code=None,
         created_at=NOW, updated_at=NOW,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
@@ -26,6 +27,7 @@ from app.integrations.credentials import (  # noqa: E402
     CredentialMaterial,
 )
 from app.models.ai_action import AIAction  # noqa: E402
+from app.models.provider_write_acceptance import ProviderWriteAcceptance  # noqa: E402
 from app.schemas.ai_action_payload import SendEmailPayload  # noqa: E402
 from app.services.action_dispatcher import dispatch_action_execution_job  # noqa: E402
 
@@ -120,7 +122,14 @@ class DispatcherBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 "app.services.action_dispatcher.prepare_connector_dispatch_context",
                 new=AsyncMock(return_value=context),
             ),
-            patch("app.services.action_dispatcher.record_action_execution_success", new=AsyncMock()) as success,
+            patch(
+                "app.services.action_dispatcher.record_action_execution_success",
+                new=AsyncMock(
+                    return_value=SimpleNamespace(
+                        completed_at=datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+                    )
+                ),
+            ) as success,
         ):
             result = await dispatch_action_execution_job(
                 SimpleNamespace(
@@ -140,6 +149,29 @@ class DispatcherBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             success.await_args.kwargs["external_reference_id"],
             "provider-message-1",
+        )
+
+        acceptance_rows = [
+            value
+            for value in sessions[2].added
+            if isinstance(value, ProviderWriteAcceptance)
+        ]
+        self.assertEqual(len(acceptance_rows), 1)
+        acceptance = acceptance_rows[0]
+        self.assertEqual(acceptance.business_id, BUSINESS_ID)
+        self.assertEqual(
+            acceptance.integration_connection_id,
+            context.connection_id,
+        )
+        self.assertEqual(
+            acceptance.action_execution_attempt_id,
+            attempt_id,
+        )
+        self.assertEqual(acceptance.connector_type, "gmail")
+        self.assertEqual(acceptance.action_type, "send_email")
+        self.assertEqual(
+            acceptance.accepted_at,
+            datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
         )
 
     async def test_unknown_provider_outcome_is_uncertain_and_not_retryable(self) -> None:
@@ -176,6 +208,13 @@ class DispatcherBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.retryable)
         uncertain.assert_awaited_once()
         self.assertEqual(adapter.calls, 1)
+        self.assertFalse(
+            any(
+                isinstance(value, ProviderWriteAcceptance)
+                for session in sessions
+                for value in session.added
+            )
+        )
 
 
 class ApprovalReviewBoundaryTests(unittest.TestCase):

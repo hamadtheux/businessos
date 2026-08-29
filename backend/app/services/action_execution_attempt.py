@@ -309,6 +309,7 @@ async def record_action_execution_success(
     action.failure_code = None
     action.result_summary = "Provider accepted the governed action."
     await _flush_attempt(session, attempt=attempt)
+    await _enqueue_workflow_resume_for_action(session, action=action)
     return attempt
 
 
@@ -352,6 +353,7 @@ async def record_action_execution_failure(
     action.failure_code = normalized_code
     action.result_summary = "The connector did not complete the governed action."
     await _flush_attempt(session, attempt=attempt)
+    await _enqueue_workflow_resume_for_action(session, action=action)
     return attempt
 
 
@@ -424,7 +426,12 @@ async def cancel_action_execution_attempt(
     attempt.status = "canceled"
     attempt.completed_at = now
     action.status = "canceled"
+    action.execution_completed_at = now
+    action.result_summary = (
+        "Governed dispatch was canceled before provider invocation."
+    )
     await _flush_attempt(session, attempt=attempt)
+    await _enqueue_workflow_resume_for_action(session, action=action)
     return attempt
 
 
@@ -892,6 +899,43 @@ async def _apply_uncertain_outcome(
         "The provider outcome is uncertain; reconciliation is required."
     )
     await _flush_attempt(session, attempt=attempt)
+    await _enqueue_workflow_resume_for_action(session, action=action)
+
+
+async def _enqueue_workflow_resume_for_action(
+    session: AsyncSession,
+    *,
+    action: AIAction,
+) -> None:
+    """Wake a waiting workflow only after its action has a durable result."""
+    if not isinstance(session, AsyncSession):
+        return
+    from app.models.automation import AutomationNodeRun
+    from app.services.background_jobs import enqueue_job
+
+    node_run = await session.scalar(
+        select(AutomationNodeRun)
+        .where(
+            AutomationNodeRun.business_id == action.business_id,
+            AutomationNodeRun.action_id == action.id,
+            AutomationNodeRun.status == "waiting",
+        )
+        .order_by(AutomationNodeRun.created_at.desc(), AutomationNodeRun.id.desc())
+        .limit(1)
+    )
+    if node_run is None:
+        return
+    await enqueue_job(
+        session,
+        business_id=action.business_id,
+        job_type="resume_workflow_run",
+        idempotency_key=(
+            f"workflow-action:{node_run.workflow_run_id}:{node_run.id}:"
+            f"{action.status}"
+        ),
+        workflow_run_id=node_run.workflow_run_id,
+        node_run_id=node_run.id,
+    )
 
 
 async def _list_attempts(

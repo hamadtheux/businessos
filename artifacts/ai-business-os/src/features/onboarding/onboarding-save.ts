@@ -21,9 +21,9 @@ export const onboardingSetupSteps = [
   "Saving business information",
   "Validating products/services",
   "Saving products/services",
-  "Configuring brand voice",
-  "Preparing connected channels",
-  "Finalizing workspace",
+  "Saving brand voice and identity",
+  "Leaving providers safely disconnected",
+  "Preparing the readiness checklist",
 ] as const;
 
 export type OnboardingForm = {

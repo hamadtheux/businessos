@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { WIDGET_API_BASE_URL } from "./config.ts";
 import { PublicWidgetApi, type AvailabilitySlot, type ChatResponse, type ProductCard, type PublicWidgetConfig } from "./public-api.ts";
 
 type InitMessage = {
@@ -21,7 +22,10 @@ function safeInit(event: MessageEvent): InitMessage | null {
   if (!value.config || value.config.widget_id !== value.widgetId || typeof value.apiBase !== "string") return null;
   try {
     const apiUrl = new URL(value.apiBase, window.location.href);
-    if (!/^https?:$/.test(apiUrl.protocol) || apiUrl.origin !== window.location.origin) return null;
+    const trustedApiOrigin = WIDGET_API_BASE_URL
+      ? new URL(WIDGET_API_BASE_URL).origin
+      : window.location.origin;
+    if (!/^https?:$/.test(apiUrl.protocol) || apiUrl.origin !== trustedApiOrigin) return null;
   } catch { return null; }
   return value as InitMessage;
 }

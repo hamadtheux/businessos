@@ -59,10 +59,22 @@ class JobCounts(BaseModel):
     canceled: int
 
 
+class ProcessingAttentionCounts(BaseModel):
+    uncertain_actions: int
+    failed_actions_24h: int
+    failed_workflows_24h: int
+    failed_webhooks_24h: int
+    webhook_backlog: int
+    provider_connections_attention: int
+    commerce_connections_attention: int
+    ai_failures_24h: int
+
+
 class ProcessingHealthResponse(BaseModel):
     status: Literal["healthy", "degraded", "unavailable"]
     counts: JobCounts
     automation_event_backlog: int
+    attention: ProcessingAttentionCounts
     oldest_queued_job_age_seconds: float | None
     average_processing_latency_seconds: float | None
     worker_last_heartbeat_at: datetime | None

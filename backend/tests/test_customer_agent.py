@@ -839,6 +839,28 @@ class CustomerAgentDeliveryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(connection_id, conversation.integration_connection_id)
 
+    async def test_whatsapp_delivery_requires_trusted_conversation_binding(
+        self,
+    ) -> None:
+        customer = _customer(phone="+923001234567")
+        payload = SendWhatsAppMessagePayload(
+            customer_ref=str(customer.id),
+            message="Proactive free-form message",
+        )
+
+        with self.assertRaisesRegex(
+            IntegrationStateError,
+            "whatsapp_conversation_required",
+        ):
+            await _resolve_delivery_target(
+                _Session([customer]),  # type: ignore[arg-type]
+                business_id=BUSINESS_ID,
+                connector_type="whatsapp_business",
+                connection_id=uuid4(),
+                action_type="send_whatsapp_message",
+                payload=payload,
+            )
+
     async def test_confirmed_provider_send_records_submitted_outbound_message(
         self,
     ) -> None:

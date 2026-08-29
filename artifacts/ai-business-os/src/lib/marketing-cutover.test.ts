@@ -109,6 +109,9 @@ test("marketing routes are production-ungated and avoid false launch language", 
   }
   assert.equal(marketing.includes("Start prototype campaign"), false);
   assert.equal(marketing.includes("launched successfully"), false);
-  assert.match(marketing, /Authenticated external writes are provider-disabled/);
-  assert.match(marketing, /No connector is registered; planning only/);
+  assert.match(marketing, /integrationsApi\.registry/);
+  assert.match(marketing, /integrationsApi\.connections/);
+  assert.match(marketing, /external_writes_enabled/);
+  assert.match(marketing, /No connector is registered; internal planning only/);
+  assert.doesNotMatch(marketing, /Authenticated external writes are provider-disabled/);
 });

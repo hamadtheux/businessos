@@ -69,7 +69,9 @@ export type AutomationCopilotResult = {
     channel: "email" | "whatsapp" | "customer_message";
     condition: string;
     policy_behavior: string;
-    execution_state: "withheld_pending_authoritative_inputs";
+    execution_state:
+      | "withheld_pending_authoritative_inputs"
+      | "governed_action_compiled_pending_approval";
   }>;
   executable_actions_withheld: boolean;
 };

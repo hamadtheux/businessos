@@ -94,7 +94,10 @@ test("widget renders all visitor and AI content as React text, never arbitrary H
   assert.match(source, /Availability comes directly/);
   assert.match(source, /handoffRequested/);
   assert.match(source, /Waiting for human assistance/);
-  assert.match(source, /apiUrl\.origin !== window\.location\.origin/);
+  assert.match(source, /WIDGET_API_BASE_URL/);
+  assert.match(source, /trustedApiOrigin/);
+  assert.match(source, /apiUrl\.origin !== trustedApiOrigin/);
+  assert.equal(source.includes("apiUrl.origin !== window.location.origin"), false);
 });
 
 test("public widget API uses only opaque widget/session identity and dedicated routes", async () => {

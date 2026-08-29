@@ -522,6 +522,10 @@ class ShopifyCommerceAdapter:
         supplied = request.headers.get("x-shopify-hmac-sha256", "")
         if not supplied or not _safe_hmac(secret, request.body, supplied):
             raise CommerceProviderError("webhook_verification_failed")
+        expected_host = _credential_store_host(credentials)
+        supplied_host = request.headers.get("x-shopify-shop-domain", "").rstrip(".").casefold()
+        if expected_host is None or supplied_host != expected_host:
+            raise CommerceProviderError("webhook_verification_failed")
         topic = request.headers.get("x-shopify-topic", "").strip()
         event_id = request.headers.get("x-shopify-webhook-id", "").strip()
         payload = _webhook_payload(request.body)
@@ -725,6 +729,14 @@ class WooCommerceAdapter:
         secret = _required(credentials, "webhook_secret")
         signature = request.headers.get("x-wc-webhook-signature", "")
         if not signature or not _safe_hmac(secret, request.body, signature):
+            raise CommerceProviderError("webhook_verification_failed")
+        expected_host = _credential_store_host(credentials)
+        source = request.headers.get("x-wc-webhook-source", "")
+        try:
+            supplied_host = urlsplit(source).hostname.casefold()
+        except (AttributeError, ValueError):
+            supplied_host = None
+        if expected_host is None or supplied_host != expected_host:
             raise CommerceProviderError("webhook_verification_failed")
         payload = _webhook_payload(request.body)
         topic = request.headers.get("x-wc-webhook-topic", "")
@@ -1454,6 +1466,17 @@ class CustomApiCommerceAdapter:
             raise CommerceProviderError("webhook_verification_failed")
         payload = _webhook_payload(request.body)
         return NormalizedWebhookEvent(external_event_id=str(payload.get("event_id") or ""), topic=str(payload.get("topic") or ""), external_object_id=_text(payload.get("object_id"), 255), occurred_at=_datetime(payload.get("occurred_at")), reconciliation_domain=_topic_domain(str(payload.get("topic") or "")))
+
+
+def _credential_store_host(credentials: CredentialMaterial) -> str | None:
+    value = credentials.values.get("store_url")
+    if not isinstance(value, str):
+        return None
+    try:
+        host = urlsplit(value).hostname
+    except ValueError:
+        return None
+    return host.rstrip(".").casefold() if host else None
 
 
 def _address(raw: object, *, shopify: bool = False, magento: bool = False) -> NormalizedAddress | None:

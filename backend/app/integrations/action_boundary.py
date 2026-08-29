@@ -85,6 +85,7 @@ async def prepare_connector_dispatch_context(
     """Resolve a tenant-owned, provider-capable dispatch using database truth."""
     require_external_connector_writes_enabled(
         configuration.external_connector_writes_enabled
+        and configuration.external_connector_write_mode == "enabled"
     )
     # A connected account does not outlive the business's platform
     # entitlement. Recheck the current plan before loading connector secrets.
@@ -220,6 +221,11 @@ async def _resolve_delivery_target(
     if customer is None or customer.business_id != business_id:
         raise IntegrationStateError("delivery_customer_not_found")
     conversation_ref = getattr(payload, "conversation_ref", None)
+    if connector_type == "whatsapp_business" and conversation_ref is None:
+        # Free-form WhatsApp sends are safe only inside a tenant-owned
+        # conversation whose latest customer message proves an open service
+        # window. Proactive/template and consent semantics are not modeled yet.
+        raise IntegrationStateError("whatsapp_conversation_required")
     if conversation_ref is not None:
         try:
             conversation_id = UUID(conversation_ref)

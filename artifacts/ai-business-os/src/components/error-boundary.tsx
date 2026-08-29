@@ -75,11 +75,15 @@ export class ErrorBoundary extends Component<
   }
 
   componentDidCatch(error: unknown, info: ErrorInfo): void {
-    console.error(
-      'ErrorBoundary caught an error:',
-      toError(error),
-      info.componentStack,
-    );
+    if (import.meta.env.DEV) {
+      console.error(
+        'ErrorBoundary caught an error:',
+        toError(error),
+        info.componentStack,
+      );
+    } else {
+      console.error('The application error boundary handled a failure.');
+    }
   }
 
   componentDidUpdate(prevProps: ErrorBoundaryProps): void {

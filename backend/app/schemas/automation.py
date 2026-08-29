@@ -65,14 +65,43 @@ class BranchNodeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+ActionContextBinding = Literal[
+    "event_customer_ref",
+    "event_conversation_ref",
+]
+
+
 class ExternalActionNodeConfig(BaseModel):
     kind: Literal["action"] = "action"
     action_type: str = Field(min_length=1, max_length=100)
     description: str = Field(min_length=1, max_length=2000)
     payload: dict[str, Any] = Field(default_factory=dict)
+    context_bindings: dict[str, ActionContextBinding] = Field(default_factory=dict)
     risk_level: Literal["low", "medium", "high", "critical"] = "medium"
     requires_approval: bool = True
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("context_bindings")
+    @classmethod
+    def validate_context_bindings(
+        cls,
+        value: dict[str, ActionContextBinding],
+    ) -> dict[str, ActionContextBinding]:
+        allowed_targets_by_binding = {
+            "event_customer_ref": {"recipient_ref", "customer_ref"},
+            "event_conversation_ref": {"conversation_ref"},
+        }
+        allowed_targets = set().union(*allowed_targets_by_binding.values())
+        if not set(value).issubset(allowed_targets):
+            raise ValueError("action_context_binding_target_unsupported")
+        if any(
+            target not in allowed_targets_by_binding[binding]
+            for target, binding in value.items()
+        ):
+            raise ValueError("action_context_binding_semantic_mismatch")
+        if len(value) > len(allowed_targets):
+            raise ValueError("too many action context bindings")
+        return value
 
 
 class DelayNodeConfig(BaseModel):
@@ -259,7 +288,10 @@ class AutomationCopilotProposedAction(BaseModel):
     channel: Literal["email", "whatsapp", "customer_message"]
     condition: str = Field(min_length=1, max_length=500)
     policy_behavior: str = Field(min_length=1, max_length=500)
-    execution_state: Literal["withheld_pending_authoritative_inputs"] = "withheld_pending_authoritative_inputs"
+    execution_state: Literal[
+        "withheld_pending_authoritative_inputs",
+        "governed_action_compiled_pending_approval",
+    ] = "withheld_pending_authoritative_inputs"
     model_config = ConfigDict(extra="forbid")
 
 

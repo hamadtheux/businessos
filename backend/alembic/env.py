@@ -10,6 +10,7 @@ from alembic import context
 import app.models  # noqa: F401  # Register all models with Base.metadata.
 from app.core.config import settings
 from app.db.base import Base
+from app.db.connection import build_asyncpg_connect_args
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -69,6 +70,7 @@ async def run_async_migrations() -> None:
     connectable = create_async_engine(
         settings.sqlalchemy_database_url,
         poolclass=pool.NullPool,
+        connect_args=build_asyncpg_connect_args(settings),
     )
 
     try:

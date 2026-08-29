@@ -1,6 +1,8 @@
 from functools import lru_cache
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Literal, Self
+from urllib.parse import urlsplit
 
 from pydantic import (
     AnyHttpUrl,
@@ -17,7 +19,27 @@ StorageBackend = Literal["local", "s3"]
 IntegrationCredentialBackend = Literal["disabled", "aws_secrets_manager"]
 ChatbotRateLimitBackend = Literal["memory"]
 BillingProviderBackend = Literal["disabled"]
+DatabaseSslMode = Literal["disable", "prefer", "require", "verify-ca", "verify-full"]
+ExternalConnectorWriteMode = Literal["disabled", "test", "enabled"]
+LogFormat = Literal["text", "json"]
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _origin(url: AnyHttpUrl) -> str:
+    default_port = 443 if url.scheme == "https" else 80
+    port = url.port or default_port
+    suffix = "" if port == default_port else f":{port}"
+    return f"{url.scheme}://{url.host}{suffix}"
+
+
+def _is_local_or_private_host(host: str) -> bool:
+    normalized = host.rstrip(".").casefold()
+    if normalized == "localhost" or normalized.endswith((".localhost", ".local")):
+        return True
+    try:
+        return not ip_address(normalized.strip("[]")).is_global
+    except ValueError:
+        return False
 
 
 class Settings(BaseSettings):
@@ -29,8 +51,12 @@ class Settings(BaseSettings):
 
     # API
     api_v1_prefix: str = "/api/v1"
+    docs_enabled: bool = True
+    trusted_hosts: list[str] = ["localhost", "127.0.0.1", "testserver"]
+    request_max_bytes: int = Field(default=2_097_152, ge=65_536, le=10_485_760)
 
     # Frontend / CORS
+    frontend_base_url: AnyHttpUrl = "http://localhost:5174"
     cors_origins: list[str] = [
         "http://localhost:5174",
         "http://127.0.0.1:5174",
@@ -42,6 +68,23 @@ class Settings(BaseSettings):
     database_pool_size: int = Field(default=10, ge=1)
     database_max_overflow: int = Field(default=20, ge=0)
     database_pool_timeout: int = Field(default=30, ge=1)
+    database_pool_recycle_seconds: int = Field(default=1_800, ge=60, le=86_400)
+    database_connect_timeout_seconds: int = Field(default=10, ge=1, le=60)
+    database_command_timeout_seconds: int = Field(default=60, ge=1, le=600)
+    database_ssl_mode: DatabaseSslMode = "disable"
+
+    # Observability and ingress contracts. The edge flag represents a real
+    # reverse-proxy/WAF rate-limit policy; the application never pretends its
+    # single-process chatbot limiter protects a multi-replica deployment.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    log_format: LogFormat = "text"
+    edge_rate_limiting_enabled: bool = False
+    # Operator-controlled kill switch for first-client activation. Production
+    # configuration may be deployed safely with this disabled; the
+    # tenant-scoped activation readiness endpoint will not report ready until
+    # an operator enables it after deployment, backup, monitoring, and smoke
+    # gates have been completed.
+    first_client_activation_enabled: bool = False
 
     # PostgreSQL-backed internal processing. API, worker, and scheduler are
     # separate processes sharing the same database.
@@ -125,6 +168,9 @@ class Settings(BaseSettings):
     integration_oauth_state_ttl_seconds: int = Field(default=600, ge=300, le=900)
     integration_oauth_callback_url: AnyHttpUrl | None = None
     integration_webhook_max_bytes: int = Field(default=262_144, ge=1_024, le=1_048_576)
+    external_connector_write_mode: ExternalConnectorWriteMode = "disabled"
+    # Deprecated compatibility switch. Both values are normalized and must
+    # describe the same trusted server-side decision.
     external_connector_writes_enabled: bool = False
     connector_dispatch_timeout_seconds: float = Field(default=30.0, ge=1, le=120)
 
@@ -182,11 +228,45 @@ class Settings(BaseSettings):
         cls,
         value: list[str],
     ) -> list[str]:
-        if any(origin.strip() == "*" for origin in value):
-            raise ValueError(
-                "Wildcard CORS origins cannot be used with credentials"
+        normalized: list[str] = []
+        for candidate in value:
+            origin = candidate.strip().rstrip("/")
+            parsed = urlsplit(origin)
+            if (
+                origin == "*"
+                or parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path not in {"", "/"}
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError(
+                    "CORS origins must be exact HTTP(S) origins without credentials or paths"
+                )
+            normalized.append(origin)
+        if not normalized or len(set(normalized)) != len(normalized):
+            raise ValueError("CORS origins must be non-empty and unique")
+        return normalized
+
+    @field_validator("trusted_hosts")
+    @classmethod
+    def validate_trusted_hosts(cls, value: list[str]) -> list[str]:
+        normalized = [item.strip().casefold().rstrip(".") for item in value]
+        if (
+            not normalized
+            or len(set(normalized)) != len(normalized)
+            or any(
+                not item
+                or "/" in item
+                or "://" in item
+                or item.startswith(".")
+                for item in normalized
             )
-        return value
+        ):
+            raise ValueError("Trusted hosts must be unique hostnames")
+        return normalized
 
     @field_validator("platform_admin_emails")
     @classmethod
@@ -229,6 +309,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_security_settings(self) -> Self:
+        if self.external_connector_writes_enabled != (
+            self.external_connector_write_mode != "disabled"
+        ):
+            raise ValueError(
+                "External connector write mode and compatibility switch must agree"
+            )
+
         if self.environment == "production" and self.debug:
             raise ValueError(
                 "Debug mode must be disabled in production"
@@ -253,6 +340,8 @@ class Settings(BaseSettings):
             if (
                 self.storage_bucket is None
                 or not self.storage_bucket.strip()
+                or self.storage_region is None
+                or not self.storage_region.strip()
                 or self.storage_access_key_id is None
                 or not self.storage_access_key_id.get_secret_value().strip()
                 or self.storage_secret_access_key is None
@@ -303,22 +392,139 @@ class Settings(BaseSettings):
             raise ValueError("Google Ads developer token cannot be blank")
 
         if self.environment == "production":
+            if self.docs_enabled:
+                raise ValueError("Interactive API documentation must be disabled in production")
+            if self.database_ssl_mode not in {"require", "verify-ca", "verify-full"}:
+                raise ValueError("PostgreSQL TLS is required in production")
+            if self.log_format != "json":
+                raise ValueError("Structured JSON logging is required in production")
+            if not self.edge_rate_limiting_enabled:
+                raise ValueError("A production edge rate-limit policy must be confirmed")
+            if any("*" in host for host in self.trusted_hosts):
+                raise ValueError("Wildcard trusted hosts are forbidden in production")
+
+            database_url = urlsplit(self.sqlalchemy_database_url)
+            if database_url.scheme != "postgresql+asyncpg" or not database_url.hostname:
+                raise ValueError(
+                    "Production database URL must use postgresql+asyncpg with an explicit host"
+                )
+
             public_urls = (
+                self.frontend_base_url,
                 self.public_api_base_url,
                 self.widget_loader_url,
                 self.widget_app_url,
             )
-            if any(url.scheme != "https" or url.host in {"localhost", "127.0.0.1"} for url in public_urls):
+            if any(
+                url.scheme != "https" or _is_local_or_private_host(url.host)
+                for url in public_urls
+            ):
                 raise ValueError(
                     "Public chatbot API, loader, and app URLs must use non-local HTTPS in production"
                 )
-            origins = {
-                (url.scheme, url.host, url.port or 443)
+            if any(
+                url.username is not None
+                or url.password is not None
+                or url.query
+                or url.fragment
+                or url.path not in {"", "/", "/widget-loader.js", "/widget.html"}
                 for url in public_urls
+            ):
+                raise ValueError(
+                    "Production public URLs must not contain credentials, query strings, fragments, or unexpected paths"
+                )
+            storage_public = self.storage_public_base_url
+            storage_endpoint = self.storage_endpoint_url
+            if (
+                storage_public is None
+                or storage_public.scheme != "https"
+                or _is_local_or_private_host(storage_public.host)
+                or storage_public.query
+                or storage_public.fragment
+                or (
+                    storage_endpoint is not None
+                    and (
+                        storage_endpoint.scheme != "https"
+                        or _is_local_or_private_host(storage_endpoint.host)
+                        or storage_endpoint.query
+                        or storage_endpoint.fragment
+                    )
+                )
+            ):
+                raise ValueError(
+                    "Production object storage URLs must use non-local HTTPS without query or fragment"
+                )
+            widget_origins = {
+                (url.scheme, url.host, url.port or 443)
+                for url in (
+                    self.public_api_base_url,
+                    self.widget_loader_url,
+                    self.widget_app_url,
+                )
             }
-            if len(origins) != 1:
+            if len(widget_origins) != 1:
                 raise ValueError(
                     "Public chatbot API, loader, and app must share one browser origin; proxy /api to the backend"
+                )
+            frontend_origin = _origin(self.frontend_base_url)
+            if frontend_origin not in self.cors_origins:
+                raise ValueError("The production frontend origin must be explicitly allowed by CORS")
+            public_api_host = self.public_api_base_url.host.casefold()
+            if public_api_host not in self.trusted_hosts:
+                raise ValueError("The public API hostname must be explicitly trusted")
+            if any(
+                urlsplit(origin).scheme != "https"
+                or _is_local_or_private_host(urlsplit(origin).hostname or "")
+                for origin in self.cors_origins
+            ):
+                raise ValueError("Production CORS origins must use non-local HTTPS")
+            secret = self.auth_secret_key.get_secret_value().strip().casefold()
+            weak_markers = ("change-me", "changeme", "development", "example", "test-secret")
+            if any(marker in secret for marker in weak_markers) or len(set(secret)) < 8:
+                raise ValueError("Production authentication signing secret is not sufficiently unique")
+
+            configured_secrets = {
+                "OpenAI API key": self.openai_api_key,
+                "storage access key": self.storage_access_key_id,
+                "storage secret key": self.storage_secret_access_key,
+                "Google OAuth client secret": self.google_oauth_client_secret,
+                "Google Ads developer token": self.google_ads_developer_token,
+                "Meta OAuth client secret": self.meta_oauth_client_secret,
+                "Meta webhook verify token": self.meta_webhook_verify_token,
+                "Meta webhook signing secret": self.meta_webhook_signing_secret,
+                "Microsoft OAuth client secret": self.microsoft_oauth_client_secret,
+            }
+            unsafe_secret_markers = (
+                "change-me", "changeme", "placeholder", "not-a-real",
+                "example-secret", "dummy-secret", "sk-test-",
+            )
+            for label, configured_secret in configured_secrets.items():
+                if configured_secret is None:
+                    continue
+                normalized = configured_secret.get_secret_value().strip().casefold()
+                if any(marker in normalized for marker in unsafe_secret_markers):
+                    raise ValueError(f"{label} contains a non-production placeholder")
+
+            if self.integration_oauth_callback_url is not None:
+                callback = self.integration_oauth_callback_url
+                if (
+                    callback.scheme != "https"
+                    or callback.host in {"localhost", "127.0.0.1"}
+                    or _origin(callback) != _origin(self.public_api_base_url)
+                    or callback.path != f"{self.api_v1_prefix}/integrations/oauth/callback"
+                    or callback.query
+                    or callback.fragment
+                ):
+                    raise ValueError(
+                        "Production OAuth callback must be the HTTPS public API /integrations/oauth/callback endpoint"
+                    )
+
+            if self.meta_oauth_client_id and (
+                self.meta_webhook_verify_token is None
+                or self.meta_webhook_signing_secret is None
+            ):
+                raise ValueError(
+                    "Configured Meta OAuth requires webhook verification and signing secrets"
                 )
 
         return self
