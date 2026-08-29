@@ -30,6 +30,8 @@ RUN pnpm --filter @workspace/ai-business-os build
 
 FROM nginxinc/nginx-unprivileged:1.29.1-alpine
 
+ENV NGINX_API_UPSTREAM=http://api:8000
+
 COPY artifacts/ai-business-os/nginx/default.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /workspace/artifacts/ai-business-os/dist/public /usr/share/nginx/html
 
