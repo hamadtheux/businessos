@@ -486,6 +486,13 @@ export function AppShell({ children }: { children: ReactNode }) {
                   className="channel"
                   onClick={() => {
                     setBusinessOpen(false);
+                    try {
+                      sessionStorage.removeItem(
+                        "ai-business-os:onboarding-draft:v2",
+                      );
+                    } catch {
+                      // Starting a fresh business must not depend on browser storage.
+                    }
                     setLocation("/onboarding");
                   }}
                 >

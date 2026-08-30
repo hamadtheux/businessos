@@ -858,3 +858,33 @@ test("onboarding business input omits catalog from the business save", () => {
   assert.equal(input.products, undefined);
   assert.equal(input.brandIdentity, undefined);
 });
+
+test("Add business starts a fresh onboarding identity instead of restoring a stale business ID", async () => {
+  const shell = await readFile(
+    new URL("../components/app-shell.tsx", import.meta.url),
+    "utf8",
+  );
+
+  const label = '<Plus size={13} /> Add business';
+  const labelIndex = shell.indexOf(label);
+  assert.ok(labelIndex >= 0);
+
+  const blockStart = shell.lastIndexOf('className="channel"', labelIndex);
+  const blockEnd = shell.indexOf("</button>", labelIndex);
+  assert.ok(blockStart >= 0);
+  assert.ok(blockEnd > labelIndex);
+
+  const addBusinessBlock = shell.slice(blockStart, blockEnd);
+
+  assert.match(
+    addBusinessBlock,
+    /sessionStorage\.removeItem\(\s*"ai-business-os:onboarding-draft:v2",?\s*\)/,
+  );
+  assert.match(addBusinessBlock, /setLocation\("\/onboarding"\)/);
+
+  const clearIndex = addBusinessBlock.indexOf("sessionStorage.removeItem(");
+  const navigateIndex = addBusinessBlock.indexOf('setLocation("/onboarding")');
+
+  assert.ok(clearIndex >= 0);
+  assert.ok(navigateIndex > clearIndex);
+});
