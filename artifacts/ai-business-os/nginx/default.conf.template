@@ -5,7 +5,7 @@ server {
 
     root /usr/share/nginx/html;
     index index.html;
-    client_max_body_size 2m;
+    client_max_body_size 6m;
 
     location = /healthz {
         access_log off;

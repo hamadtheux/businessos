@@ -97,7 +97,7 @@ class SecurityHeadersTests(unittest.IsolatedAsyncioTestCase):
     async def test_declared_oversized_request_is_rejected_before_routing(self) -> None:
         response = await self.client.post(
             "/api/v1/auth/login",
-            headers={"Content-Length": str(3 * 1024 * 1024)},
+            headers={"Content-Length": str(7 * 1024 * 1024)},
             content=b"{}",
         )
 

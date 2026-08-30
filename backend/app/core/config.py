@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     api_v1_prefix: str = "/api/v1"
     docs_enabled: bool = True
     trusted_hosts: list[str] = ["localhost", "127.0.0.1", "testserver"]
-    request_max_bytes: int = Field(default=2_097_152, ge=65_536, le=10_485_760)
+    request_max_bytes: int = Field(default=6_291_456, ge=65_536, le=10_485_760)
 
     # Frontend / CORS
     frontend_base_url: AnyHttpUrl = "http://localhost:5174"
