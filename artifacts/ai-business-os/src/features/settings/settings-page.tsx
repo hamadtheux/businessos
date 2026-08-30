@@ -10,6 +10,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { useBusiness } from "@/business-context";
+import { PRODUCT_NAME } from "@/config/brand";
 import {
   Avatar,
   Badge,
@@ -25,6 +26,7 @@ import {
 } from "@/features/branding/branding-editor";
 import {
   createBrandIdentityDraft,
+  hasCustomBrandColors,
   type BrandIdentityDraft,
 } from "@/lib/brand-theme";
 import {
@@ -104,10 +106,7 @@ export function SettingsPage() {
     activeBusiness ? createProfileForm(activeBusiness) : null,
   );
   const [brandDraft, setBrandDraft] = useState<BrandIdentityDraft>(() =>
-    createBrandIdentityDraft(
-      activeBusiness?.brandIdentity,
-      activeBusiness?.theme === "navy" ? "navy" : "green",
-    ),
+    createBrandIdentityDraft(activeBusiness?.brandIdentity),
   );
   const [hasCustomBrand, setHasCustomBrand] = useState(
     hasSourceColors(activeBusiness),
@@ -136,12 +135,7 @@ export function SettingsPage() {
       setError("");
     }
     if (switchedBusiness || !brandingDraftIsDirty.current) {
-      setBrandDraft(
-        createBrandIdentityDraft(
-          activeBusiness.brandIdentity,
-          activeBusiness.theme === "navy" ? "navy" : "green",
-        ),
-      );
+      setBrandDraft(createBrandIdentityDraft(activeBusiness.brandIdentity));
       setHasCustomBrand(hasSourceColors(activeBusiness));
     }
   }, [
@@ -163,7 +157,6 @@ export function SettingsPage() {
     );
   }
 
-  const legacyTheme = activeBusiness.theme === "navy" ? "navy" : "green";
   const change = <K extends keyof typeof form>(
     key: K,
     value: (typeof form)[K],
@@ -190,7 +183,7 @@ export function SettingsPage() {
       revokeBrandLogo(brandDraft.logo);
       brandingDraftIsDirty.current = false;
       setBrandDraft(
-        createBrandIdentityDraft(savedBusiness.brandIdentity, legacyTheme),
+        createBrandIdentityDraft(savedBusiness.brandIdentity),
       );
       await updateBusiness(activeBusiness.id, {
         ...activeBusiness,
@@ -213,18 +206,17 @@ export function SettingsPage() {
     setError("");
     setSaved("");
     try {
-      await resetSettingsBranding(
+      const resetBusiness = await resetSettingsBranding(
         activeBusiness.id,
         updateBranding,
-        deleteLogo,
       );
       revokeBrandLogo(brandDraft.logo);
       brandingDraftIsDirty.current = false;
-      setBrandDraft(createBrandIdentityDraft(undefined, legacyTheme));
+      setBrandDraft(createBrandIdentityDraft(resetBusiness.brandIdentity));
       setHasCustomBrand(false);
       setConfirmReset(false);
       setSaved(
-        "Branding reset to the AI Business OS defaults for this business.",
+        `Workspace colors reset to the ${PRODUCT_NAME} defaults. Your business logo was preserved.`,
       );
     } catch (reason) {
       setConfirmReset(false);
@@ -340,13 +332,12 @@ export function SettingsPage() {
                   </p>
                 </div>
                 <Badge tone={hasCustomBrand ? "success" : "neutral"}>
-                  {hasCustomBrand ? "Custom theme" : "AI Business OS default"}
+                  {hasCustomBrand ? "Custom theme" : `${PRODUCT_NAME} default`}
                 </Badge>
               </div>
               <BrandingEditor
                 businessName={form.name}
                 value={brandDraft}
-                legacyTheme={legacyTheme}
                 onChange={(next) => {
                   brandingDraftIsDirty.current = true;
                   const colorsChanged =
@@ -364,7 +355,7 @@ export function SettingsPage() {
                   variant="secondary"
                   onClick={() => setConfirmReset(true)}
                 >
-                  <RotateCcw /> Reset to AI Business OS defaults
+                  <RotateCcw /> Reset to {PRODUCT_NAME} defaults
                 </Button>
                 <Button variant="primary" onClick={() => void save()}>
                   <Save /> Save changes
@@ -491,15 +482,15 @@ export function SettingsPage() {
 
       {confirmReset && (
         <Modal
-          title="Reset business branding?"
-          description={`This will remove ${activeBusiness.name}'s custom colors and saved logo.`}
+          title="Reset workspace colors?"
+          description={`This will replace ${activeBusiness.name}'s custom colors with the ${PRODUCT_NAME} defaults. The saved business logo will remain.`}
           onClose={() => setConfirmReset(false)}
         >
           <div className="reset-branding-copy">
             <RotateCcw />
             <p>
-              The workspace will return to the polished AI Business OS default
-              theme. Other business settings and data will not change.
+              Only the workspace color theme will reset. The business logo,
+              profile, brand voice, and other business data will not change.
             </p>
           </div>
           <div className="modal-foot">
@@ -507,7 +498,7 @@ export function SettingsPage() {
               Keep branding
             </Button>
             <Button variant="danger" onClick={() => void resetBranding()}>
-              <RotateCcw /> Reset branding
+              <RotateCcw /> Reset colors
             </Button>
           </div>
         </Modal>
@@ -517,8 +508,5 @@ export function SettingsPage() {
 }
 
 function hasSourceColors(business: Business | undefined): boolean {
-  const identity = business?.brandIdentity;
-  return Boolean(
-    identity?.primaryColor || identity?.secondaryColor || identity?.accentColor,
-  );
+  return hasCustomBrandColors(business?.brandIdentity);
 }

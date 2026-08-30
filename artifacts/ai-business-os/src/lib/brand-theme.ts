@@ -1,4 +1,5 @@
 import type { BrandIdentity } from "@/types/business";
+import { PRODUCT_BRAND_COLORS } from "../config/brand.ts";
 
 type Rgb = { r: number; g: number; b: number };
 type Hsl = { h: number; s: number; l: number };
@@ -77,9 +78,9 @@ export const BRAND_PRESETS = [
 
 export const DEFAULT_BRAND_IDENTITIES = {
   green: {
-    primaryColor: "#15803D",
-    secondaryColor: "#45695A",
-    accentColor: "#F47C35",
+    primaryColor: PRODUCT_BRAND_COLORS.primary,
+    secondaryColor: PRODUCT_BRAND_COLORS[900],
+    accentColor: PRODUCT_BRAND_COLORS.focus,
   },
   navy: {
     primaryColor: "#1E3A8A",
@@ -268,6 +269,17 @@ export function isBrandIdentityDraftValid(draft: BrandIdentityDraft) {
   );
 }
 
+export function hasCustomBrandColors(
+  identity?: Pick<
+    BrandIdentity,
+    "primaryColor" | "secondaryColor" | "accentColor"
+  >,
+) {
+  return Boolean(
+    identity?.primaryColor || identity?.secondaryColor || identity?.accentColor,
+  );
+}
+
 export function resolveBrandIdentity(
   identity?: BrandIdentity,
   theme: "green" | "navy" = "green",
@@ -287,12 +299,15 @@ export function deriveBrandTheme(
   theme: "green" | "navy" = "green",
 ): BrandThemeTokens {
   const { primary, secondary, accent } = resolveBrandIdentity(identity, theme);
+  const isProductDefault = primary === PRODUCT_BRAND_COLORS.primary;
   const primaryHsl = rgbToHsl(hexToRgb(primary));
-  const sidebarBackground = hslToHex({
-    h: primaryHsl.h,
-    s: Math.min(0.44, primaryHsl.s),
-    l: 0.12,
-  });
+  const sidebarBackground = isProductDefault
+    ? PRODUCT_BRAND_COLORS[950]
+    : hslToHex({
+        h: primaryHsl.h,
+        s: Math.min(0.44, primaryHsl.s),
+        l: 0.12,
+      });
   const sidebarActiveBackground = mixHex("#FFFFFF", primary, 0.28);
   const primaryBorder =
     contrastRatio(primary, "#FFFFFF") < 1.25
@@ -303,8 +318,11 @@ export function deriveBrandTheme(
     contrastRatio(primary, primarySoft) >= 4.5
       ? primary
       : safeForeground(primarySoft);
-  const focusRing =
-    contrastRatio(primary, "#FFFFFF") >= 3 ? primary : "#54685D";
+  const focusRing = isProductDefault
+    ? PRODUCT_BRAND_COLORS.focus
+    : contrastRatio(primary, "#FFFFFF") >= 3
+      ? primary
+      : "#54685D";
   const selectionBackground =
     contrastRatio(primary, "#FFFFFF") < 1.25
       ? "#D7E0DA"
@@ -312,8 +330,12 @@ export function deriveBrandTheme(
 
   return {
     brandPrimary: primary,
-    brandPrimaryHover: interactionColor(primary, 0.07),
-    brandPrimaryActive: interactionColor(primary, 0.12),
+    brandPrimaryHover: isProductDefault
+      ? PRODUCT_BRAND_COLORS.hover
+      : interactionColor(primary, 0.07),
+    brandPrimaryActive: isProductDefault
+      ? PRODUCT_BRAND_COLORS.active
+      : interactionColor(primary, 0.12),
     brandPrimarySoft: primarySoft,
     brandPrimaryBorder: primaryBorder,
     brandOnPrimary: safeForeground(primary),

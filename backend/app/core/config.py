@@ -44,7 +44,7 @@ def _is_local_or_private_host(host: str) -> bool:
 
 class Settings(BaseSettings):
     # Application
-    app_name: str = "AI Business OS API"
+    app_name: str = "9D Brain API"
     app_version: str = "0.1.0"
     environment: Environment = "development"
     debug: bool = True

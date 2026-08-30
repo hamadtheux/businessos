@@ -17,6 +17,7 @@ import {
   Unplug,
 } from "lucide-react";
 import { useBusiness } from "@/business-context";
+import { PRODUCT_NAME } from "@/config/brand";
 import {
   Badge,
   Button,
@@ -272,7 +273,7 @@ export function IntegrationsPage() {
         subtitle={
           externalWritesEnabled
             ? "Connect approved business accounts, select bounded resources, and route writes through policy, approval, spend controls, and the durable dispatcher."
-            : "Connect approved business accounts, choose the resources AI Business OS may read, and monitor connection health. Provider writes remain disabled until platform configuration is complete."
+            : `Connect approved business accounts, choose the resources ${PRODUCT_NAME} may read, and monitor connection health. Provider writes remain disabled until platform configuration is complete.`
         }
         action={
           <>
@@ -641,8 +642,7 @@ export function IntegrationsPage() {
           onClose={() => setDisconnectTarget(null)}
         >
           <div className="ai-banner">
-            <AlertCircle /> Previously imported business records remain in AI
-            Business OS.
+            <AlertCircle /> Previously imported business records remain in {PRODUCT_NAME}.
           </div>
           {error && <p className="form-error">{error}</p>}
           <div className="modal-foot">

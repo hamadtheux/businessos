@@ -315,7 +315,7 @@ test("settings save and reset use the branding updater and retain a failed draft
     remove,
     undefined,
   );
-  await resetSettingsBranding(summary.id, update, remove);
+  await resetSettingsBranding(summary.id, update);
 
   assert.equal(updates[0].id, summary.id);
   assert.deepEqual(updates[0].identity, {
@@ -339,6 +339,26 @@ test("settings save and reset use the branding updater and retain a failed draft
     ),
   );
   assert.deepEqual(draft, original);
+});
+
+test("resetting workspace colors preserves the tenant business logo", async () => {
+  const logoUrl = "/api/v1/media/businesses/current/logo.png";
+  const business = {
+    ...businessFromSummary(summary),
+    brandIdentity: { logoUrl },
+  };
+  const updates: Array<unknown> = [];
+
+  const reset = await resetSettingsBranding(
+    summary.id,
+    async (_businessId, identity) => {
+      updates.push(identity);
+      return business;
+    },
+  );
+
+  assert.deepEqual(updates, [null]);
+  assert.equal(reset.brandIdentity?.logoUrl, logoUrl);
 });
 
 test("failed logo replacement preserves its retry file and previous server logo", async () => {

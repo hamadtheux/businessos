@@ -38,7 +38,10 @@ from app.schemas.ai_action_payload import (  # noqa: E402
     CreateMetaCampaignPayload,
 )
 from app.services.marketing_actions import prepare_campaign_action  # noqa: E402
-from app.services.ad_commerce import _normalize_product  # noqa: E402
+from app.services.ad_commerce import (  # noqa: E402
+    _normalize_product,
+    _platform_managed_destination_name,
+)
 from app.exceptions.marketing import MarketingValidationError  # noqa: E402
 from app.schemas.marketing import AudienceCreate, CampaignCreate  # noqa: E402
 from app.services.marketing import create_audience, create_campaign  # noqa: E402
@@ -81,6 +84,24 @@ def _product() -> NormalizedProductDestinationInput:
 
 
 class GoogleMerchantContractTests(unittest.IsolatedAsyncioTestCase):
+    def test_managed_destination_rebrands_legacy_platform_prefix_once(self) -> None:
+        self.assertEqual(
+            _platform_managed_destination_name("AI Business OS · Store"),
+            "9D Brain · Store",
+        )
+        self.assertEqual(
+            _platform_managed_destination_name("9D Frame · Store"),
+            "9D Brain · Store",
+        )
+        self.assertEqual(
+            _platform_managed_destination_name("9DFrame · Store"),
+            "9D Brain · Store",
+        )
+        self.assertEqual(
+            _platform_managed_destination_name("9D Brain · Store"),
+            "9D Brain · Store",
+        )
+
     def test_product_input_uses_current_v1_shape_without_invented_identifiers(self) -> None:
         value = google_product_input(_product())
         self.assertEqual(value["offerId"], "EGGS-12")
@@ -106,14 +127,14 @@ class GoogleMerchantContractTests(unittest.IsolatedAsyncioTestCase):
         http = _ScriptedHttp([
             {
                 "name": "accounts/111/dataSources/9",
-                "displayName": "AI Business OS · Store",
+                "displayName": "9D Brain · Store",
                 "primaryProductDataSource": {"contentLanguage": "en"},
             },
             {"name": "accounts/111/productInputs/en~US~EGGS-12"},
         ])
         adapter = GoogleMerchantAdapter(http=http)
         destination = await adapter.create_managed_destination(
-            TOKEN, account_reference="111", display_name="AI Business OS · Store",
+            TOKEN, account_reference="111", display_name="9D Brain · Store",
             content_language="en", feed_label="US",
         )
         result = await adapter.upsert_product(

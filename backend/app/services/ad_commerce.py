@@ -48,6 +48,18 @@ from app.schemas.commerce import ProductGroupCreate
 from app.services.operations import record_audit
 
 
+def _platform_managed_destination_name(display_name: str) -> str:
+    value = display_name.strip()
+    folded = value.casefold()
+    if folded.startswith("9d brain"):
+        return value[:160]
+    for legacy_name in ("AI Business OS", "9D Frame", "9DFrame"):
+        if folded.startswith(legacy_name.casefold()):
+            value = value[len(legacy_name):].lstrip(" ·-—") or "Store"
+            break
+    return f"9D Brain · {value}"[:160]
+
+
 def provider_adapters():
     return {
         "google_merchant_center": GoogleMerchantAdapter(),
@@ -95,7 +107,7 @@ async def synchronize_destination(
         if managed is None:
             managed = await adapter.create_managed_destination(
                 material, account_reference=destination.external_account_id,
-                display_name=(destination.display_name if destination.display_name.casefold().startswith("ai business os") else f"AI Business OS · {destination.display_name}")[:160],
+                display_name=_platform_managed_destination_name(destination.display_name),
                 content_language=destination.content_language,
                 feed_label=destination.feed_label or "US",
             )

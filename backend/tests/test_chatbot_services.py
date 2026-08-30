@@ -41,6 +41,7 @@ from app.services.chatbot import (  # noqa: E402
     chatbot_analytics,
     load_public_session,
     lookup_public_order,
+    public_widget_config,
     resolve_public_widget,
     run_public_ai,
     search_public_catalog,
@@ -66,6 +67,37 @@ class PublicWidgetOriginTests(unittest.IsolatedAsyncioTestCase):
                 origin="https://attacker.example",
                 referer=None,
             )
+
+    async def test_widget_uses_tenant_color_then_platform_default(self) -> None:
+        _, config, business = _records()
+        session = _DomainSession(execute_row=None)
+
+        async def load(branding):
+            with patch(
+                "app.services.chatbot.resolve_public_widget",
+                new=AsyncMock(return_value=SimpleNamespace(
+                    config=config,
+                    business=business,
+                    branding=branding,
+                    response_origin="https://example.com",
+                )),
+            ):
+                value, _ = await public_widget_config(
+                    session,
+                    widget_public_id=WIDGET_ID,
+                    origin="https://example.com",
+                    referer=None,
+                )
+            return value
+
+        tenant = await load(SimpleNamespace(
+            primary_color="#123456",
+            logo_url=None,
+        ))
+        default = await load(None)
+
+        self.assertEqual(tenant.primary_color, "#123456")
+        self.assertEqual(default.primary_color, "#1D863A")
 
 
 class PublicSessionServiceTests(unittest.IsolatedAsyncioTestCase):

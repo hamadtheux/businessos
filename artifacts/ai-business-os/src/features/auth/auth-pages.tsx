@@ -11,6 +11,8 @@ import { Link } from "wouter";
 import { z } from "zod";
 
 import { Button, Card } from "@/components/product-ui";
+import { ProductBrand } from "@/components/product-brand";
+import { PRODUCT_NAME, PRODUCT_TAGLINE } from "@/config/brand";
 import { useAuth } from "./auth-context";
 
 const loginSchema = z.object({
@@ -60,16 +62,7 @@ function AuthFrame({
   return (
     <div className="auth-screen">
       <div className="auth-story">
-        <div className="brand auth-brand">
-          <div className="brand-mark">AI</div>
-
-          <div>
-            <div className="brand-copy">AI Business OS</div>
-            <div className="brand-sub">
-              one AI team for your whole business
-            </div>
-          </div>
-        </div>
+        <ProductBrand className="auth-brand" tagline={PRODUCT_TAGLINE} />
 
         <div className="auth-story-copy">
           <div className="eyebrow">Owner command room</div>
@@ -224,7 +217,7 @@ export function LoginPage() {
       </form>
 
       <p className="auth-switch">
-        New to AI Business OS?{" "}
+        New to {PRODUCT_NAME}?{" "}
         <Link href="/register">Create an account</Link>
       </p>
 

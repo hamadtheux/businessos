@@ -15,7 +15,6 @@ import {
   ClipboardCheck,
   CreditCard,
   FileText,
-  Globe2,
   Inbox,
   LayoutDashboard,
   Lightbulb,
@@ -41,11 +40,17 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useBusiness } from "@/business-context";
+import { ProductLogo } from "@/components/product-brand";
 import { Avatar, Button, Modal } from "@/components/product-ui";
+import { PRODUCT_NAME } from "@/config/brand";
 import { BusinessBrandMark } from "@/features/branding/branding-editor";
 import { useAuth, userDisplayName } from "@/features/auth/auth-context";
 import { NotificationCenter } from "@/features/notifications/notification-center";
-import { brandThemeStyle, deriveBrandTheme } from "@/lib/brand-theme";
+import {
+  brandThemeStyle,
+  deriveBrandTheme,
+  hasCustomBrandColors,
+} from "@/lib/brand-theme";
 import { filterBusinessFeatureItems, isBusinessFeatureEnabled, type BusinessFeature } from "@/lib/business-features";
 import {
   getIndustryWorkspaceProfile,
@@ -229,10 +234,12 @@ export function AppShell({ children }: { children: ReactNode }) {
     : "Member";
   const canRunCommands = isBusinessFeatureEnabled(activeBusiness, "ai_command_center", billing?.entitlements ?? null);
   const canAutomate = isBusinessFeatureEnabled(activeBusiness, "automations", billing?.entitlements ?? null);
-  const legacyTheme = activeBusiness?.theme === "navy" ? "navy" : "green";
-  const brandTheme = deriveBrandTheme(
+  const hasCustomWorkspaceTheme = hasCustomBrandColors(
     activeBusiness?.brandIdentity,
-    legacyTheme,
+  );
+  const brandTheme = deriveBrandTheme(
+    hasCustomWorkspaceTheme ? activeBusiness?.brandIdentity : undefined,
+    "green",
   );
   const workspaceProfile = getIndustryWorkspaceProfile(activeBusiness?.industry);
   const terminology = workspaceProfile.terminology;
@@ -278,9 +285,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   if (!activeBusiness && isLoading) {
     return (
       <div className="empty full-screen-loading">
-        <RefreshCw />
+        <ProductLogo className="product-logo-state" size="lg" />
         <h3>Opening your business workspace</h3>
-        <p>Loading your AI Business OS…</p>
+        <p>Loading {PRODUCT_NAME}…</p>
       </div>
     );
   }
@@ -288,20 +295,23 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <div
-      className={cx("app-shell", `theme-${legacyTheme}`)}
+      className="app-shell"
       data-business-theme={activeBusinessId}
-      data-custom-brand={activeBusiness.brandIdentity ? "true" : "false"}
+      data-custom-brand={hasCustomWorkspaceTheme ? "true" : "false"}
       style={brandThemeStyle(brandTheme)}
     >
       <aside className={cx("sidebar", open && "open")}>
-        <div className="brand">
+        <div
+          className="brand tenant-sidebar-brand"
+          data-testid="sidebar-business-brand"
+        >
           <BusinessBrandMark
             businessName={activeBusiness.name}
             identity={activeBusiness.brandIdentity}
           />
           <div className="brand-text">
             <div className="brand-copy">{activeBusiness.name}</div>
-            <div className="brand-sub">AI Business OS · workspace</div>
+            <div className="brand-sub">Workspace</div>
           </div>
         </div>
         <div className="nav-list">
@@ -362,6 +372,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           ))}
         </div>
         <div className="sidebar-bottom">
+          <div className="sidebar-platform-attribution">
+            Powered by {PRODUCT_NAME}
+          </div>
           <Link
             href="/billing"
             className={cx("nav-item", location.startsWith("/billing") && "active")}
@@ -423,8 +436,11 @@ export function AppShell({ children }: { children: ReactNode }) {
               onClick={() => setBusinessOpen((value) => !value)}
               data-testid="button-business-selector"
             >
-              <Globe2 />
-              {activeBusiness.name}
+              <BusinessBrandMark
+                businessName={activeBusiness.name}
+                identity={activeBusiness.brandIdentity}
+              />
+              <span>{activeBusiness.name}</span>
               <ChevronDown size={13} />
             </button>
             {businessOpen && (

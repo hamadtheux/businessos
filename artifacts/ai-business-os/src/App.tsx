@@ -6,7 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { AlertCircle, RefreshCw, Sparkles } from "lucide-react";
+import { AlertCircle, RefreshCw } from "lucide-react";
 import {
   Link,
   Route,
@@ -17,8 +17,10 @@ import {
 import { BusinessProvider, useBusiness } from "@/business-context";
 import { AppShell } from "@/components/app-shell";
 import { ErrorBoundary } from "@/components/error-boundary";
+import { ProductLogo } from "@/components/product-brand";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { PRODUCT_NAME } from "@/config/brand";
 import { AuthProvider, useAuth } from "@/features/auth/auth-context";
 import { LoginPage, RegisterPage } from "@/features/auth/auth-pages";
 import { OnboardingPage } from "@/features/onboarding/onboarding-page";
@@ -86,7 +88,7 @@ function Home() {
 
   return (
     <div className="empty">
-      <Sparkles />
+      <ProductLogo className="product-logo-state" size="lg" />
       <h3>Opening your command room</h3>
       <p>Loading your business workspace…</p>
     </div>
@@ -345,8 +347,11 @@ function RoutedApp() {
   if (bootstrapping) {
     return (
       <div className="empty full-screen-loading">
-        <RefreshCw className="spin" />
-        <h3>Opening AI Business OS</h3>
+        <ProductLogo
+          className="product-logo-state product-logo-pulse"
+          size="lg"
+        />
+        <h3>Opening {PRODUCT_NAME}</h3>
         <p>Restoring your secure workspace…</p>
       </div>
     );
@@ -355,7 +360,7 @@ function RoutedApp() {
     return (
       <div className="empty full-screen-loading">
         <AlertCircle />
-        <h3>Cannot open AI Business OS</h3>
+        <h3>Cannot open {PRODUCT_NAME}</h3>
         <p>{authError}</p>
         <button className="btn btn-green" onClick={retryBootstrap}>
           <RefreshCw /> Retry connection

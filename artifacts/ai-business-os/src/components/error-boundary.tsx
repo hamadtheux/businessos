@@ -4,6 +4,7 @@ import {
   type ErrorInfo,
   type ReactNode,
 } from 'react';
+import { ProductLogo } from '@/components/product-brand';
 
 export interface ErrorFallbackProps {
   error: Error;
@@ -39,6 +40,7 @@ function DefaultFallback({ error, resetError }: ErrorFallbackProps) {
   return (
     <div className="min-h-screen w-full flex items-center justify-center bg-gray-50 p-6">
       <div className="max-w-lg w-full text-center">
+        <ProductLogo className="product-logo-state mx-auto mb-4" size="lg" />
         <h1 className="text-xl font-semibold text-gray-900">
           Something went wrong
         </h1>

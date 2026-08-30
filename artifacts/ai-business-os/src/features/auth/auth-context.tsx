@@ -11,6 +11,7 @@ import {
   apiClient,
   humanizeApiError,
 } from "@/services/api-client";
+import { PRODUCT_NAME } from "@/config/brand";
 import type { UserPublic } from "@/services/api-types";
 
 export type AuthStatus =
@@ -70,7 +71,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setError(
           humanizeApiError(
             reason,
-            "AI Business OS could not restore your session. Try again.",
+            `${PRODUCT_NAME} could not restore your session. Try again.`,
           ),
         );
         setStatus("recoverable_error");

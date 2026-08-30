@@ -635,7 +635,7 @@ def _add_outcome_records(
     message = {
         "succeeded": "The governed connector action completed and its external reference was recorded.",
         "failed": "The governed connector action failed closed. Review the connection and action before trying again.",
-        "uncertain": "The provider outcome could not be proven. AI Business OS will not retry this action automatically.",
+        "uncertain": "The provider outcome could not be proven. 9D Brain will not retry this action automatically.",
     }[outcome]
     session.add(
         Notification(

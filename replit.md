@@ -1,6 +1,6 @@
-# AI Business OS
+# 9D Brain
 
-AI Business OS is a multi-business SaaS where owners supervise an AI workforce
+9D Brain is a multi-business SaaS where owners supervise an AI workforce
 across sales, support, operations, marketing, commerce, automations, approvals,
 analytics, Business Brain, and persistent memory.
 

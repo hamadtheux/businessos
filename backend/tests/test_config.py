@@ -19,6 +19,7 @@ class SettingsValidationTests(unittest.TestCase):
             config = Settings()
 
         self.assertEqual(config.environment, "development")
+        self.assertEqual(config.app_name, "9D Brain API")
 
     def test_development_widget_urls_share_the_frontend_origin(self) -> None:
         config = self._settings()

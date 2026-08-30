@@ -1,4 +1,4 @@
-# AI Business OS production deployment runbook
+# 9D Brain production deployment runbook
 
 This runbook is the platform-neutral production contract for the e-commerce
 launch. It does not claim that infrastructure is provisioned. Complete and

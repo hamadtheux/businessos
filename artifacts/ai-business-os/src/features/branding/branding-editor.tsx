@@ -87,7 +87,7 @@ export function BusinessBrandMark({
           }}
         />
       ) : (
-        <span>{initials(businessName || "AI Business OS")}</span>
+        <span>{initials(businessName || "Business")}</span>
       )}
     </div>
   );

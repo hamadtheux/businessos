@@ -1117,7 +1117,7 @@ async def mark_social_schedule_ready(
         business_id=business_id,
         category="content_schedule",
         title="Scheduled content is ready",
-        message="Scheduled content is ready for an authorized external publisher. It was not published by AI Business OS.",
+        message="Scheduled content is ready for an authorized external publisher. It was not published by 9D Brain.",
         entity_type="social_content_schedule",
         entity_id=value.id,
     )

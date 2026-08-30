@@ -7,7 +7,7 @@ from typing import Final, Mapping
 
 @dataclass(frozen=True, slots=True)
 class BusinessIndustryDefinition:
-    """Server-owned metadata for a supported AI Business OS industry."""
+    """Server-owned metadata for a supported 9D Brain industry."""
 
     code: str
     label: str

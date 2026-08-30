@@ -379,7 +379,7 @@ class MetaCatalogAdapter:
                 state="attention_required", acknowledged=False,
                 issues=(ProductIssue(
                     code="external_product_not_managed",
-                    message="The external catalog item is not managed by AI Business OS.",
+                    message="The external catalog item is not managed by 9D Brain.",
                     severity="warning", resolution="owner_input_required",
                 ),),
             )

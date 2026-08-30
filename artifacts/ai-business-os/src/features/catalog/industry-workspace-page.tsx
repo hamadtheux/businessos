@@ -4,8 +4,10 @@ import {
   AlertCircle,
   Archive,
   Check,
+  ChevronDown,
   ClipboardPaste,
   FileSpreadsheet,
+  MoreHorizontal,
   Package,
   Pencil,
   Plus,
@@ -44,9 +46,80 @@ import type {
 import { CatalogImportDialog } from "./catalog-import-dialog";
 import { CatalogItemDialog } from "./catalog-item-dialog";
 import { formatCatalogPrice, isCurrentCatalogResponse } from "./catalog-model";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  STORE_PROVIDER_KEYS,
+  catalogCountLabel,
+  catalogSourceLabel,
+  catalogStatusLabel,
+  commerceConnectionStatus,
+  commerceProviderLabel,
+  feedDestinationStatus,
+  formatLastSync,
+  providerAvailability,
+  syncRunMode,
+  syncRunStatus,
+} from "./catalog-presentation";
 
 type LoadState = "loading" | "success" | "error";
 type StatusFilter = "default" | CatalogItemStatus;
+
+
+function CatalogHeaderActions({
+  onAdd,
+  onConnect,
+  onPaste,
+  onUpload,
+}: {
+  onAdd: () => void;
+  onConnect: () => void;
+  onPaste: () => void;
+  onUpload: () => void;
+}) {
+  return (
+    <div className="toolbar">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="soft">
+            <FileSpreadsheet />
+            Import
+            <ChevronDown />
+          </Button>
+        </DropdownMenuTrigger>
+
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onSelect={onUpload}>
+            <FileSpreadsheet />
+            Upload CSV / Excel
+          </DropdownMenuItem>
+
+          <DropdownMenuItem onSelect={onPaste}>
+            <ClipboardPaste />
+            Paste a product list
+          </DropdownMenuItem>
+
+          <DropdownMenuSeparator />
+
+          <DropdownMenuItem onSelect={onConnect}>
+            <Store />
+            Connect a store
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <Button variant="green" onClick={onAdd}>
+        <Plus />
+        Add product
+      </Button>
+    </div>
+  );
+}
 
 export function IndustryWorkspacePage() {
   const { activeBusiness, activeBusinessId } = useBusiness();
@@ -518,26 +591,25 @@ export function IndustryWorkspacePage() {
     }
   };
 
+  const supportedStoreProviders = providerDefinitions.filter(
+    (provider) =>
+      STORE_PROVIDER_KEYS.includes(provider.provider) &&
+      providerAvailability(provider.implementation_status).selectable,
+  );
+
   return (
     <>
       <PageHeader
         eyebrow="Business catalog"
         title="Products & services"
-        subtitle={`Connect a store so ${activeBusiness?.name ?? "this business"}'s catalog stays current automatically. Manual and bulk entry remain available.`}
+        subtitle="Manage everything your business sells from one place."
         action={
-          loadState === "success" && items.length > 0 ? (
-            <>
-              <Button variant="green" onClick={() => setImportMode("upload")}>
-                <FileSpreadsheet /> Upload CSV / Excel
-              </Button>
-              <Button variant="soft" onClick={() => setImportMode("paste")}>
-                <ClipboardPaste /> Paste a list
-              </Button>
-              <Button variant="tertiary" onClick={() => setEditor("create")}>
-                <Plus /> Add manually
-              </Button>
-            </>
-          ) : undefined
+          <CatalogHeaderActions
+            onAdd={() => setEditor("create")}
+            onConnect={() => setConnectingStore(true)}
+            onPaste={() => setImportMode("paste")}
+            onUpload={() => setImportMode("upload")}
+          />
         }
       />
 
@@ -552,344 +624,321 @@ export function IndustryWorkspacePage() {
         </div>
       )}
 
-      <Card className="catalog-workspace-card">
-        <div className="table-toolbar">
-          <div>
-            <div className="eyebrow">Commerce Connect</div>
-            <h2>
-              {connections.length
-                ? `${connections.length} commerce source${connections.length === 1 ? "" : "s"}`
-                : "Connect the system that already runs your store"}
-            </h2>
-            <p className="subtle">
-              Provider synchronization never reports success until an
-              authenticated adapter has completed a real import.
-            </p>
+      <Card className="catalog-store-card">
+        <div className="catalog-store-banner">
+          <div className="catalog-store-icon" aria-hidden="true">
+            <Store />
           </div>
-          <Button variant="green" onClick={() => setConnectingStore(true)}>
-            <Store /> Connect store
-          </Button>
+          <div className="catalog-store-copy">
+            <div className="eyebrow">
+              {connections.length ? "Store connections" : "Automatic catalog sync"}
+            </div>
+            <h2>
+              {connections.length ? "Your connected stores" : "Connect your store"}
+            </h2>
+            <p>
+              Automatically keep your catalog in sync with the platform you
+              already use.
+            </p>
+            {supportedStoreProviders.length > 0 && (
+              <div className="catalog-supported-providers">
+                <span>Supported</span>
+                <span aria-label="Supported store platforms">
+                  {supportedStoreProviders
+                    .map((provider) => provider.display_name)
+                    .join(" • ")}
+                </span>
+              </div>
+            )}
+          </div>
+          <div className="catalog-store-actions">
+            <Button
+              variant={connections.length ? "secondary" : "green"}
+              onClick={() => setConnectingStore(true)}
+            >
+              <Store /> Connect store
+            </Button>
+            <Link href="/integrations">Manage integrations →</Link>
+          </div>
         </div>
-        <div className="metric-grid compact">
-          {providerDefinitions
-            .filter((provider) =>
-              [
+
+        {connections.length > 0 && (
+          <div className="catalog-connection-list">
+            {connections.map((connection) => {
+              const status = commerceConnectionStatus(connection);
+              const recentRun = syncRuns[connection.id]?.[0];
+              const productCount = recentRun
+                ? recentRun.products_created + recentRun.products_updated
+                : 0;
+              const isStoreProvider = [
                 "shopify",
                 "woocommerce",
                 "bigcommerce",
                 "magento",
                 "custom_api",
+              ].includes(connection.provider);
+              const isFileProvider = [
                 "csv",
                 "xml_feed",
                 "google_product_feed",
-              ].includes(provider.provider),
-            )
-            .map((provider) => {
-              const connection = connections.find(
-                (item) => item.provider === provider.provider,
-              );
+              ].includes(connection.provider);
               return (
-                <button
-                  className="metric-card"
-                  type="button"
-                  key={provider.provider}
-                  onClick={() => {
-                    if (
-                      ["csv", "xml_feed", "google_product_feed"].includes(
-                        provider.provider,
-                      ) &&
-                      connection
-                    ) {
-                      setCommerceImportPreview(null);
-                      setImportingSource(connection);
-                      return;
-                    }
-                    if (connection?.status === "configuration_required")
-                      setConfiguringStore(connection);
-                    else if (!connection) setConnectingStore(true);
-                  }}
-                >
-                  <span>{provider.display_name}</span>
-                  <strong>
-                    {connection
-                      ? connection.status.replaceAll("_", " ")
-                      : provider.provider === "csv"
-                        ? "Import"
-                        : "Connect"}
-                  </strong>
-                  <small>
-                    {provider.implementation_status.replaceAll("_", " ")}
-                  </small>
-                </button>
+                <div className="catalog-connection" key={connection.id}>
+                  <div className="catalog-connection-summary">
+                    <div className="catalog-provider-mark" aria-hidden="true">
+                      <Store />
+                    </div>
+                    <div className="catalog-connection-copy">
+                      <div className="catalog-connection-title">
+                        <strong>
+                          {connection.store_name ?? connection.display_name}
+                        </strong>
+                        <Badge tone={status.tone}>{status.label}</Badge>
+                      </div>
+                      <div className="catalog-connection-meta">
+                        <span>{commerceProviderLabel(connection.provider)}</span>
+                        <span>{formatLastSync(connection.last_success_at)}</span>
+                        {recentRun && (
+                          <span>
+                            {productCount.toLocaleString()}{" "}
+                            {productCount === 1 ? "product" : "products"} updated
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="catalog-connection-actions">
+                      {isStoreProvider &&
+                        [
+                          "configuration_required",
+                          "connection_required",
+                          "authentication_expired",
+                        ].includes(connection.status) && (
+                          <Button
+                            disabled={commerceBusy}
+                            onClick={() => setConfiguringStore(connection)}
+                          >
+                            Finish setup
+                          </Button>
+                        )}
+                      {isFileProvider && (
+                        <Button
+                          disabled={commerceBusy}
+                          onClick={() => {
+                            setCommerceImportPreview(null);
+                            setImportingSource(connection);
+                          }}
+                        >
+                          <FileSpreadsheet /> Import
+                        </Button>
+                      )}
+                      {isStoreProvider &&
+                        [
+                          "connected",
+                          "attention_required",
+                          "rate_limited",
+                          "failed",
+                        ].includes(connection.status) && (
+                          <Button
+                            disabled={
+                              commerceBusy ||
+                              connection.status === "rate_limited"
+                            }
+                            onClick={() =>
+                              void syncCommerceConnection(connection)
+                            }
+                          >
+                            <RefreshCw /> Sync now
+                          </Button>
+                        )}
+                    </div>
+                  </div>
+                  {(syncRuns[connection.id]?.length ?? 0) > 0 && (
+                    <details className="catalog-sync-history">
+                      <summary>Recent sync activity</summary>
+                      <div className="catalog-sync-list">
+                        {syncRuns[connection.id].slice(0, 5).map((run) => (
+                          <div className="catalog-sync-row" key={run.id}>
+                            <div>
+                              <strong>{syncRunStatus(run.status)}</strong>
+                              <span>
+                                {syncRunMode(run.mode)} ·{" "}
+                                {new Date(run.created_at).toLocaleString()} ·{" "}
+                                {formatSyncDuration(run)}
+                              </span>
+                            </div>
+                            <span>
+                              {(
+                                run.products_created + run.products_updated
+                              ).toLocaleString()}{" "}
+                              products
+                            </span>
+                            {(run.warnings > 0 || run.failures > 0) && (
+                              <span className="catalog-sync-warning">
+                                {run.warnings + run.failures}{" "}
+                                {run.warnings + run.failures === 1
+                                  ? "item"
+                                  : "items"}{" "}
+                                to review
+                              </span>
+                            )}
+                            {(syncIssues[run.id] ?? [])
+                              .slice(0, 3)
+                              .map((issue) => (
+                                <p key={issue.id}>{issue.message}</p>
+                              ))}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                </div>
               );
             })}
-        </div>
-        {connections.map((connection) => (
-          <div key={connection.id}>
-            <div className="list-row">
-              <Store />
-              <div className="row-main">
-                <strong>
-                  {connection.store_name ?? connection.display_name}
-                </strong>
-                <div className="row-copy">
-                  {connection.provider.replaceAll("_", " ")} ·{" "}
-                  {connection.last_success_at
-                    ? `last successful sync ${new Date(connection.last_success_at).toLocaleString()}`
-                    : "no successful synchronization yet"}{" "}
-                  · health {connection.health.replaceAll("_", " ")}
-                </div>
-              </div>
-              {["configuration_required", "authentication_expired"].includes(
-                connection.status,
-              ) &&
-                [
-                  "shopify",
-                  "woocommerce",
-                  "bigcommerce",
-                  "magento",
-                  "custom_api",
-                ].includes(connection.provider) && (
-                  <Button
-                    disabled={commerceBusy}
-                    onClick={() => setConfiguringStore(connection)}
-                  >
-                    Configure
-                  </Button>
-                )}
-              {["csv", "xml_feed", "google_product_feed"].includes(
-                connection.provider,
-              ) && (
-                <Button
-                  disabled={commerceBusy}
-                  onClick={() => {
-                    setCommerceImportPreview(null);
-                    setImportingSource(connection);
-                  }}
-                >
-                  <FileSpreadsheet /> Import
-                </Button>
-              )}
-              {[
-                "shopify",
-                "woocommerce",
-                "bigcommerce",
-                "magento",
-                "custom_api",
-              ].includes(connection.provider) &&
-                [
-                  "connected",
-                  "attention_required",
-                  "rate_limited",
-                  "failed",
-                ].includes(connection.status) && (
-                  <Button
-                    disabled={
-                      commerceBusy || connection.status === "rate_limited"
-                    }
-                    onClick={() => void syncCommerceConnection(connection)}
-                  >
-                    <RefreshCw /> Sync now
-                  </Button>
-                )}
-              <Badge
-                tone={
-                  connection.health === "healthy"
-                    ? "success"
-                    : [
-                          "attention_required",
-                          "authentication_expired",
-                          "failed",
-                        ].includes(connection.status)
-                      ? "danger"
-                      : "warning"
-                }
-              >
-                {connection.health === "healthy"
-                  ? "healthy"
-                  : connection.status.replaceAll("_", " ")}
-              </Badge>
-            </div>
-            {(syncRuns[connection.id]?.length ?? 0) > 0 && (
-              <details className="recommendation-strip">
-                <summary>Sync history</summary>
-                {syncRuns[connection.id].slice(0, 5).map((run) => (
-                  <div key={run.id}>
-                    <div className="row-copy">
-                      {new Date(run.created_at).toLocaleString()} ·{" "}
-                      {run.mode.replaceAll("_", " ")} ·{" "}
-                      {formatSyncDuration(run)} ·{" "}
-                      {run.status.replaceAll("_", " ")} · {run.pages_processed}{" "}
-                      pages · {run.products_created + run.products_updated}{" "}
-                      products · {run.customers_created + run.customers_updated}{" "}
-                      customers · {run.orders_created + run.orders_updated}{" "}
-                      orders · {run.warnings} warnings · {run.failures} failures
-                    </div>
-                    {(syncIssues[run.id] ?? []).slice(0, 3).map((issue) => (
-                      <div className="row-copy" key={issue.id}>
-                        {issue.severity}: {issue.message}
-                      </div>
-                    ))}
-                  </div>
-                ))}
-              </details>
-            )}
-          </div>
-        ))}
-        {!connections.length && (
-          <div className="recommendation-strip">
-            <Store />
-            <div>
-              <div className="eyebrow">Primary setup</div>
-              <p>
-                Shopify, WooCommerce, BigCommerce, Magento, custom APIs, feeds,
-                website discovery, CSV, and manual fallback share one
-                provider-neutral catalog boundary.
-              </p>
-            </div>
           </div>
         )}
-        <SectionTitle
-          title="Commerce feed destinations"
-          action={
-            <Link href="/integrations" className="btn btn-sm">
-              Manage connections
-            </Link>
-          }
-        />
-        {feedDestinations.map((destination) => {
-          const issues =
-            feedProductStatuses[destination.id]?.filter(
-              (item) =>
-                item.provider_issues.length ||
-                item.missing_attributes.length ||
-                item.warnings.length,
-            ) ?? [];
-          const accountIssues = Array.isArray(
-            destination.safe_metadata.account_issues,
-          )
-            ? destination.safe_metadata.account_issues
-            : [];
-          return (
-            <div key={destination.id}>
-              <div className="list-row">
-                <Rocket />
-                <div className="row-main">
-                  <strong>{destination.display_name}</strong>
-                  <div className="row-copy">
-                    {destination.provider === "google_merchant_center"
-                      ? "Google Merchant Center"
-                      : "Meta product catalog"}{" "}
-                    · account{" "}
-                    {destination.external_account_id ?? "not selected"} ·{" "}
-                    {destination.external_resource_id
-                      ? "destination selected"
-                      : destination.managed
-                        ? "managed destination will be created on first sync"
-                        : "destination not selected"}
-                  </div>
-                  <div className="row-copy">
-                    {destination.submitted_count.toLocaleString()}{" "}
-                    submitted/processing ·{" "}
-                    {destination.eligible_count.toLocaleString()} eligible ·{" "}
-                    {destination.limited_count} limited ·{" "}
-                    {destination.rejected_count} ineligible ·{" "}
-                    {destination.last_synchronized_at
-                      ? `last sync ${new Date(destination.last_synchronized_at).toLocaleString()}`
-                      : "never synchronized"}
-                  </div>
-                </div>
-                <Button
-                  disabled={commerceBusy}
-                  onClick={() => void synchronizeFeed(destination.id)}
-                >
-                  <RefreshCw /> Sync now
-                </Button>
-                <Button
-                  disabled={commerceBusy}
-                  onClick={() => void synchronizeFeed(destination.id, true)}
-                >
-                  Reconcile
-                </Button>
-                <Button
-                  disabled={commerceBusy}
-                  onClick={() => void viewFeedIssues(destination.id)}
-                >
-                  View issues
-                </Button>
-                <Badge
-                  tone={
-                    destination.status === "connected"
-                      ? "success"
-                      : destination.status === "attention_required"
-                        ? "danger"
-                        : "warning"
-                  }
-                >
-                  {destination.status.replaceAll("_", " ")}
-                </Badge>
-              </div>
-              {viewingFeedId === destination.id && (
-                <div className="recommendation-strip">
-                  <AlertCircle />
-                  <div className="row-main">
-                    <strong>Provider and feed issues</strong>
-                    {!issues.length && !accountIssues.length && (
-                      <p>
-                        No normalized issues are currently recorded. Submitted
-                        items may still be processing.
-                      </p>
-                    )}
-                    {accountIssues.slice(0, 10).map((issue, index) => (
-                      <p key={`account:${index}`}>
-                        {String(
-                          (issue as Record<string, unknown>).message ??
-                            (issue as Record<string, unknown>).code ??
-                            "Account issue",
-                        )}
-                      </p>
-                    ))}
-                    {issues.slice(0, 20).map((item) => (
-                      <div key={item.id}>
-                        <p>
-                          <strong>{item.status.replaceAll("_", " ")}:</strong>{" "}
-                          {[...item.missing_attributes, ...item.warnings].join(
-                            " · ",
-                          ) ||
-                            String(
-                              item.provider_error_code ??
-                                "Provider review required",
+
+        {feedDestinations.length > 0 && (
+          <details className="catalog-feed-panel">
+            <summary>
+              Shopping feeds
+              <span>
+                {feedDestinations.length}{" "}
+                {feedDestinations.length === 1 ? "channel" : "channels"}
+              </span>
+            </summary>
+            <div className="catalog-feed-list">
+              {feedDestinations.map((destination) => {
+                const destinationStatus = feedDestinationStatus(
+                  destination.status,
+                );
+                const issues =
+                  feedProductStatuses[destination.id]?.filter(
+                    (item) =>
+                      item.provider_issues.length ||
+                      item.missing_attributes.length ||
+                      item.warnings.length,
+                  ) ?? [];
+                const accountIssues = Array.isArray(
+                  destination.safe_metadata.account_issues,
+                )
+                  ? destination.safe_metadata.account_issues
+                  : [];
+                return (
+                  <div className="catalog-feed-row" key={destination.id}>
+                    <div className="catalog-feed-summary">
+                      <Rocket aria-hidden="true" />
+                      <div>
+                        <div className="catalog-connection-title">
+                          <strong>{destination.display_name}</strong>
+                          <Badge tone={destinationStatus.tone}>
+                            {destinationStatus.label}
+                          </Badge>
+                        </div>
+                        <div className="catalog-connection-meta">
+                          <span>
+                            {destination.provider === "google_merchant_center"
+                              ? "Google Merchant Center"
+                              : "Meta product catalog"}
+                          </span>
+                          <span>
+                            {destination.eligible_count.toLocaleString()} ready
+                          </span>
+                          <span>
+                            {destination.limited_count +
+                              destination.rejected_count}{" "}
+                            to review
+                          </span>
+                          <span>
+                            {formatLastSync(
+                              destination.last_synchronized_at,
                             )}
-                        </p>
-                        {item.provider_issues
-                          .slice(0, 5)
-                          .map((issue, index) => (
-                            <p key={`${item.id}:provider:${index}`}>
-                              {String(issue.message ?? issue.code ?? "Issue")} ·{" "}
-                              <strong>
-                                {String(
-                                  issue.resolution ??
-                                    "provider_policy_review_required",
-                                ).toUpperCase()}
-                              </strong>
-                            </p>
-                          ))}
+                          </span>
+                        </div>
                       </div>
-                    ))}
-                    <Link href="/integrations" className="btn btn-sm">
-                      Reconnect or change provider assets
-                    </Link>
+                    </div>
+                    <div className="catalog-feed-actions">
+                      <Button
+                        disabled={commerceBusy}
+                        onClick={() =>
+                          void synchronizeFeed(destination.id)
+                        }
+                      >
+                        <RefreshCw /> Sync now
+                      </Button>
+                      <Button
+                        disabled={commerceBusy}
+                        onClick={() =>
+                          void synchronizeFeed(destination.id, true)
+                        }
+                      >
+                        Check status
+                      </Button>
+                      <Button
+                        variant="tertiary"
+                        disabled={commerceBusy}
+                        onClick={() => void viewFeedIssues(destination.id)}
+                      >
+                        {viewingFeedId === destination.id
+                          ? "Hide issues"
+                          : "View issues"}
+                      </Button>
+                    </div>
+                    {viewingFeedId === destination.id && (
+                      <div className="catalog-feed-issues" role="status">
+                        <strong>Items to review</strong>
+                        {!issues.length && !accountIssues.length && (
+                          <p>
+                            Nothing needs your attention right now. Some items
+                            may still be processing.
+                          </p>
+                        )}
+                        {accountIssues.slice(0, 10).map((issue, index) => (
+                          <p key={destination.id + ":account:" + index}>
+                            {String(
+                              (issue as Record<string, unknown>).message ??
+                                "This account needs attention.",
+                            )}
+                          </p>
+                        ))}
+                        {issues.slice(0, 20).map((item) => (
+                          <div key={item.id}>
+                            <p>
+                              This item has{" "}
+                              {item.missing_attributes.length +
+                                item.warnings.length +
+                                item.provider_issues.length}{" "}
+                              details to review.
+                            </p>
+                            {item.provider_issues
+                              .slice(0, 5)
+                              .map((issue, index) => (
+                                <p
+                                  key={
+                                    destination.id +
+                                    ":product:" +
+                                    item.id +
+                                    ":" +
+                                    index
+                                  }
+                                >
+                                  {String(
+                                    issue.message ??
+                                      "This item needs provider review.",
+                                  )}
+                                </p>
+                              ))}
+                          </div>
+                        ))}
+                        <Link href="/integrations" className="btn btn-sm">
+                          Manage channel
+                        </Link>
+                      </div>
+                    )}
                   </div>
-                </div>
-              )}
+                );
+              })}
             </div>
-          );
-        })}
-        {!feedDestinations.length && (
-          <p className="subtle">
-            Google Merchant Center and Meta catalog destinations will appear
-            here after a real provider account is configured and selected.
-          </p>
+          </details>
         )}
       </Card>
 
@@ -900,7 +949,9 @@ export function IndustryWorkspacePage() {
             <h2>
               {loadState === "loading"
                 ? "Loading items…"
-                : `${items.length} ${statusFilter === "archived" ? "archived" : "catalog"} items`}
+                : statusFilter === "archived"
+                  ? `${items.length.toLocaleString()} archived ${items.length === 1 ? "item" : "items"}`
+                  : catalogCountLabel(items)}
             </h2>
           </div>
           <div className="catalog-filter-bar">
@@ -909,8 +960,8 @@ export function IndustryWorkspacePage() {
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="Search loaded items"
-                aria-label="Search loaded catalog items"
+                placeholder="Search products or services"
+                aria-label="Search products or services"
               />
             </div>
             <select
@@ -1001,7 +1052,7 @@ export function IndustryWorkspacePage() {
                               : "warning"
                         }
                       >
-                        {item.status}
+                        {catalogStatusLabel(item.status)}
                       </Badge>
                     </td>
                     <td>
@@ -1014,8 +1065,7 @@ export function IndustryWorkspacePage() {
                               : "warning"
                         }
                       >
-                        {item.source.replaceAll("_", " ")} ·{" "}
-                        {item.sync_state.replaceAll("_", " ")}
+                        {catalogSourceLabel(item)}
                       </Badge>
                     </td>
                     <td>
@@ -1023,38 +1073,59 @@ export function IndustryWorkspacePage() {
                         {item.item_type === "product" &&
                           item.status !== "archived" && (
                             <Link
-                              className="btn btn-sm btn-green"
+                              className="btn btn-sm btn-green catalog-ai-action"
                               href={`/campaigns?new=1&product=${encodeURIComponent(item.id)}`}
                             >
                               <Rocket /> Promote with AI
                             </Link>
                           )}
-                        {item.status === "archived" ? (
-                          <button
-                            className="icon-btn"
-                            aria-label={`Restore ${item.name}`}
-                            onClick={() => void restoreItem(item)}
+
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button
+                              className="icon-btn catalog-more-btn"
+                              aria-label={`More actions for ${item.name}`}
+                            >
+                              <MoreHorizontal />
+                            </button>
+                          </DropdownMenuTrigger>
+
+                          <DropdownMenuContent
+                            align="end"
+                            sideOffset={7}
+                            className="catalog-row-menu"
                           >
-                            <RotateCcw />
-                          </button>
-                        ) : (
-                          <>
-                            <button
-                              className="icon-btn"
-                              aria-label={`Edit ${item.name}`}
-                              onClick={() => setEditor(item)}
-                            >
-                              <Pencil />
-                            </button>
-                            <button
-                              className="icon-btn danger-icon-btn"
-                              aria-label={`Archive ${item.name}`}
-                              onClick={() => setArchiveItem(item)}
-                            >
-                              <Archive />
-                            </button>
-                          </>
-                        )}
+                            {item.status === "archived" ? (
+                              <DropdownMenuItem
+                                className="catalog-row-menu-item"
+                                onSelect={() => void restoreItem(item)}
+                              >
+                                <RotateCcw />
+                                <span>Restore item</span>
+                              </DropdownMenuItem>
+                            ) : (
+                              <>
+                                <DropdownMenuItem
+                                  className="catalog-row-menu-item"
+                                  onSelect={() => setEditor(item)}
+                                >
+                                  <Pencil />
+                                  <span>Edit item</span>
+                                </DropdownMenuItem>
+
+                                <DropdownMenuSeparator className="catalog-row-menu-separator" />
+
+                                <DropdownMenuItem
+                                  className="catalog-row-menu-item catalog-row-menu-danger"
+                                  onSelect={() => setArchiveItem(item)}
+                                >
+                                  <Archive />
+                                  <span>Archive item</span>
+                                </DropdownMenuItem>
+                              </>
+                            )}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       </div>
                     </td>
                   </tr>

@@ -14,6 +14,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { useBusiness } from "@/business-context";
+import { ProductBrand } from "@/components/product-brand";
 import { Badge, Button, Card } from "@/components/product-ui";
 import {
   BrandingEditor,
@@ -24,10 +25,7 @@ import {
   createBrandIdentityDraft,
   type BrandIdentityDraft,
 } from "@/lib/brand-theme";
-import {
-  businessIndustryDefaultTheme,
-  ONBOARDING_INDUSTRIES,
-} from "@/lib/business-industries";
+import { ONBOARDING_INDUSTRIES } from "@/lib/business-industries";
 import { cx } from "@/lib/product-utils";
 import { isWorkspaceModuleVisible } from "@/lib/industry-workspaces";
 import { revokeBrandLogo } from "@/services/brand-logo";
@@ -239,12 +237,7 @@ export function OnboardingPage() {
           },
         );
         revokeBrandLogo(brandDraft.logo);
-        setBrandDraft(
-          createBrandIdentityDraft(
-            business.brandIdentity,
-            businessIndustryDefaultTheme(business.industry),
-          ),
-        );
+        setBrandDraft(createBrandIdentityDraft(business.brandIdentity));
         setCreatedBusinessId(business.id);
         setBusinessSavedBeforeFailure(false);
         setCatalogSaveFailed(false);
@@ -285,14 +278,6 @@ export function OnboardingPage() {
     value: (typeof form)[K],
   ) => {
     setForm((current) => ({ ...current, [key]: value }));
-    if (key === "industry" && !brandingTouched) {
-      setBrandDraft(
-        createBrandIdentityDraft(
-          undefined,
-          value === "Real Estate" ? "navy" : "green",
-        ),
-      );
-    }
   };
 
   const toggleChannel = (
@@ -470,13 +455,10 @@ export function OnboardingPage() {
   return (
     <div className="onboarding-screen">
       <div className="onboarding-top">
-        <div className="brand onboarding-brand">
-          <div className="brand-mark">AI</div>
-          <div>
-            <div className="brand-copy">AI Business OS</div>
-            <div className="brand-sub">build your business command room</div>
-          </div>
-        </div>
+        <ProductBrand
+          className="onboarding-brand"
+          tagline="Build your business command room."
+        />
         <div className="onboarding-progress">
           {visibleStepIndexes.map((stepIndex, visibleIndex) => {
             const title = stepTitles[stepIndex];
@@ -713,7 +695,6 @@ export function OnboardingPage() {
               <BrandingEditor
                 businessName={form.name}
                 value={brandDraft}
-                legacyTheme={businessIndustryDefaultTheme(form.industry)}
                 onChange={(next) => {
                   setBrandDraft(next);
                   setBrandingSkipped(false);

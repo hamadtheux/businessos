@@ -36,11 +36,6 @@ export async function saveSettingsBranding(
 export async function resetSettingsBranding(
   businessId: string,
   updateBranding: BrandingUpdater,
-  deleteLogo: LogoDeleter,
 ): Promise<Business> {
-  const colorsReset = await updateBranding(businessId, null);
-  if (colorsReset.brandIdentity?.logoUrl) {
-    return deleteLogo(businessId);
-  }
-  return colorsReset;
+  return updateBranding(businessId, null);
 }

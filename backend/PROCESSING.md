@@ -1,6 +1,6 @@
 # Durable internal processing
 
-AI Business OS uses PostgreSQL for its current-scale durable internal queue.
+9D Brain uses PostgreSQL for its current-scale durable internal queue.
 Run the three process roles independently against the same database:
 
 ```bash

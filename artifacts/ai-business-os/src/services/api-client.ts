@@ -1,4 +1,5 @@
 import { API_BASE_URL } from "../config/api.ts";
+import { PRODUCT_API_NAME } from "../config/brand.ts";
 import type {
   ApiErrorPayload,
   BusinessOnboardingInput,
@@ -600,7 +601,7 @@ export function humanizeApiError(
   fallback: string,
 ): string {
   if (error instanceof ApiNetworkError) {
-    return "Cannot reach AI Business OS API. Check the local API or your network connection.";
+    return `Cannot reach ${PRODUCT_API_NAME}. Check the local API or your network connection.`;
   }
 
   if (error instanceof ApiError) {

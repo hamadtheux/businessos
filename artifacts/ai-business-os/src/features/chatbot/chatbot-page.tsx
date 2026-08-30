@@ -18,6 +18,7 @@ import {
   Users,
 } from "lucide-react";
 import { useBusiness } from "@/business-context";
+import { PRODUCT_BRAND_COLORS } from "@/config/brand";
 import { Badge, Button, Card, PageHeader } from "@/components/product-ui";
 import { isBusinessFeatureEnabled } from "@/lib/business-features";
 import { humanizeApiError } from "@/services/api-client";
@@ -332,6 +333,6 @@ export function ChatbotPage() {
 }
 
 function WidgetPreview({ config }: { config: ChatbotConfig }) {
-  const brandColor = "var(--brand-primary, #2563eb)";
+  const brandColor = `var(--brand-primary, ${PRODUCT_BRAND_COLORS.primary})`;
   return <section className="card preview-card"><div className="chatbot-section-head"><div><h3>Live style preview</h3><p>Draft branding only—no customer conversation is created.</p></div><Badge tone="neutral">Preview</Badge></div><div className={`widget-preview ${config.theme === "dark" ? "dark" : ""}`} style={{ borderRadius: config.border_radius }}><div className="widget-preview-head" style={{ background: brandColor }}><div className="preview-avatar"><Bot /></div><div><strong>{config.display_name}</strong><span>AI assistant</span></div></div><div className="widget-preview-body"><div className="preview-bubble">{config.welcome_message}</div><div className="preview-suggestion">Ask about products, services, or business hours</div></div><div className="widget-preview-compose"><span>{config.placeholder_text}</span><MessageCircle style={{ color: brandColor }} /></div></div></section>;
 }

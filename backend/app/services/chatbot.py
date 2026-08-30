@@ -536,7 +536,7 @@ async def public_widget_config(
         business_name=context.business.name,
         welcome_message=context.config.welcome_message,
         placeholder_text=context.config.placeholder_text,
-        primary_color=(branding.primary_color if branding and branding.primary_color else "#2563EB"),
+        primary_color=(branding.primary_color if branding and branding.primary_color else "#1D863A"),
         logo_url=_safe_public_asset_url(branding.logo_url if branding else None),
         tone=context.config.tone,
         theme=context.config.theme,

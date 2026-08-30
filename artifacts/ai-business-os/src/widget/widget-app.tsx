@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { ProductLogo } from "@/components/product-brand";
+import { PRODUCT_NAME } from "@/config/brand";
 import { WIDGET_API_BASE_URL } from "./config.ts";
 import { PublicWidgetApi, type AvailabilitySlot, type ChatResponse, type ProductCard, type PublicWidgetConfig } from "./public-api.ts";
 
@@ -135,7 +137,7 @@ export function WidgetApp() {
     {panel === "availability" && <AvailabilityForm config={config} api={api} onBack={() => setPanel("chat")} onSlots={(values) => setSlots(values)} onBook={(slot) => { setSelectedSlot(slot); setPanel("booking"); }} slots={slots} />}
     {panel === "booking" && selectedSlot && <BookingForm config={config} api={api} slot={selectedSlot} onBack={() => setPanel("availability")} onComplete={(message) => { addAssistant(message); setPanel("chat"); }} />}
 
-    <footer className="widget-footer"><span>Powered by AI</span>{config.privacy_policy_url && <a href={config.privacy_policy_url} target="_blank" rel="noreferrer noopener">Privacy</a>}</footer>
+    <footer className="widget-footer"><span className="widget-attribution">Powered by <span className="widget-product-logo"><ProductLogo decorative size="sm" /></span><strong>{PRODUCT_NAME}</strong></span>{config.privacy_policy_url && <a href={config.privacy_policy_url} target="_blank" rel="noreferrer noopener">Privacy</a>}</footer>
   </main>;
 }
 
