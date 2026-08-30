@@ -20,6 +20,7 @@ export type BillingOverview = {
   cancel_at_period_end: boolean;
   entitlements: BillingEntitlements;
   provider_configured: boolean;
+  test_plan_activation_enabled: boolean;
 };
 
 export type BillingUsage = {
@@ -48,7 +49,11 @@ export type BillingPlan = {
 };
 
 export type PlanChangeIntent = {
-  status: "provider_unavailable" | "blocked" | "checkout_ready";
+  status:
+    | "provider_unavailable"
+    | "blocked"
+    | "checkout_ready"
+    | "test_activated";
   message: string;
   blockers: Array<{
     entitlement_key: string;
@@ -56,6 +61,7 @@ export type PlanChangeIntent = {
     target_limit: number;
   }>;
   checkout_url: string | null;
+  billing: BillingOverview | null;
 };
 
 export function isCurrentBillingResponse(
@@ -77,6 +83,20 @@ export function shouldRequestPlanChange(
   targetPlanCode: string,
 ) {
   return currentPlanCode !== targetPlanCode;
+}
+
+export function billingPlanActionLabel(
+  current: boolean,
+  planCode: string,
+  displayName: string,
+  providerConfigured: boolean,
+  testPlanActivationEnabled: boolean,
+) {
+  if (current) return "Selected";
+  if (testPlanActivationEnabled && planCode !== "free") {
+    return `Activate ${displayName}`;
+  }
+  return providerConfigured ? "Choose plan" : "Check availability";
 }
 
 function root(businessId: string) {

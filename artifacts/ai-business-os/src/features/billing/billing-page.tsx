@@ -18,6 +18,7 @@ import { useBusiness } from "@/business-context";
 import { Badge, Button, Card, Modal, PageHeader, SectionTitle } from "@/components/product-ui";
 import { humanizeApiError } from "@/services/api-client";
 import {
+  billingPlanActionLabel,
   billingApi,
   shouldRequestPlanChange,
   type BillingPlan,
@@ -41,7 +42,7 @@ type PlanFeedback = {
   businessId: string;
   planCode: string;
   planName: string;
-  status: Exclude<PlanChangeIntent["status"], "checkout_ready"> | "error";
+  status: Exclude<PlanChangeIntent["status"], "checkout_ready" | "test_activated"> | "error";
   message: string;
   blockers: PlanChangeIntent["blockers"];
 };
@@ -98,7 +99,10 @@ export function BillingPage() {
     reloadBilling,
   } = useBusiness();
   const [interval, setInterval] = useState<"month" | "year">("month");
-  const [subscriptionMessage, setSubscriptionMessage] = useState("");
+  const [subscriptionMessage, setSubscriptionMessage] = useState<{
+    businessId: string;
+    message: string;
+  } | null>(null);
   const [actionError, setActionError] = useState("");
   const [busyPlan, setBusyPlan] = useState("");
   const [planFeedback, setPlanFeedback] = useState<PlanFeedback | null>(null);
@@ -120,6 +124,9 @@ export function BillingPage() {
     [billing?.plan_code, plans.data],
   );
   const visiblePlanFeedback = planFeedback?.businessId === activeBusinessId ? planFeedback : null;
+  const visibleSubscriptionMessage = subscriptionMessage?.businessId === activeBusinessId
+    ? subscriptionMessage.message
+    : "";
 
   const refreshBillingScreen = useCallback(async () => {
     if (!activeBusinessId) return;
@@ -173,7 +180,7 @@ export function BillingPage() {
       return;
     }
     const businessId = activeBusinessId;
-    setSubscriptionMessage(""); setActionError(""); setPlanFeedback(null); setBusyPlan(plan.code);
+    setSubscriptionMessage(null); setActionError(""); setPlanFeedback(null); setBusyPlan(plan.code);
     try {
       const result = await billingApi.changeIntent(businessId, plan.code, interval);
       if (result.status === "checkout_ready") {
@@ -189,6 +196,26 @@ export function BillingPage() {
           message: "Checkout could not be started because the billing provider returned no destination.",
           blockers: [],
         });
+        return;
+      }
+      if (result.status === "test_activated") {
+        if (
+          !result.billing
+          || result.billing.business_id !== businessId
+          || result.billing.plan_code !== plan.code
+        ) {
+          setPlanFeedback({
+            businessId,
+            planCode: plan.code,
+            planName: plan.display_name,
+            status: "error",
+            message: "The billing server returned an invalid activation result. Refresh Billing before trying again.",
+            blockers: [],
+          });
+          return;
+        }
+        await refreshBillingScreen();
+        setSubscriptionMessage({ businessId, message: result.message });
         return;
       }
       setPlanFeedback({
@@ -219,7 +246,7 @@ export function BillingPage() {
       await billingApi.cancel(activeBusinessId, "Canceled by the business owner from Billing.");
       await reloadBilling();
       setCancelOpen(false);
-      setSubscriptionMessage("Cancellation is scheduled for the end of the current period. No workspace data was removed.");
+      setSubscriptionMessage({ businessId: activeBusinessId, message: "Cancellation is scheduled for the end of the current period. No workspace data was removed." });
     } catch (reason) {
       setActionError(humanizeApiError(reason, "We couldn't schedule cancellation."));
     }
@@ -230,7 +257,7 @@ export function BillingPage() {
     try {
       await billingApi.reactivate(activeBusinessId);
       await reloadBilling();
-      setSubscriptionMessage("Cancellation was reversed. Your current plan remains active.");
+      setSubscriptionMessage({ businessId: activeBusinessId, message: "Cancellation was reversed. Your current plan remains active." });
     } catch (reason) {
       setActionError(humanizeApiError(reason, "We couldn't reactivate this subscription."));
     }
@@ -245,10 +272,10 @@ export function BillingPage() {
         action={<Badge tone={billing.subscription_status === "active" ? "green" : "orange"}>{billing.subscription_status}</Badge>}
       />
 
-      {(subscriptionMessage || actionError) && (
+      {(visibleSubscriptionMessage || actionError) && (
         <div className={`billing-notice ${actionError ? "error" : "info"}`} role="status">
           {actionError ? <AlertCircle /> : <Info />}
-          <span>{actionError || subscriptionMessage}</span>
+          <span>{actionError || visibleSubscriptionMessage}</span>
         </div>
       )}
 
@@ -280,7 +307,9 @@ export function BillingPage() {
       {billing.cancel_at_period_end && (
         <div className="billing-notice warning"><CalendarClock /><span>Cancellation is scheduled for {date(billing.current_period_end)}. Access remains unchanged until then.</span></div>
       )}
-      {!billing.provider_configured && (
+      {billing.test_plan_activation_enabled ? (
+        <div className="billing-notice neutral"><ShieldCheck /><span><strong>Testing mode</strong> · Payment bypass enabled for product testing.</span></div>
+      ) : !billing.provider_configured && (
         <div className="billing-notice neutral"><ShieldCheck /><span>Online checkout is not configured yet. Plan buttons will explain availability without changing your subscription.</span></div>
       )}
 
@@ -335,7 +364,7 @@ export function BillingPage() {
                   {plan.trial_days > 0 && <div className="billing-trial-copy">{plan.trial_days}-day trial term</div>}
                   <ul>{features.map(([key]) => <li key={key}><Check /> {featureLabels[key]}</li>)}</ul>
                   <div className="billing-plan-limits"><span>{number(Number(plan.entitlements.max_ai_executions_month ?? 0))} AI runs</span><span>{number(Number(plan.entitlements.max_members ?? 0))} members</span></div>
-                  <Button variant={current ? "secondary" : "primary"} disabled={current || !isOwner || Boolean(busyPlan)} onClick={() => void changePlan(plan)}>{busyPlan === plan.code ? <RefreshCw className="spin" /> : current ? <Check /> : <ArrowUpRight />}{current ? "Selected" : billing.provider_configured ? "Choose plan" : "Check availability"}</Button>
+                  <Button variant={current ? "secondary" : "primary"} disabled={current || !isOwner || Boolean(busyPlan)} onClick={() => void changePlan(plan)}>{busyPlan === plan.code ? <RefreshCw className="spin" /> : current ? <Check /> : <ArrowUpRight />}{billingPlanActionLabel(current, plan.code, plan.display_name, billing.provider_configured, billing.test_plan_activation_enabled)}</Button>
                   {cardFeedback && (
                     <div
                       className={`billing-notice billing-plan-feedback ${cardFeedback.status === "error" ? "error" : cardFeedback.status === "blocked" ? "warning" : "neutral"}`}

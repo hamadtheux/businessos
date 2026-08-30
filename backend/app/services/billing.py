@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.domain.billing import ENTITLEMENTS, add_billing_period, require_entitlement, utc_month_period, validate_entitlement_value
 from app.models.ai_agent_execution import AIAgentExecution
 from app.models.automation import AutomationWorkflow, AutomationWorkflowRun
@@ -38,6 +39,10 @@ class BillingNotFoundError(BillingError):
 
 class BillingConflictError(BillingError):
     code = "billing_conflict"
+
+
+class BillingTestModeDisabledError(BillingError):
+    code = "billing_test_mode_disabled"
 
 
 class BillingEntitlementError(BillingError):
@@ -381,6 +386,108 @@ async def ensure_free_subscription(
         reason="Tenant assigned the explicit Free baseline.",
         now=start,
     )
+    return subscription
+
+
+async def activate_test_subscription(
+    session: AsyncSession, *, business_id: UUID, target_plan: PlanCatalogItem,
+    billing_interval: str, actor_user_id: UUID, now: datetime | None = None,
+) -> BusinessSubscription:
+    """Durably activate one canonical paid plan without commercial evidence.
+
+    The service repeats the server-side feature gate so it cannot be safely
+    reused as an unrestricted entitlement mutation primitive.
+    """
+    if not settings.billing_test_mode:
+        raise BillingTestModeDisabledError("billing_test_mode_disabled")
+    if (
+        target_plan.code == "free"
+        or not target_plan.active
+        or not target_plan.public
+        or billing_interval not in {"month", "year"}
+    ):
+        raise BillingNotFoundError("test_plan_unavailable")
+
+    plan, version = await _load_plan_version(session, version_id=target_plan.version_id)
+    if plan.id != target_plan.id or plan.code != target_plan.code or not plan.public:
+        raise BillingNotFoundError("test_plan_unavailable")
+
+    subscription = await session.scalar(select(BusinessSubscription).where(
+        BusinessSubscription.business_id == business_id,
+    ).with_for_update())
+    if subscription is None or subscription.business_id != business_id:
+        raise BillingNotFoundError("subscription_missing")
+    if (
+        subscription.source == "provider"
+        or subscription.provider != "disabled"
+        or subscription.provider_customer_reference is not None
+        or subscription.provider_subscription_reference is not None
+    ):
+        raise BillingConflictError("provider_managed_subscription")
+
+    if (
+        subscription.plan_version_id == version.id
+        and subscription.status == "active"
+        and not subscription.cancel_at_period_end
+    ):
+        return subscription
+
+    instant = (now or datetime.now(UTC)).astimezone(UTC)
+    previous_status = subscription.status
+    previous_version_id = subscription.plan_version_id
+    before = {
+        "status": subscription.status,
+        "plan_id": str(subscription.plan_id),
+        "plan_version_id": str(subscription.plan_version_id),
+        "source": subscription.source,
+        "billing_interval": subscription.billing_interval,
+    }
+    subscription.plan_id = plan.id
+    subscription.plan_version_id = version.id
+    subscription.status = "active"
+    subscription.source = "billing_test_mode"
+    subscription.billing_interval = billing_interval
+    subscription.provider = "disabled"
+    subscription.provider_customer_reference = None
+    subscription.provider_subscription_reference = None
+    subscription.current_period_start = instant
+    subscription.current_period_end = add_billing_period(instant, billing_interval)  # type: ignore[arg-type]
+    subscription.trial_started_at = None
+    subscription.trial_ends_at = None
+    subscription.cancel_at_period_end = False
+    subscription.canceled_at = None
+    subscription.ended_at = None
+    record_subscription_event(
+        session,
+        subscription=subscription,
+        event_type="test_plan_activated",
+        idempotency_key=f"test-plan-activated:{subscription.id}:{instant.isoformat()}",
+        actor_user_id=actor_user_id,
+        from_status=previous_status,
+        from_plan_version_id=previous_version_id,
+        reason=f"Owner activated canonical {plan.code} access in billing test mode.",
+        now=instant,
+    )
+    record_billing_audit(
+        session,
+        event_type="subscription.test_plan_activated",
+        target_type="business_subscription",
+        reason="Owner activated a canonical plan in billing test mode.",
+        actor_user_id=actor_user_id,
+        business_id=business_id,
+        target_id=subscription.id,
+        before=before,
+        after={
+            "status": subscription.status,
+            "plan_id": str(subscription.plan_id),
+            "plan_version_id": str(subscription.plan_version_id),
+            "source": subscription.source,
+            "billing_interval": subscription.billing_interval,
+            "provider": subscription.provider,
+        },
+        now=instant,
+    )
+    await session.flush()
     return subscription
 
 

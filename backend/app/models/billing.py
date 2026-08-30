@@ -104,7 +104,7 @@ class BusinessSubscription(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         CheckConstraint("status IN ('trialing','active','canceled','expired','suspended')", name="valid_status"),
         CheckConstraint("billing_interval IN ('month','year')", name="valid_billing_interval"),
-        CheckConstraint("source IN ('free_default','legacy_bootstrap','platform_admin','provider')", name="valid_source"),
+        CheckConstraint("source IN ('free_default','legacy_bootstrap','platform_admin','provider','billing_test_mode')", name="valid_source"),
         CheckConstraint("provider IN ('disabled')", name="valid_provider"),
         CheckConstraint("current_period_end > current_period_start", name="valid_period"),
         CheckConstraint(

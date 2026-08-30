@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { ApiClient, ApiError, humanizeApiError } from "../services/api-client.ts";
 import {
+  billingPlanActionLabel,
   createBillingApi,
   isCurrentBillingResponse,
   shouldRequestPlanChange,
@@ -25,7 +26,7 @@ test("billing reads are tenant scoped and mutations use typed payloads", async (
       return json({ access_token: "token", token_type: "bearer", expires_in: 900, user: { id: "u", email: "owner@example.test", first_name: "Owner", last_name: null, status: "active", is_email_verified: true, created_at: new Date().toISOString() } });
     }
     requests.push({ path: new URL(String(input)).pathname, method: String(init?.method ?? "GET"), body: init?.body ? JSON.parse(String(init.body)) : null });
-    return json(String(input).endsWith("change-intent") ? { status: "provider_unavailable", message: "Not configured", blockers: [], checkout_url: null } : {});
+    return json(String(input).endsWith("change-intent") ? { status: "provider_unavailable", message: "Not configured", blockers: [], checkout_url: null, billing: null } : {});
   });
   await client.login({ email: "owner@example.test", password: "password-password" });
   const api = createBillingApi(client);
@@ -55,6 +56,8 @@ test("billing UI is server-backed, fail-closed, and truthful about provider stat
   assert.match(page, /billingApi\.usage/);
   assert.match(page, /billingApi\.plans/);
   assert.match(page, /Online checkout is not configured yet/);
+  assert.match(page, /Testing mode/);
+  assert.match(page, /billing\.test_plan_activation_enabled/);
   assert.match(page, /Taxes, invoices, payment methods, MRR, and ARR are not shown/);
   assert.doesNotMatch(page, /card number|bank account|fake invoice/i);
   assert.match(context, /billingApi\.overview/);
@@ -64,13 +67,22 @@ test("billing UI is server-backed, fail-closed, and truthful about provider stat
 });
 
 test("plan CTAs surface the authoritative result beside the plan cards", async () => {
-  const page = await readFile(new URL("../features/billing/billing-page.tsx", import.meta.url), "utf8");
+  const [page, service] = await Promise.all([
+    readFile(new URL("../features/billing/billing-page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../services/billing.ts", import.meta.url), "utf8"),
+  ]);
   assert.match(page, /data-testid=\{`plan-change-feedback-\$\{plan\.code\}`\}/);
   assert.match(page, /aria-live="polite"/);
   assert.match(page, /cardFeedback\.blockers\.map/);
   assert.match(page, /currently in use;.*allowed on this plan/);
   assert.match(page, /checkout requires provider setup/);
-  assert.match(page, /"Check availability"/);
+  assert.match(service, /"Check availability"/);
+  assert.match(service, /`Activate \$\{displayName\}`/);
+  assert.match(page, /result\.status === "test_activated"/);
+  assert.match(page, /setSubscriptionMessage\(\{ businessId, message: result\.message \}\)/);
+  assert.match(page, /await refreshBillingScreen\(\)/);
+  assert.match(page, /const current = plan\.code === billing\.plan_code/);
+  assert.match(page, /current && <div className="billing-current-ribbon">Current plan<\/div>/);
   assert.match(page, /planFeedback\?\.businessId === activeBusinessId/);
   assert.match(page, /visiblePlanFeedback\?\.planCode === plan\.code/);
   assert.match(page, /invalidateQueries\(\{ queryKey: \["billing", activeBusinessId, "usage"\] \}\)/);
@@ -84,6 +96,66 @@ test("current plan never calls availability and billing responses stay tenant sc
   assert.equal(isCurrentBillingResponse("business-a", "business-b", 4, 4, "business-a"), false);
   assert.equal(isCurrentBillingResponse("business-a", "business-a", 3, 4, "business-a"), false);
   assert.equal(isCurrentBillingResponse("business-a", "business-a", 4, 4, "business-b"), false);
+});
+
+test("server capability drives Activate Pro while production CTAs remain unchanged", () => {
+  assert.equal(billingPlanActionLabel(true, "free", "Free", false, true), "Selected");
+  assert.equal(billingPlanActionLabel(false, "pro", "Pro", false, true), "Activate Pro");
+  assert.equal(billingPlanActionLabel(false, "pro", "Pro", false, false), "Check availability");
+  assert.equal(billingPlanActionLabel(false, "pro", "Pro", true, false), "Choose plan");
+});
+
+test("test activation calls the tenant billing API and refetches authoritative Pro", async () => {
+  let activePlan: "free" | "pro" = "free";
+  const requests: Array<{ path: string; method: string; body: unknown }> = [];
+  const overview = () => ({
+    business_id: businessId,
+    subscription_id: `${businessId}-subscription`,
+    plan_id: `${activePlan}-plan`,
+    plan_version_id: `${activePlan}-version`,
+    plan_code: activePlan,
+    plan_name: activePlan === "pro" ? "Pro" : "Free",
+    plan_version: 1,
+    subscription_status: "active",
+    access_reason: "subscription_active",
+    billing_interval: "month",
+    current_period_start: "2026-08-01T00:00:00Z",
+    current_period_end: "2026-09-01T00:00:00Z",
+    trial_started_at: null,
+    trial_ends_at: null,
+    cancel_at_period_end: false,
+    entitlements: { advanced_analytics: activePlan === "pro" },
+    provider_configured: false,
+    test_plan_activation_enabled: true,
+  });
+  const client = new ApiClient("https://api.example.test", async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    if (path.endsWith("/auth/login")) {
+      return json({ access_token: "token", token_type: "bearer", expires_in: 900, user: { id: "u", email: "owner@example.test", first_name: "Owner", last_name: null, status: "active", is_email_verified: true, created_at: new Date().toISOString() } });
+    }
+    const method = String(init?.method ?? "GET");
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    requests.push({ path, method, body });
+    if (path.endsWith("/change-intent")) {
+      activePlan = "pro";
+      return json({ status: "test_activated", message: "Pro activated for testing.", blockers: [], checkout_url: null, billing: overview() });
+    }
+    return json(overview());
+  });
+  await client.login({ email: "owner@example.test", password: "password-password" });
+  const api = createBillingApi(client);
+
+  assert.equal((await api.overview(businessId)).plan_code, "free");
+  const activation = await api.changeIntent(businessId, "pro", "month");
+  assert.equal(activation.status, "test_activated");
+  assert.equal(activation.message, "Pro activated for testing.");
+  assert.equal(activation.billing?.plan_code, "pro");
+  assert.equal((await api.overview(businessId)).plan_code, "pro");
+  assert.deepEqual(requests[1], {
+    path: `/api/v1/businesses/${businessId}/billing/change-intent`,
+    method: "POST",
+    body: { plan_code: "pro", billing_interval: "month" },
+  });
 });
 
 test("Pro survives refetch and re-login while tenant switching retains each plan", async () => {
@@ -107,6 +179,7 @@ test("Pro survives refetch and re-login while tenant switching retains each plan
     cancel_at_period_end: false,
     entitlements: {},
     provider_configured: false,
+    test_plan_activation_enabled: true,
   });
   const requested: string[] = [];
   const client = new ApiClient("https://api.example.test", async (input) => {

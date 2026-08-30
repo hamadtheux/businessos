@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     # Billing is server-authoritative even while commercial checkout is not
     # configured. Platform administrators are identities, never tenant roles.
     billing_provider: BillingProviderBackend = "disabled"
+    # Explicit acceptance-testing switch. This remains server-authoritative
+    # and disabled unless an operator deliberately enables it.
+    billing_test_mode: bool = False
     platform_admin_emails: list[str] = []
 
     # Object storage

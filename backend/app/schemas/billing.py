@@ -41,6 +41,7 @@ class BillingOverviewResponse(BaseModel):
     cancel_at_period_end: bool
     entitlements: dict[str, bool | int]
     provider_configured: bool = False
+    test_plan_activation_enabled: bool = False
 
 
 class UsageResponse(BaseModel):
@@ -59,10 +60,11 @@ class PlanChangeIntentRequest(BaseModel):
 
 
 class PlanChangeIntentResponse(BaseModel):
-    status: Literal["provider_unavailable", "blocked", "checkout_ready"]
+    status: Literal["provider_unavailable", "blocked", "checkout_ready", "test_activated"]
     message: str
     blockers: list[dict[str, int | str]] = []
     checkout_url: str | None = None
+    billing: BillingOverviewResponse | None = None
 
 
 class CancellationRequest(BaseModel):

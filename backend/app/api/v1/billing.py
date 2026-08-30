@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies.business import BusinessAccessDependency
 from app.api.dependencies.platform_admin import PlatformAdminDependency
 from app.billing.provider import BillingProviderUnavailableError, get_billing_provider
+from app.core.config import settings
 from app.db.session import get_db_session
 from app.domain.billing import add_billing_period, require_entitlement, utc_month_period, validate_entitlement_value
 from app.models.billing import (
@@ -48,8 +49,11 @@ from app.schemas.billing import (
     UsageResponse,
 )
 from app.services.billing import (
+    BillingConflictError,
     BillingConfigurationError,
     BillingNotFoundError,
+    BillingTestModeDisabledError,
+    activate_test_subscription,
     current_usage,
     list_public_plans,
     record_billing_audit,
@@ -77,6 +81,18 @@ def _billing_unavailable() -> HTTPException:
     return HTTPException(status_code=503, detail="Billing information is temporarily unavailable.")
 
 
+def _overview_response(snapshot: object) -> BillingOverviewResponse:
+    fields = {
+        field: getattr(snapshot, field)
+        for field in snapshot.__dataclass_fields__  # type: ignore[attr-defined]
+    }
+    return BillingOverviewResponse(
+        **fields,
+        provider_configured=settings.billing_provider != "disabled",
+        test_plan_activation_enabled=settings.billing_test_mode,
+    )
+
+
 async def _subscription_for_update(session: AsyncSession, business_id: UUID) -> BusinessSubscription:
     item = await session.scalar(select(BusinessSubscription).where(
         BusinessSubscription.business_id == business_id,
@@ -93,9 +109,7 @@ async def billing_overview(access: BusinessAccessDependency, response: Response,
     except (BillingConfigurationError, SQLAlchemyError):
         raise _billing_unavailable() from None
     _private(response)
-    return BillingOverviewResponse(**snapshot.__dict__ if hasattr(snapshot, "__dict__") else {
-        field: getattr(snapshot, field) for field in snapshot.__dataclass_fields__
-    })
+    return _overview_response(snapshot)
 
 
 @router.get("/businesses/{business_id}/billing/usage", response_model=UsageResponse)
@@ -139,7 +153,9 @@ async def create_plan_change_intent(data: PlanChangeIntentRequest, access: Busin
         if subscription is not None:
             recent = await session.scalar(select(func.count(BillingSubscriptionEvent.id)).where(
                 BillingSubscriptionEvent.business_id == access.business.id,
-                BillingSubscriptionEvent.event_type.in_(("plan_change_intent", "plan_change_blocked")),
+                BillingSubscriptionEvent.event_type.in_((
+                    "plan_change_intent", "plan_change_blocked", "test_plan_activated",
+                )),
                 BillingSubscriptionEvent.created_at >= now - timedelta(minutes=10),
             )) or 0
             if recent >= 5:
@@ -155,6 +171,24 @@ async def create_plan_change_intent(data: PlanChangeIntentRequest, access: Busin
                 record_subscription_event(session, subscription=subscription, event_type="plan_change_blocked", idempotency_key=f"plan-change-blocked:{subscription.id}:{now.isoformat()}", actor_user_id=access.user.id, from_status=subscription.status, reason=f"Target plan {plan.code} is below current resource usage.", now=now)
                 await session.commit()
             return PlanChangeIntentResponse(status="blocked", message="Current resources exceed the target plan. Reduce them before downgrading; nothing was deleted.", blockers=blockers)
+        if settings.billing_test_mode and plan.code != "free":
+            await activate_test_subscription(
+                session,
+                business_id=access.business.id,
+                target_plan=plan,
+                billing_interval=data.billing_interval,
+                actor_user_id=access.user.id,
+                now=now,
+            )
+            snapshot = await resolve_entitlements(
+                session, business_id=access.business.id, now=now,
+            )
+            await session.commit()
+            return PlanChangeIntentResponse(
+                status="test_activated",
+                message=f"{plan.display_name} activated for testing.",
+                billing=_overview_response(snapshot),
+            )
         if subscription is not None:
             record_subscription_event(session, subscription=subscription, event_type="plan_change_intent", idempotency_key=f"plan-change-intent:{subscription.id}:{now.isoformat()}", actor_user_id=access.user.id, from_status=subscription.status, reason=f"Requested {plan.code} on {data.billing_interval} interval.", now=now)
             await session.commit()
@@ -166,8 +200,19 @@ async def create_plan_change_intent(data: PlanChangeIntentRequest, access: Busin
             return PlanChangeIntentResponse(status="provider_unavailable", message="Online plan changes are not configured yet. Your current plan was not changed.")
         return PlanChangeIntentResponse(status="checkout_ready", message="Continue to secure checkout.", checkout_url=url)
     except HTTPException:
+        await session.rollback()
         raise
+    except BillingTestModeDisabledError:
+        await session.rollback()
+        raise HTTPException(status_code=403, detail="Billing test activation is disabled.") from None
+    except BillingConflictError:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="This subscription is managed by the billing provider.") from None
+    except BillingNotFoundError:
+        await session.rollback()
+        raise HTTPException(status_code=404, detail="Plan or subscription not found.") from None
     except (BillingConfigurationError, SQLAlchemyError):
+        await session.rollback()
         raise _billing_unavailable() from None
     finally:
         _private(response)
@@ -431,7 +476,7 @@ async def admin_assign_subscription(business_id: UUID, data: AdminSubscriptionAs
     except (BillingConfigurationError, SQLAlchemyError):
         await session.rollback(); raise _billing_unavailable() from None
     _private(response)
-    return BillingOverviewResponse(**{field: getattr(snapshot, field) for field in snapshot.__dataclass_fields__})
+    return _overview_response(snapshot)
 
 
 @router.post("/platform/billing/businesses/{business_id}/trial-extension", tags=["Platform Billing"])
