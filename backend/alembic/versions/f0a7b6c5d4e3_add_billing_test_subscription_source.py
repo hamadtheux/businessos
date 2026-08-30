@@ -22,12 +22,12 @@ _SOURCE_CONSTRAINT = "ck_business_subscriptions_valid_source"
 
 def upgrade() -> None:
     op.drop_constraint(
-        _SOURCE_CONSTRAINT,
+        op.f(_SOURCE_CONSTRAINT),
         "business_subscriptions",
         type_="check",
     )
     op.create_check_constraint(
-        _SOURCE_CONSTRAINT,
+        op.f(_SOURCE_CONSTRAINT),
         "business_subscriptions",
         "source IN ('free_default','legacy_bootstrap','platform_admin','provider','billing_test_mode')",
     )
@@ -64,12 +64,12 @@ def downgrade() -> None:
         WHERE subscription.source = 'billing_test_mode'
     """))
     op.drop_constraint(
-        _SOURCE_CONSTRAINT,
+        op.f(_SOURCE_CONSTRAINT),
         "business_subscriptions",
         type_="check",
     )
     op.create_check_constraint(
-        _SOURCE_CONSTRAINT,
+        op.f(_SOURCE_CONSTRAINT),
         "business_subscriptions",
         "source IN ('free_default','legacy_bootstrap','platform_admin','provider')",
     )
