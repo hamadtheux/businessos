@@ -21,7 +21,12 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
-from app.domain.billing import FEATURE_ENTITLEMENTS, RESOURCE_ENTITLEMENTS, USAGE_ENTITLEMENTS
+from app.domain.billing import (
+    FEATURE_ENTITLEMENTS,
+    LEGACY_INTEGER_ENTITLEMENT_KEYS,
+    RESOURCE_ENTITLEMENTS,
+    USAGE_ENTITLEMENTS,
+)
 from app.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 
 
@@ -30,7 +35,9 @@ def _sql_keys(keys: frozenset[str]) -> str:
 
 
 _FEATURE_KEYS_SQL = _sql_keys(FEATURE_ENTITLEMENTS)
-_INTEGER_KEYS_SQL = _sql_keys(RESOURCE_ENTITLEMENTS | USAGE_ENTITLEMENTS)
+_INTEGER_KEYS_SQL = _sql_keys(
+    RESOURCE_ENTITLEMENTS | USAGE_ENTITLEMENTS | LEGACY_INTEGER_ENTITLEMENT_KEYS
+)
 _REGISTERED_TYPED_VALUE_SQL = (
     f"(entitlement_key IN {_FEATURE_KEYS_SQL} AND boolean_value IS NOT NULL AND integer_value IS NULL) OR "
     f"(entitlement_key IN {_INTEGER_KEYS_SQL} AND boolean_value IS NULL "

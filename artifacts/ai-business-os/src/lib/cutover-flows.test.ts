@@ -795,11 +795,40 @@ test("onboarding can skip logo without invoking the upload API", async () => {
 
 test("onboarding conflict uses safe UX without backend internals", () => {
   const message = humanizeOnboardingSaveError(
-    new ApiError(409, { detail: "internal-record-reference" }),
+    new ApiError(409, {
+      detail: "Business onboarding conflicts with an existing resource.",
+    }),
   );
 
   assert.match(message, /conflicts with an existing workspace/);
-  assert.equal(message.includes("internal-record-reference"), false);
+});
+
+test("structured onboarding entitlement conflict is not mislabeled as a workspace collision", () => {
+  const message = humanizeOnboardingSaveError(
+    new ApiError(409, {
+      detail: {
+        code: "usage_limit_reached",
+        entitlement_key: "max_members",
+        current: null,
+        limit: null,
+        upgrade_required: true,
+      },
+    }),
+  );
+
+  assert.match(message, /current plan limit has been reached/);
+  assert.doesNotMatch(message, /existing workspace/);
+});
+
+test("other onboarding conflicts use a safe fallback without backend details", () => {
+  const privateDetail = "private constraint and tenant reference";
+  const message = humanizeOnboardingSaveError(
+    new ApiError(409, { detail: privateDetail }),
+  );
+
+  assert.match(message, /couldn't save this workspace/);
+  assert.equal(message.includes(privateDetail), false);
+  assert.doesNotMatch(message, /existing workspace/);
 });
 
 test("onboarding distinguishes a saved business from a failed logo upload", () => {

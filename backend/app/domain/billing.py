@@ -35,7 +35,6 @@ _DEFINITIONS = {
         EntitlementDefinition("integrations", "feature", "boolean", "External integrations"),
         EntitlementDefinition("advanced_analytics", "feature", "boolean", "Advanced analytics"),
         EntitlementDefinition("reports", "feature", "boolean", "Generated reports"),
-        EntitlementDefinition("max_businesses", "resource", "integer", "Businesses per owner"),
         EntitlementDefinition("max_members", "resource", "integer", "Active members"),
         EntitlementDefinition("max_active_workflows", "resource", "integer", "Active workflows"),
         EntitlementDefinition("max_integrations", "resource", "integer", "Active integrations"),
@@ -57,6 +56,11 @@ RESOURCE_ENTITLEMENTS: Final = frozenset(
 USAGE_ENTITLEMENTS: Final = frozenset(
     key for key, item in ENTITLEMENTS.items() if item.kind == "usage"
 )
+
+# Historical plan versions contain this immutable row. It remains valid at the
+# database constraint layer until those versions are retired, but it is not an
+# active business-plan entitlement and must never be resolved or enforced.
+LEGACY_INTEGER_ENTITLEMENT_KEYS: Final = frozenset({"max_businesses"})
 
 
 def require_entitlement(key: str) -> EntitlementDefinition:

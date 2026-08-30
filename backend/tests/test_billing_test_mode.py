@@ -64,6 +64,9 @@ class BillingTestActivationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.business_a = _business("Business A", "business-a")
         self.business_b = _business("Business B", "business-b")
         self.free_plan, self.free_version, self.free_catalog = _plan("free", "Free", 0)
+        self.starter_plan, self.starter_version, self.starter_catalog = _plan(
+            "starter", "Starter", 2_900
+        )
         self.pro_plan, self.pro_version, self.pro_catalog = _plan("pro", "Pro", 14_900)
         self.pro_entitlements = {
             "advanced_analytics": True,
@@ -74,6 +77,11 @@ class BillingTestActivationServiceTests(unittest.IsolatedAsyncioTestCase):
             "advanced_analytics": False,
             "ai_agents": True,
             "max_ai_executions_month": 20,
+        }
+        self.starter_entitlements = {
+            "advanced_analytics": False,
+            "ai_agents": True,
+            "max_ai_executions_month": 1_000,
         }
         self.subscription_a = _subscription(
             self.business_a.id, self.free_plan.id, self.free_version.id,
@@ -174,10 +182,60 @@ class BillingTestActivationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.subscription_a.plan_version_id, self.free_version.id)
         self.assertEqual(self.session.flush_calls, 0)
 
+    async def test_two_businesses_activate_and_persist_independent_plans(
+        self,
+    ) -> None:
+        with self._billing_service_patches(), patch.object(
+            settings, "billing_test_mode", True
+        ):
+            await activate_test_subscription(
+                self.session,
+                business_id=self.business_a.id,
+                target_plan=self.pro_catalog,
+                billing_interval="month",
+                actor_user_id=self.owner.id,
+                now=NOW,
+            )
+            await self.session.commit()
+            await activate_test_subscription(
+                self.session,
+                business_id=self.business_b.id,
+                target_plan=self.starter_catalog,
+                billing_interval="month",
+                actor_user_id=self.owner.id,
+                now=NOW,
+            )
+            await self.session.commit()
+
+            # A later durable session represents refresh, business switching,
+            # logout/login, or a browser restart.
+            later_session = _DurableBillingSession(self.store)
+            business_a = await resolve_entitlements(
+                later_session, business_id=self.business_a.id, now=NOW
+            )
+            business_b = await resolve_entitlements(
+                later_session, business_id=self.business_b.id, now=NOW
+            )
+            business_a_again = await resolve_entitlements(
+                later_session, business_id=self.business_a.id, now=NOW
+            )
+
+        self.assertEqual(business_a.plan_code, "pro")
+        self.assertEqual(business_b.plan_code, "starter")
+        self.assertEqual(business_a_again.plan_code, "pro")
+        self.assertEqual(self.subscription_a.plan_version_id, self.pro_version.id)
+        self.assertEqual(
+            self.subscription_b.plan_version_id, self.starter_version.id
+        )
+        self.assertEqual(self.subscription_a.source, "billing_test_mode")
+        self.assertEqual(self.subscription_b.source, "billing_test_mode")
+
     def _billing_service_patches(self):
         async def load_plan(*_args, code=None, version_id=None, **_kwargs):
             if code == "free" or version_id == self.free_version.id:
                 return self.free_plan, self.free_version
+            if code == "starter" or version_id == self.starter_version.id:
+                return self.starter_plan, self.starter_version
             if code == "pro" or version_id == self.pro_version.id:
                 return self.pro_plan, self.pro_version
             raise AssertionError("unexpected plan lookup")
@@ -185,6 +243,8 @@ class BillingTestActivationServiceTests(unittest.IsolatedAsyncioTestCase):
         async def load_entitlements(_session, version_id):
             if version_id == self.pro_version.id:
                 return dict(self.pro_entitlements)
+            if version_id == self.starter_version.id:
+                return dict(self.starter_entitlements)
             if version_id == self.free_version.id:
                 return dict(self.free_entitlements)
             raise AssertionError("unexpected entitlement lookup")

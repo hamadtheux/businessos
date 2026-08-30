@@ -164,7 +164,6 @@ async def create_plan_change_intent(data: PlanChangeIntentRequest, access: Busin
             session,
             business_id=access.business.id,
             target_version_id=plan.version_id,
-            owner_user_id=access.user.id,
         )
         if blockers:
             if subscription is not None:

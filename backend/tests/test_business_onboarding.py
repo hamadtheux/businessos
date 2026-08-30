@@ -30,7 +30,6 @@ from app.services.business import (  # noqa: E402
     CreatedBusinessContext,
     create_business_from_onboarding,
 )
-from app.services.billing import BillingEntitlementError  # noqa: E402
 from app.utils.slug import add_uuid_slug_suffix, create_slug_base  # noqa: E402
 
 
@@ -210,6 +209,66 @@ class BusinessOnboardingServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result.business.slug, "my-new-restaurant")
+
+    async def test_existing_business_plan_never_controls_new_business_creation(
+        self,
+    ) -> None:
+        for plan_code in ("free", "starter", "growth", "pro"):
+            with self.subTest(plan_code=plan_code):
+                user_id = uuid4()
+                existing = _make_business(
+                    business_id=uuid4(),
+                    name=f"Existing {plan_code}",
+                    slug=f"existing-{plan_code}",
+                )
+                session = _FakeAsyncSession(
+                    businesses=[existing],
+                    memberships=[_make_membership(existing, user_id)],
+                )
+
+                result = await create_business_from_onboarding(
+                    session,
+                    user_id,
+                    self._onboarding(name=f"New after {plan_code}"),
+                )
+
+                self.assertTrue(result.created)
+                self.assertEqual(len(session.businesses), 2)
+                self.assertEqual(len(session.memberships), 2)
+                self.assertTrue(
+                    all(
+                        "subscription" not in statement.casefold()
+                        and "entitlement" not in statement.casefold()
+                        for statement in session.executed_sql
+                    )
+                )
+
+    async def test_owner_with_many_businesses_can_create_another(self) -> None:
+        user_id = uuid4()
+        businesses = [
+            _make_business(
+                business_id=uuid4(),
+                name=f"Existing Business {index}",
+                slug=f"existing-business-{index}",
+            )
+            for index in range(25)
+        ]
+        session = _FakeAsyncSession(
+            businesses=businesses,
+            memberships=[
+                _make_membership(business, user_id) for business in businesses
+            ],
+        )
+
+        result = await create_business_from_onboarding(
+            session,
+            user_id,
+            self._onboarding(name="Business Twenty Six"),
+        )
+
+        self.assertTrue(result.created)
+        self.assertEqual(len(session.businesses), 26)
+        self.assertEqual(len(session.memberships), 26)
 
     async def test_branding_colors_are_persisted_without_logo_url(self) -> None:
         session = _FakeAsyncSession()
@@ -525,22 +584,21 @@ class BusinessOnboardingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.memberships, [])
         self.assertEqual(session.brandings, {})
 
-    async def test_owner_business_limit_maps_to_safe_entitlement_error(
+    async def test_legacy_owner_limit_error_is_not_a_billing_creation_policy(
         self,
     ) -> None:
         session = _FakeAsyncSession(
             flush_errors=[_owner_business_entitlement_error()]
         )
 
-        with self.assertRaises(BillingEntitlementError) as raised:
+        with self.assertRaises(BusinessOnboardingPersistenceError) as raised:
             await create_business_from_onboarding(
                 session,
                 uuid4(),
                 self._onboarding(),
             )
 
-        self.assertEqual(raised.exception.code, "usage_limit_reached")
-        self.assertEqual(raised.exception.entitlement_key, "max_businesses")
+        self.assertEqual(str(raised.exception), "Unable to persist business onboarding")
         self.assertTrue(session.savepoint_rollbacks)
         self.assertFalse(session.transaction_broken)
         self.assertEqual(session.commit_calls, 0)

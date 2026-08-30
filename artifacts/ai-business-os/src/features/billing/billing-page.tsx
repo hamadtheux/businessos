@@ -32,7 +32,6 @@ const usageLabels: Record<string, string> = {
   max_chatbot_sessions_month: "Chatbot sessions",
   max_chatbot_messages_month: "Chatbot messages",
   max_automation_runs_month: "Automation runs",
-  max_businesses: "Businesses",
   max_members: "Active members",
   max_active_workflows: "Active workflows",
   max_integrations: "Connected integrations",

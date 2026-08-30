@@ -8,7 +8,14 @@ from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.domain.billing import ENTITLEMENTS, add_billing_period, require_entitlement, utc_month_period, validate_entitlement_value
+from app.domain.billing import (
+    ENTITLEMENTS,
+    LEGACY_INTEGER_ENTITLEMENT_KEYS,
+    add_billing_period,
+    require_entitlement,
+    utc_month_period,
+    validate_entitlement_value,
+)
 from app.models.ai_agent_execution import AIAgentExecution
 from app.models.automation import AutomationWorkflow, AutomationWorkflowRun
 from app.models.billing import (
@@ -141,6 +148,8 @@ async def _load_entitlements(session: AsyncSession, version_id: UUID) -> dict[st
         for key, definition in ENTITLEMENTS.items()
     }
     for row in rows:
+        if row.entitlement_key in LEGACY_INTEGER_ENTITLEMENT_KEYS:
+            continue
         definition = require_entitlement(row.entitlement_key)
         value = _value(row)
         validate_entitlement_value(definition.key, value)
@@ -207,6 +216,8 @@ async def resolve_entitlements(
         ))).all())
         seen: set[str] = set()
         for override in overrides:
+            if override.entitlement_key in LEGACY_INTEGER_ENTITLEMENT_KEYS:
+                continue
             if override.entitlement_key in seen:
                 continue
             seen.add(override.entitlement_key)
@@ -493,7 +504,6 @@ async def activate_test_subscription(
 
 async def validate_plan_change(
     session: AsyncSession, *, business_id: UUID, target_version_id: UUID,
-    owner_user_id: UUID | None = None,
 ) -> list[dict[str, int | str]]:
     _plan, version = await _load_plan_version(session, version_id=target_version_id)
     target = await _load_entitlements(session, version.id)
@@ -502,18 +512,6 @@ async def validate_plan_change(
     for key in ("max_members", "max_active_workflows", "max_integrations"):
         if current.usage[key] > int(target[key]):
             blockers.append({"entitlement_key": key, "current": current.usage[key], "target_limit": int(target[key])})
-    if owner_user_id is not None:
-        owned_businesses = await session.scalar(select(func.count(BusinessMembership.id)).where(
-            BusinessMembership.user_id == owner_user_id,
-            BusinessMembership.role == "owner",
-            BusinessMembership.status == "active",
-        )) or 0
-        if owned_businesses > int(target["max_businesses"]):
-            blockers.append({
-                "entitlement_key": "max_businesses",
-                "current": int(owned_businesses),
-                "target_limit": int(target["max_businesses"]),
-            })
     return blockers
 
 

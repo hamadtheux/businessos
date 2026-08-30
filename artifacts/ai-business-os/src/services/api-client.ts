@@ -649,6 +649,9 @@ export function humanizeApiError(
       ) {
         return `You've used ${detail.current.toLocaleString()} / ${detail.limit.toLocaleString()} ${label} this billing period. Review Billing to upgrade.`;
       }
+      if (detail.code === "usage_limit_reached") {
+        return "The current plan limit has been reached. Review Billing & plan to continue.";
+      }
       if (detail.code === "feature_not_in_plan") {
         return `Your current plan doesn't include ${label}. Review Billing to compare plans.`;
       }

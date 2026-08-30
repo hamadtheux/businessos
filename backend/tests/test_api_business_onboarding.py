@@ -25,7 +25,6 @@ from app.models.business_membership import BusinessMembership  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.schemas.business import BusinessOnboardingInput  # noqa: E402
 from app.services.business import CreatedBusinessContext  # noqa: E402
-from app.services.billing import BillingEntitlementError  # noqa: E402
 from app.utils.slug import create_slug_base  # noqa: E402
 
 
@@ -304,6 +303,33 @@ class BusinessOnboardingApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list_response.json()[0]["id"], payload["business_id"])
         self.assertEqual(list_response.json()[0]["membership_role"], "owner")
 
+    async def test_same_account_can_create_two_independent_owner_memberships(
+        self,
+    ) -> None:
+        first = self._valid_payload(name="First Business")
+        second = self._valid_payload(name="Second Business")
+
+        with patch(
+            "app.api.v1.businesses.create_business_from_onboarding",
+            new_callable=AsyncMock,
+            side_effect=self._create_or_retry,
+        ):
+            first_response = await self.client.post("/api/v1/businesses", json=first)
+            second_response = await self.client.post("/api/v1/businesses", json=second)
+
+        self.assertEqual(first_response.status_code, 201)
+        self.assertEqual(second_response.status_code, 201)
+        self.assertEqual(len(self.session.businesses), 2)
+        self.assertEqual(len(self.session.memberships), 2)
+        self.assertEqual(
+            {membership.user_id for membership in self.session.memberships},
+            {self.user.id},
+        )
+        self.assertEqual(
+            {membership.business_id for membership in self.session.memberships},
+            {UUID(str(first["business_id"])), UUID(str(second["business_id"]))},
+        )
+
     async def test_changed_retry_and_cross_tenant_collision_are_safe_409s(
         self,
     ) -> None:
@@ -375,37 +401,6 @@ class BusinessOnboardingApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("constraint", response.text)
         self._assert_no_persisted_or_staged_rows()
-        self.assertEqual(self.session.rollback_calls, 1)
-        self.assertEqual(self.session.commit_calls, 0)
-
-    async def test_business_limit_returns_structured_upgrade_guidance(
-        self,
-    ) -> None:
-        with patch(
-            "app.api.v1.businesses.create_business_from_onboarding",
-            new_callable=AsyncMock,
-            side_effect=BillingEntitlementError(
-                "usage_limit_reached", "max_businesses"
-            ),
-        ):
-            response = await self.client.post(
-                "/api/v1/businesses",
-                json=self._valid_payload(),
-            )
-
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(
-            response.json(),
-            {
-                "detail": {
-                    "code": "usage_limit_reached",
-                    "entitlement_key": "max_businesses",
-                    "current": None,
-                    "limit": None,
-                    "upgrade_required": True,
-                }
-            },
-        )
         self.assertEqual(self.session.rollback_calls, 1)
         self.assertEqual(self.session.commit_calls, 0)
 

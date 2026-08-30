@@ -202,6 +202,7 @@ export async function saveOnboardingWorkspace(
 }
 
 export function humanizeOnboardingSaveError(error: unknown) {
+  const fallback = "We couldn't save this workspace. Your information is safe—please try again.";
   if (
     error instanceof Error &&
     "businessSaved" in error &&
@@ -209,11 +210,31 @@ export function humanizeOnboardingSaveError(error: unknown) {
   ) {
     return error.message;
   }
-  if (error instanceof ApiError && error.status === 409) {
-    return "This business setup conflicts with an existing workspace. Review the details or contact support.";
+  if (error instanceof ApiError) {
+    const detail = error.data?.detail;
+    if (
+      error.status === 409 &&
+      typeof detail === "string" &&
+      detail.trim() === "Business onboarding conflicts with an existing resource."
+    ) {
+      return "This business setup conflicts with an existing workspace. Review the details or contact support.";
+    }
+    if (
+      detail &&
+      typeof detail === "object" &&
+      !Array.isArray(detail) &&
+      (detail.code === "usage_limit_reached" ||
+        detail.code === "feature_not_in_plan")
+    ) {
+      return humanizeApiError(error, fallback);
+    }
+    if (error.status === 422) {
+      return "Check the highlighted details and try again.";
+    }
+    if (error.status === 503) {
+      return "The service is temporarily unavailable. Please try again.";
+    }
+    return fallback;
   }
-  return humanizeApiError(
-    error,
-    "We couldn't save this workspace. Your information is safe—please try again.",
-  );
+  return humanizeApiError(error, fallback);
 }

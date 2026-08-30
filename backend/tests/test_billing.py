@@ -4,7 +4,8 @@ import os
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -19,6 +20,7 @@ from app.domain.background_jobs import JOB_POLICIES  # noqa: E402
 from app.domain.billing import (  # noqa: E402
     ENTITLEMENTS,
     FEATURE_ENTITLEMENTS,
+    LEGACY_INTEGER_ENTITLEMENT_KEYS,
     RESOURCE_ENTITLEMENTS,
     USAGE_ENTITLEMENTS,
     add_billing_period,
@@ -46,16 +48,19 @@ from app.services.billing import (  # noqa: E402
     BillingEntitlementError,
     _logical_period,
     _subscription_access,
+    validate_plan_change,
 )
 
 
 class BillingDomainTests(unittest.TestCase):
     def test_registry_is_immutable_and_complete(self) -> None:
         self.assertIsInstance(ENTITLEMENTS, MappingProxyType)
-        self.assertEqual(len(ENTITLEMENTS), 23)
+        self.assertEqual(len(ENTITLEMENTS), 22)
         self.assertEqual(len(FEATURE_ENTITLEMENTS), 13)
-        self.assertEqual(len(RESOURCE_ENTITLEMENTS), 4)
+        self.assertEqual(len(RESOURCE_ENTITLEMENTS), 3)
         self.assertEqual(len(USAGE_ENTITLEMENTS), 6)
+        self.assertEqual(LEGACY_INTEGER_ENTITLEMENT_KEYS, {"max_businesses"})
+        self.assertNotIn("max_businesses", ENTITLEMENTS)
         with self.assertRaises(TypeError):
             ENTITLEMENTS["new_feature"] = object()  # type: ignore[index,assignment]
 
@@ -79,8 +84,11 @@ class BillingDomainTests(unittest.TestCase):
                 validate_entitlement_value("max_members", invalid)  # type: ignore[arg-type]
 
     def test_unknown_entitlement_fails_closed(self) -> None:
-        with self.assertRaisesRegex(ValueError, "entitlement_key_invalid"):
-            require_entitlement("unregistered")
+        for key in ("unregistered", "max_businesses"):
+            with self.subTest(key=key), self.assertRaisesRegex(
+                ValueError, "entitlement_key_invalid"
+            ):
+                require_entitlement(key)
 
     def test_calendar_months_clamp_month_end(self) -> None:
         self.assertEqual(
@@ -242,6 +250,108 @@ class DisabledProviderTests(unittest.IsolatedAsyncioTestCase):
             await DisabledBillingProvider().verify_and_normalize_webhook(body=b"{}", headers={})
 
 
+class BillingPlanChangeValidationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_plan_change_does_not_query_account_owned_business_count(
+        self,
+    ) -> None:
+        business_id = uuid4()
+        target_version_id = uuid4()
+        session = AsyncMock()
+        session.scalar.side_effect = AssertionError(
+            "plan validation must not inspect account business ownership"
+        )
+        usage = {
+            "max_members": 1,
+            "max_active_workflows": 0,
+            "max_integrations": 0,
+        }
+        target = {
+            "max_members": 5,
+            "max_active_workflows": 5,
+            "max_integrations": 5,
+        }
+
+        with (
+            patch(
+                "app.services.billing._load_plan_version",
+                AsyncMock(
+                    return_value=(
+                        SimpleNamespace(),
+                        SimpleNamespace(id=target_version_id),
+                    )
+                ),
+            ),
+            patch(
+                "app.services.billing._load_entitlements",
+                AsyncMock(return_value=target),
+            ),
+            patch(
+                "app.services.billing.current_usage",
+                AsyncMock(return_value=SimpleNamespace(usage=usage)),
+            ),
+        ):
+            blockers = await validate_plan_change(
+                session,
+                business_id=business_id,
+                target_version_id=target_version_id,
+            )
+
+        self.assertEqual(blockers, [])
+        session.scalar.assert_not_awaited()
+
+    async def test_plan_change_still_blocks_target_business_resource_excess(
+        self,
+    ) -> None:
+        business_id = uuid4()
+        target_version_id = uuid4()
+        usage = {
+            "max_members": 6,
+            "max_active_workflows": 2,
+            "max_integrations": 1,
+        }
+        target = {
+            "max_members": 5,
+            "max_active_workflows": 5,
+            "max_integrations": 5,
+        }
+
+        with (
+            patch(
+                "app.services.billing._load_plan_version",
+                AsyncMock(
+                    return_value=(
+                        SimpleNamespace(),
+                        SimpleNamespace(id=target_version_id),
+                    )
+                ),
+            ),
+            patch(
+                "app.services.billing._load_entitlements",
+                AsyncMock(return_value=target),
+            ),
+            patch(
+                "app.services.billing.current_usage",
+                AsyncMock(return_value=SimpleNamespace(usage=usage)),
+            ),
+        ):
+            blockers = await validate_plan_change(
+                AsyncMock(),
+                business_id=business_id,
+                target_version_id=target_version_id,
+            )
+
+        self.assertEqual(
+            blockers,
+            [
+                {
+                    "entitlement_key": "max_members",
+                    "current": 6,
+                    "target_limit": 5,
+                }
+            ],
+        )
+
+
 class BillingApiContractTests(unittest.TestCase):
     def test_business_and_platform_routes_are_exposed(self) -> None:
         paths = app.openapi()["paths"]
@@ -300,6 +410,27 @@ class BillingApiContractTests(unittest.TestCase):
         self.assertIn("enforce_plan_version_immutability", source)
         self.assertIn("enforce_plan_entitlement_immutability", source)
         self.assertNotIn("unlimited", source.casefold())
+
+    def test_new_migration_removes_only_owner_business_plan_enforcement(
+        self,
+    ) -> None:
+        source = (
+            Path(__file__).parents[1]
+            / "alembic/versions/1c9d4e7f2a6b_remove_owner_business_plan_limit.py"
+        ).read_text()
+        self.assertIn('down_revision: str | None = "f0a7b6c5d4e3"', source)
+        self.assertIn(
+            "DROP TRIGGER IF EXISTS trg_business_memberships_owner_limit",
+            source,
+        )
+        self.assertIn(
+            "DROP FUNCTION IF EXISTS enforce_owner_business_entitlement()",
+            source,
+        )
+        self.assertNotIn("provision_free_business_subscription", source)
+        self.assertNotIn("business_subscriptions", source)
+        self.assertNotIn("UPDATE ", source)
+        self.assertNotIn("DELETE ", source)
 
     def test_subscription_scheduler_skips_already_queued_daily_maintenance(self) -> None:
         source = (Path(__file__).parents[1] / "app/services/job_scheduler.py").read_text()

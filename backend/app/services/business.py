@@ -17,7 +17,6 @@ from app.models.business import Business
 from app.models.business_branding import BusinessBranding
 from app.models.business_membership import BusinessMembership
 from app.schemas.business import BusinessOnboardingInput, BusinessProfileUpdate
-from app.services.billing import BillingEntitlementError
 from app.utils.slug import add_uuid_slug_suffix, create_slug_base
 
 
@@ -94,10 +93,6 @@ async def create_business_from_onboarding(
                     session.add(context.branding)
                 await session.flush()
         except IntegrityError as error:
-            if _is_owner_business_entitlement_error(error):
-                raise BillingEntitlementError(
-                    "usage_limit_reached", "max_businesses"
-                ) from None
             constraint_names = set(_iter_constraint_names(error))
             known_resource_conflict = bool(
                 constraint_names & _BUSINESS_RESOURCE_CONSTRAINTS
@@ -128,10 +123,6 @@ async def create_business_from_onboarding(
                 _ONBOARDING_PERSISTENCE_MESSAGE
             ) from None
         except SQLAlchemyError as error:
-            if _is_owner_business_entitlement_error(error):
-                raise BillingEntitlementError(
-                    "usage_limit_reached", "max_businesses"
-                ) from None
             raise BusinessOnboardingPersistenceError(
                 _ONBOARDING_PERSISTENCE_MESSAGE
             ) from None
@@ -416,21 +407,6 @@ def _iter_database_errors(error: SQLAlchemyError) -> Iterator[BaseException]:
         ):
             if isinstance(candidate, BaseException) and id(candidate) not in visited:
                 pending.append(candidate)
-
-
-def _is_owner_business_entitlement_error(error: SQLAlchemyError) -> bool:
-    for current in _iter_database_errors(error):
-        sqlstate = getattr(current, "sqlstate", None) or getattr(
-            current, "pgcode", None
-        )
-        diagnostic = getattr(current, "diag", None)
-        details = (
-            getattr(current, "detail", None),
-            getattr(diagnostic, "message_detail", None),
-        )
-        if sqlstate == "P0001" and "max_businesses" in details:
-            return True
-    return False
 
 
 def _iter_constraint_names(error: IntegrityError) -> Iterator[str]:
