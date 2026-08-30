@@ -16,7 +16,7 @@ import {
   PRODUCT_LOGO_PATH,
   PRODUCT_NAME,
 } from "../config/brand.ts";
-import { initials } from "./product-utils.ts";
+import { businessInitials } from "./tenant-logo.ts";
 
 test("publishes the approved palette and normalized authoritative logo", async () => {
   assert.equal(PRODUCT_NAME, "9D Brain");
@@ -184,10 +184,10 @@ test("a tenant logo alone does not become a custom workspace color theme", () =>
 });
 
 test("business initials provide a tenant-only fallback for multiword and single-word names", () => {
-  assert.equal(initials("Burd Egg"), "BE");
-  assert.equal(initials("Nova Health"), "NH");
-  assert.equal(initials("PropApp"), "PR");
-  assert.equal(initials("Acme"), "AC");
+  assert.equal(businessInitials("Burd Egg"), "BE");
+  assert.equal(businessInitials("Nova Health"), "NH");
+  assert.equal(businessInitials("PropApp"), "P");
+  assert.equal(businessInitials("Acme"), "A");
 });
 
 test("authenticated sidebar and selector reuse the active tenant identity", async () => {
@@ -203,17 +203,19 @@ test("authenticated sidebar and selector reuse the active tenant identity", asyn
   )?.[0];
 
   assert.ok(sidebar);
-  assert.match(sidebar, /<BusinessBrandMark/);
+  assert.match(sidebar, /<TenantLogo/);
   assert.match(sidebar, /businessName=\{activeBusiness\.name\}/);
-  assert.match(sidebar, /identity=\{activeBusiness\.brandIdentity\}/);
+  assert.match(sidebar, /tenantKey=\{activeBusiness\.id\}/);
+  assert.match(sidebar, /logoUrl=\{resolveTenantLogoSource\(activeBusiness\.brandIdentity\)\}/);
   assert.match(sidebar, /<div className="brand-copy">\{activeBusiness\.name\}<\/div>/);
   assert.match(sidebar, /<div className="brand-sub">Workspace<\/div>/);
   assert.doesNotMatch(sidebar, /ProductBrand|ProductLogo/);
 
   assert.ok(selector);
-  assert.match(selector, /<BusinessBrandMark/);
+  assert.match(selector, /<TenantLogo/);
   assert.match(selector, /businessName=\{activeBusiness\.name\}/);
-  assert.match(selector, /identity=\{activeBusiness\.brandIdentity\}/);
+  assert.match(selector, /tenantKey=\{activeBusiness\.id\}/);
+  assert.match(selector, /logoUrl=\{resolveTenantLogoSource\(activeBusiness\.brandIdentity\)\}/);
   assert.doesNotMatch(selector, /ProductBrand|ProductLogo|Globe2/);
   assert.match(source, /Powered by \{PRODUCT_NAME\}/);
 });

@@ -1,5 +1,4 @@
 import {
-  useEffect,
   useRef,
   useState,
   type ChangeEvent,
@@ -16,6 +15,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/product-ui";
+import { TenantLogo } from "@/components/tenant-logo";
 import {
   BRAND_PRESETS,
   brandThemeStyle,
@@ -26,72 +26,17 @@ import {
   resolveBrandIdentity,
   type BrandIdentityDraft,
 } from "@/lib/brand-theme";
-import { cx, initials } from "@/lib/product-utils";
+import { cx } from "@/lib/product-utils";
+import { resolveTenantLogoSource } from "@/lib/tenant-logo";
 import {
   BRAND_LOGO_ACCEPT,
   readBrandLogo,
   revokeBrandLogo,
 } from "@/services/brand-logo";
 import {
-  BRAND_LOGO_MAX_BYTES,
   BRAND_LOGO_MAX_MEGABYTES,
   type BrandIdentity,
 } from "@/types/business";
-
-function logoSource(identity: Pick<BrandIdentity, "logo" | "logoUrl">) {
-  if (
-    identity.logo &&
-    identity.logo.size > 0 &&
-    identity.logo.size <= BRAND_LOGO_MAX_BYTES &&
-    ["image/png", "image/jpeg", "image/webp"].includes(
-      identity.logo.mimeType,
-    ) &&
-    identity.logo.previewUrl.startsWith("blob:")
-  ) {
-    return identity.logo.previewUrl;
-  }
-  if (identity.logoUrl && /^(https?:\/\/|\/)/.test(identity.logoUrl)) {
-    return identity.logoUrl;
-  }
-  return undefined;
-}
-
-export function BusinessBrandMark({
-  businessName,
-  identity,
-  className,
-}: {
-  businessName: string;
-  identity?: Pick<BrandIdentity, "logo" | "logoUrl">;
-  className?: string;
-}) {
-  const source = identity ? logoSource(identity) : undefined;
-  const [logoAspectRatio, setLogoAspectRatio] = useState(1);
-
-  useEffect(() => setLogoAspectRatio(1), [source]);
-
-  return (
-    <div
-      className={cx("business-brand-mark", source && "has-logo", className)}
-      style={source ? { aspectRatio: logoAspectRatio } : undefined}
-    >
-      {source ? (
-        <img
-          src={source}
-          alt={`${businessName} logo`}
-          onLoad={(event) => {
-            const { naturalHeight, naturalWidth } = event.currentTarget;
-            if (naturalHeight && naturalWidth) {
-              setLogoAspectRatio(naturalWidth / naturalHeight);
-            }
-          }}
-        />
-      ) : (
-        <span>{initials(businessName || "Business")}</span>
-      )}
-    </div>
-  );
-}
 
 function ColorField({
   id,
@@ -164,7 +109,7 @@ function LogoUploader({
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState("");
-  const source = logoSource(value);
+  const source = resolveTenantLogoSource(value);
 
   const chooseFile = (file?: File) => {
     if (!file) return;
@@ -200,7 +145,7 @@ function LogoUploader({
       {source ? (
         <div className="brand-logo-selected">
           <div className="brand-logo-neutral-surface">
-            <BusinessBrandMark businessName={businessName} identity={value} />
+            <TenantLogo businessName={businessName} logoUrl={source} />
           </div>
           <div className="brand-logo-file-copy">
             <strong>{value.logo?.name ?? "Current business logo"}</strong>
@@ -301,9 +246,9 @@ export function BrandThemePreview({
       >
         <aside className="brand-preview-sidebar">
           <div className="brand-preview-logo">
-            <BusinessBrandMark
+            <TenantLogo
               businessName={businessName}
-              identity={previewIdentity}
+              logoUrl={resolveTenantLogoSource(previewIdentity)}
             />
             <span>{businessName || "Your business"}</span>
           </div>

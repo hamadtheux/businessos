@@ -639,15 +639,15 @@ test("onboarding payload sends only supported server fields and brand colors", (
 });
 
 test("logo rendering keeps transparent contain sizing for wide and square assets", async () => {
-  const [editorSource, styles] = await Promise.all([
+  const [tenantLogoSource, styles] = await Promise.all([
     readFile(
-      new URL("../features/branding/branding-editor.tsx", import.meta.url),
+      new URL("../components/tenant-logo.tsx", import.meta.url),
       "utf8",
     ),
     readFile(new URL("../index.css", import.meta.url), "utf8"),
   ]);
 
-  assert.match(editorSource, /naturalWidth\s*\/\s*naturalHeight/);
+  assert.match(tenantLogoSource, /naturalWidth\s*\/\s*naturalHeight/);
   assert.match(
     styles,
     /business-brand-mark\.has-logo[^}]*background:\s*transparent/,

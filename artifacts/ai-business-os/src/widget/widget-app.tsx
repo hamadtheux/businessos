@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { ProductLogo } from "@/components/product-brand";
+import { TenantLogo } from "@/components/tenant-logo";
 import { PRODUCT_NAME } from "@/config/brand";
 import { WIDGET_API_BASE_URL } from "./config.ts";
 import { PublicWidgetApi, type AvailabilitySlot, type ChatResponse, type ProductCard, type PublicWidgetConfig } from "./public-api.ts";
@@ -117,7 +118,7 @@ export function WidgetApp() {
 
   return <main className={`widget-shell theme-${config.theme}`} style={style} aria-label={`Chat with ${config.business_name}`}>
     <header className="widget-header">
-      <div className="widget-identity">{config.logo_url ? <img src={config.logo_url} alt="" /> : <span className="widget-mark" aria-hidden="true">✦</span>}<div><strong>{config.display_name}</strong><span>AI assistant</span></div></div>
+      <div className="widget-identity"><TenantLogo businessName={config.business_name} logoUrl={config.logo_url} className="widget-tenant-logo" /><div><strong>{config.display_name}</strong><span>AI assistant</span></div></div>
       <button className="icon-button" type="button" onClick={close} aria-label="Close chat">×</button>
     </header>
 

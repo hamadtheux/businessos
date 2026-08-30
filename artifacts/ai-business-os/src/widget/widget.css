@@ -10,12 +10,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .widget-shell.theme-dark { background: #111827; color: #f8fafc; }
 .widget-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 15px; background: var(--widget-brand,#1D863A); color: white; }
 .widget-identity { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.widget-identity img, .widget-mark { width: 36px; height: 36px; border-radius: 11px; background: rgba(255,255,255,.18); }
-.widget-identity img { padding: 3px; object-fit: contain; }
-.widget-mark { display: grid; place-items: center; }
-.widget-identity strong, .widget-identity span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.widget-identity strong { font-size: 14px; }
-.widget-identity span { margin-top: 2px; font-size: 11px; opacity: .78; }
+.widget-tenant-logo { display: grid; place-items: center; flex: none; width: 36px; height: 36px; overflow: hidden; border-radius: 11px; background: rgba(255,255,255,.18); color: white; font-size: 12px; font-weight: 700; }
+.widget-tenant-logo.has-logo { width: 36px; height: 36px; padding: 3px; }
+.widget-tenant-logo.has-logo img { display: block; width: 100%; height: 100%; object-fit: contain; object-position: center; }
+.widget-identity > div strong, .widget-identity > div span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.widget-identity > div strong { font-size: 14px; }
+.widget-identity > div span { margin-top: 2px; font-size: 11px; opacity: .78; }
 .icon-button { display: grid; place-items: center; width: 34px; height: 34px; border: 0; border-radius: 10px; background: rgba(255,255,255,.12); color: white; font-size: 25px; line-height: 1; }
 .message-list { overflow-y: auto; padding: 16px 13px; scroll-behavior: smooth; }
 .message { display: table; max-width: 88%; margin: 0 0 11px; padding: 10px 12px; border-radius: 5px 14px 14px; background: white; box-shadow: 0 3px 12px rgba(15,23,42,.06); }

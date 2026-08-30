@@ -42,8 +42,8 @@ import type { LucideIcon } from "lucide-react";
 import { useBusiness } from "@/business-context";
 import { ProductLogo } from "@/components/product-brand";
 import { Avatar, Button, Modal } from "@/components/product-ui";
+import { TenantLogo } from "@/components/tenant-logo";
 import { PRODUCT_NAME } from "@/config/brand";
-import { BusinessBrandMark } from "@/features/branding/branding-editor";
 import { useAuth, userDisplayName } from "@/features/auth/auth-context";
 import { NotificationCenter } from "@/features/notifications/notification-center";
 import {
@@ -58,6 +58,7 @@ import {
   type WorkspaceModule,
 } from "@/lib/industry-workspaces";
 import { cx } from "@/lib/product-utils";
+import { resolveTenantLogoSource } from "@/lib/tenant-logo";
 import { operationsApi } from "@/services/operations";
 
 type NavItem = { href: string; label: string; icon: LucideIcon; feature?: BusinessFeature };
@@ -305,9 +306,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           className="brand tenant-sidebar-brand"
           data-testid="sidebar-business-brand"
         >
-          <BusinessBrandMark
+          <TenantLogo
             businessName={activeBusiness.name}
-            identity={activeBusiness.brandIdentity}
+            logoUrl={resolveTenantLogoSource(activeBusiness.brandIdentity)}
+            tenantKey={activeBusiness.id}
           />
           <div className="brand-text">
             <div className="brand-copy">{activeBusiness.name}</div>
@@ -436,9 +438,10 @@ export function AppShell({ children }: { children: ReactNode }) {
               onClick={() => setBusinessOpen((value) => !value)}
               data-testid="button-business-selector"
             >
-              <BusinessBrandMark
+              <TenantLogo
                 businessName={activeBusiness.name}
-                identity={activeBusiness.brandIdentity}
+                logoUrl={resolveTenantLogoSource(activeBusiness.brandIdentity)}
+                tenantKey={activeBusiness.id}
               />
               <span>{activeBusiness.name}</span>
               <ChevronDown size={13} />
@@ -469,9 +472,10 @@ export function AppShell({ children }: { children: ReactNode }) {
                     }}
                   >
                     <span className="business-menu-name">
-                      <BusinessBrandMark
+                      <TenantLogo
                         businessName={item.name}
-                        identity={item.brandIdentity}
+                        logoUrl={resolveTenantLogoSource(item.brandIdentity)}
+                        tenantKey={item.id}
                       />
                       {item.name}
                     </span>
