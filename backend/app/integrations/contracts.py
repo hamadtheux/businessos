@@ -88,6 +88,15 @@ class NormalizedCampaignStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class ExternalMailMessage:
+    external_message_reference: str
+    external_thread_reference: str
+    sender: str
+    subject: str
+    snippet: str
+
+
+@dataclass(frozen=True, slots=True)
 class ExternalCalendarEvent:
     external_event_id: str
     external_calendar_reference: str
@@ -112,6 +121,16 @@ class IntegrationConnector(Protocol):
     async def normalize_webhooks(
         self, payload: Mapping[str, object]
     ) -> Sequence[NormalizedIntegrationEvent]: ...
+
+
+@runtime_checkable
+class MailReadConnector(IntegrationConnector, Protocol):
+    async def list_mail_messages(
+        self,
+        credentials: CredentialMaterial,
+        *,
+        limit: int,
+    ) -> Sequence[ExternalMailMessage]: ...
 
 
 @runtime_checkable

@@ -248,6 +248,71 @@ class IntegrationLifecycleServiceTests(unittest.IsolatedAsyncioTestCase):
                     data=ResourceSelectionRequest(resource_type="mailbox", external_reference="other-connection-resource"),
                 )
 
+    async def test_gmail_mail_read_requires_selected_mailbox_and_tenant_bound_credentials(self) -> None:
+        credential_store = InMemoryIntegrationCredentialStore()
+        reference = await credential_store.store(
+            business_id=BUSINESS_ID,
+            connector_type="gmail",
+            purpose="oauth_credentials",
+            material=CredentialMaterial(
+                values={"access_token": "server-only-token"}
+            ),
+        )
+
+        connection = _connection(credential_reference=reference)
+        connection.selected_resources = [
+            {
+                "resource_type": "mailbox",
+                "external_reference": "account-1",
+                "display_name": "Business mailbox",
+            }
+        ]
+
+        adapter = _FakeConnector()
+        adapter.list_mail_messages = AsyncMock(return_value=[])
+
+        with patch(
+            "app.services.integrations._authorized_connection",
+            new=AsyncMock(return_value=connection),
+        ):
+            result = await service.list_mail_messages(
+                _Session(),  # type: ignore[arg-type]
+                business_id=BUSINESS_ID,
+                connection_id=connection.id,
+                limit=5,
+                adapters=ConnectorAdapterRegistry({"gmail": adapter}),
+                credentials=credential_store,
+            )
+
+        self.assertEqual(result, [])
+        adapter.list_mail_messages.assert_awaited_once()
+        call = adapter.list_mail_messages.await_args
+        self.assertEqual(
+            call.args[0].values["access_token"],
+            "server-only-token",
+        )
+        self.assertEqual(call.kwargs["limit"], 5)
+
+        connection.selected_resources = []
+        adapter.list_mail_messages.reset_mock()
+
+        with patch(
+            "app.services.integrations._authorized_connection",
+            new=AsyncMock(return_value=connection),
+        ):
+            with self.assertRaises(IntegrationStateError):
+                await service.list_mail_messages(
+                    _Session(),  # type: ignore[arg-type]
+                    business_id=BUSINESS_ID,
+                    connection_id=connection.id,
+                    limit=5,
+                    adapters=ConnectorAdapterRegistry({"gmail": adapter}),
+                    credentials=credential_store,
+                )
+
+        adapter.list_mail_messages.assert_not_awaited()
+
+
     async def test_refresh_result_moves_connection_to_reauthentication_required(self) -> None:
         credential_store = InMemoryIntegrationCredentialStore()
         reference = await credential_store.store(

@@ -27,6 +27,7 @@ from app.db.session import get_db_session  # noqa: E402
 from app.exceptions.integration import (  # noqa: E402
     IntegrationProviderUnavailableError,
 )
+from app.integrations.contracts import ExternalMailMessage  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.integration import IntegrationConnection  # noqa: E402
 
@@ -259,6 +260,60 @@ class IntegrationsApiTests(unittest.IsolatedAsyncioTestCase):
             "permission_missing",
         )
         operation.assert_not_awaited()
+
+    async def test_gmail_messages_are_tenant_scoped_bounded_and_read_only(
+        self,
+    ) -> None:
+        connection_id = uuid4()
+
+        with patch(
+            "app.api.v1.integrations.service.list_mail_messages",
+            new=AsyncMock(
+                return_value=[
+                    ExternalMailMessage(
+                        external_message_reference="message-1",
+                        external_thread_reference="thread-1",
+                        sender="customer@example.com",
+                        subject="Order 1042",
+                        snippet="Customer asked about order 1042.",
+                    )
+                ]
+            ),
+        ) as operation:
+            response = await self.client.get(
+                self._url(
+                    f"connections/{connection_id}/mail/messages?limit=5"
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            [
+                {
+                    "external_message_reference": "message-1",
+                    "external_thread_reference": "thread-1",
+                    "sender": "customer@example.com",
+                    "subject": "Order 1042",
+                    "snippet": "Customer asked about order 1042.",
+                }
+            ],
+        )
+        operation.assert_awaited_once()
+        self.assertEqual(
+            operation.await_args.kwargs["business_id"],
+            BUSINESS_ID,
+        )
+        self.assertEqual(
+            operation.await_args.kwargs["connection_id"],
+            connection_id,
+        )
+        self.assertEqual(
+            operation.await_args.kwargs["limit"],
+            5,
+        )
+        self._private(response)
+
 
     async def test_member_cannot_trigger_connection_health_mutation(
         self,

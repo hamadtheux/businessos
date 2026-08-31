@@ -18,6 +18,7 @@ from app.integrations.contracts import (
     CredentialRefreshResult,
     ExternalCalendarEvent,
     ExternalIdentity,
+    ExternalMailMessage,
     ExternalResource,
     NormalizedAdPerformance,
     NormalizedCampaignStatus,
@@ -30,6 +31,7 @@ from app.integrations.registry import CONNECTOR_REGISTRY
 
 _MAX_PROVIDER_RESPONSE_BYTES = 1_048_576
 _GOOGLE_USERINFO = "https://openidconnect.googleapis.com/v1/userinfo"
+_GMAIL_ROOT = "https://gmail.googleapis.com/gmail/v1"
 _GOOGLE_CALENDAR = "https://www.googleapis.com/calendar/v3"
 _GOOGLE_ADS_ROOT = "https://googleads.googleapis.com"
 _META_ROOT = "https://graph.facebook.com"
@@ -404,6 +406,69 @@ class ConfiguredOAuthConnector:
         if len(events) != 1:
             raise IntegrationProviderUnavailableError("provider_response_invalid")
         return events[0]
+
+    async def list_mail_messages(
+        self,
+        credentials: CredentialMaterial,
+        *,
+        limit: int,
+    ) -> Sequence[ExternalMailMessage]:
+        if self.connector_type != "gmail":
+            raise IntegrationProviderUnavailableError("provider_unavailable")
+        if not 1 <= limit <= 20:
+            raise IntegrationProviderUnavailableError("provider_response_invalid")
+
+        headers = _bearer(_access_token(credentials))
+        value = await self._http.request_json(
+            "GET",
+            f"{_GMAIL_ROOT}/users/me/messages",
+            headers=headers,
+            params={"maxResults": str(limit)},
+        )
+
+        raw_messages = value.get("messages", [])
+        if not isinstance(raw_messages, list):
+            raise IntegrationProviderUnavailableError("provider_response_invalid")
+
+        result: list[ExternalMailMessage] = []
+        for item in raw_messages[:limit]:
+            if not isinstance(item, Mapping):
+                raise IntegrationProviderUnavailableError("provider_response_invalid")
+
+            message_reference = _required_string(item, "id")
+            listed_thread_reference = _optional_string(item, "threadId") or ""
+
+            detail = await self._http.request_json(
+                "GET",
+                f"{_GMAIL_ROOT}/users/me/messages/{quote(message_reference, safe='')}",
+                headers=headers,
+                params={
+                    "format": "metadata",
+                    "metadataHeaders": ["From", "Subject"],
+                },
+            )
+
+            returned_reference = _required_string(detail, "id")
+            if returned_reference != message_reference:
+                raise IntegrationProviderUnavailableError("provider_response_invalid")
+
+            thread_reference = (
+                _optional_string(detail, "threadId")
+                or listed_thread_reference
+                or message_reference
+            )
+
+            result.append(
+                ExternalMailMessage(
+                    external_message_reference=message_reference,
+                    external_thread_reference=thread_reference[:255],
+                    sender=_gmail_header(detail, "From")[:320],
+                    subject=_gmail_header(detail, "Subject")[:500],
+                    snippet=(_optional_string(detail, "snippet") or "")[:1_000],
+                )
+            )
+
+        return result
 
     async def list_calendar_events(
         self,
@@ -1059,6 +1124,34 @@ def _resources(value: Mapping[str, object], resource_type: str, *, name_key: str
             )
         )
     return result
+
+
+def _gmail_header(
+    message: Mapping[str, object],
+    name: str,
+) -> str:
+    payload = message.get("payload")
+    if not isinstance(payload, Mapping):
+        return ""
+
+    headers = payload.get("headers")
+    if not isinstance(headers, list):
+        return ""
+
+    target = name.casefold()
+    for item in headers[:100]:
+        if not isinstance(item, Mapping):
+            continue
+        header_name = item.get("name")
+        header_value = item.get("value")
+        if (
+            isinstance(header_name, str)
+            and header_name.casefold() == target
+            and isinstance(header_value, str)
+        ):
+            return header_value
+
+    return ""
 
 
 def _event_reference(payload: Mapping[str, object], serialized: str) -> str:
