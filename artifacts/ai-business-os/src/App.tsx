@@ -25,6 +25,11 @@ import { AuthProvider, useAuth } from "@/features/auth/auth-context";
 import { LoginPage, RegisterPage } from "@/features/auth/auth-pages";
 import { OnboardingPage } from "@/features/onboarding/onboarding-page";
 import {
+  PrivacyPolicyPage,
+  PublicHomePage,
+  TermsOfServicePage,
+} from "@/features/public/public-pages";
+import {
   businessFeatureRouteRedirect,
   isBusinessFeatureEnabled,
   type BusinessFeature,
@@ -36,6 +41,7 @@ import {
 } from "@/lib/industry-workspaces";
 import {
   isApplicationBootstrapping,
+  isPublicRoute,
   nextProtectedRoute,
 } from "@/services/app-routing";
 
@@ -78,22 +84,6 @@ const DailyReportPage = lazyNamed(() => import("@/features/reports/daily-report"
 const SchedulingPage = lazyNamed(() => import("@/features/scheduling/scheduling-page"), "SchedulingPage");
 const SettingsPage = lazyNamed(() => import("@/features/settings/settings-page"), "SettingsPage");
 const BillingPage = lazyNamed(() => import("@/features/billing/billing-page"), "BillingPage");
-
-function Home() {
-  const [, setLocation] = useLocation();
-
-  useEffect(() => {
-    setLocation("/dashboard");
-  }, [setLocation]);
-
-  return (
-    <div className="empty">
-      <ProductLogo className="product-logo-state" size="lg" />
-      <h3>Opening your command room</h3>
-      <p>Loading your business workspace…</p>
-    </div>
-  );
-}
 
 function NotFound() {
   return (
@@ -230,7 +220,9 @@ function AppRoutes() {
     <RoutedErrorBoundary>
       <Suspense fallback={<div className="empty"><RefreshCw className="spin" /><h3>Opening workspace</h3></div>}>
       <Switch>
-        <Route path="/" component={Home} />
+        <Route path="/" component={PublicHomePage} />
+        <Route path="/privacy" component={PrivacyPolicyPage} />
+        <Route path="/terms" component={TermsOfServicePage} />
         <Route path="/login" component={LoginPage} />
         <Route path="/register" component={RegisterPage} />
         <Route path="/onboarding" component={OnboardingPage} />
@@ -323,7 +315,7 @@ function RoutedApp() {
     error: businessesError,
     reloadBusinesses,
   } = useBusiness();
-  const publicRoute = location === "/login" || location === "/register";
+  const publicRoute = isPublicRoute(location);
   const bootstrapping = isApplicationBootstrapping(status, businessesLoading);
 
   useEffect(() => {
@@ -392,7 +384,7 @@ function RoutedApp() {
       </div>
     );
   }
-  return location === "/onboarding" ? (
+  return publicRoute || location === "/onboarding" ? (
     <AppRoutes />
   ) : (
     <AppShell>
