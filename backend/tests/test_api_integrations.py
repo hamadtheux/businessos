@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
@@ -27,7 +27,7 @@ from app.db.session import get_db_session  # noqa: E402
 from app.exceptions.integration import (  # noqa: E402
     IntegrationProviderUnavailableError,
 )
-from app.integrations.contracts import ExternalMailMessage, ExternalMailMessageContent  # noqa: E402
+from app.integrations.contracts import ExternalCalendarEvent, ExternalMailMessage, ExternalMailMessageContent  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.integration import IntegrationConnection  # noqa: E402
 
@@ -311,6 +311,67 @@ class IntegrationsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             operation.await_args.kwargs["limit"],
             5,
+        )
+        self._private(response)
+
+
+    async def test_calendar_events_are_tenant_scoped_bounded_and_read_only(
+        self,
+    ) -> None:
+        connection_id = uuid4()
+        starts_at = datetime(2026, 9, 1, 0, 0, tzinfo=UTC)
+        ends_at = starts_at + timedelta(days=30)
+
+        with patch(
+            "app.api.v1.integrations.service.list_calendar_events",
+            new=AsyncMock(
+                return_value=[
+                    ExternalCalendarEvent(
+                        external_event_id="event-1",
+                        external_calendar_reference="primary@example.com",
+                        title="Client meeting",
+                        starts_at=starts_at + timedelta(hours=2),
+                        ends_at=starts_at + timedelta(hours=3),
+                        status="confirmed",
+                        updated_at=starts_at,
+                    )
+                ]
+            ),
+        ) as operation:
+            response = await self.client.get(
+                self._url(
+                    f"connections/{connection_id}/calendar/events"
+                ),
+                params={
+                    "starts_at": starts_at.isoformat(),
+                    "ends_at": ends_at.isoformat(),
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()[0]["external_event_id"],
+            "event-1",
+        )
+        self.assertEqual(
+            response.json()[0]["external_calendar_reference"],
+            "primary@example.com",
+        )
+        self.assertEqual(
+            operation.await_args.kwargs["business_id"],
+            BUSINESS_ID,
+        )
+        self.assertEqual(
+            operation.await_args.kwargs["connection_id"],
+            connection_id,
+        )
+        self.assertEqual(
+            operation.await_args.kwargs["starts_at"],
+            starts_at,
+        )
+        self.assertEqual(
+            operation.await_args.kwargs["ends_at"],
+            ends_at,
         )
         self._private(response)
 

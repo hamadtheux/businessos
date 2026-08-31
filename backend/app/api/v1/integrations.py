@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Mapping
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -31,6 +32,7 @@ from app.schemas.integration import (
     AuthorizationStartResponse,
     ConnectorDefinitionResponse,
     EntityLinkCreate,
+    ExternalCalendarEventResponse,
     ExternalMailMessageContentResponse,
     ExternalMailMessageResponse,
     ExternalResourceResponse,
@@ -206,6 +208,30 @@ async def read_resources(
         response,
         service.list_resources(
             session, business_id=access.business.id, connection_id=connection_id
+        ),
+    )
+
+
+@router.get(
+    "/businesses/{business_id}/integrations/connections/{connection_id}/calendar/events",
+    response_model=list[ExternalCalendarEventResponse],
+)
+async def read_calendar_events(
+    connection_id: UUID,
+    access: BusinessAccessDependency,
+    response: Response,
+    session: SessionDependency,
+    starts_at: Annotated[datetime, Query()],
+    ends_at: Annotated[datetime, Query()],
+):
+    return await _read(
+        response,
+        service.list_calendar_events(
+            session,
+            business_id=access.business.id,
+            connection_id=connection_id,
+            starts_at=starts_at,
+            ends_at=ends_at,
         ),
     )
 

@@ -82,6 +82,17 @@ class ExternalResourceResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ExternalCalendarEventResponse(BaseModel):
+    external_event_id: SafeReference
+    external_calendar_reference: SafeReference
+    title: str = Field(max_length=200)
+    starts_at: AwareDatetime
+    ends_at: AwareDatetime
+    status: Literal["confirmed", "canceled"]
+    updated_at: AwareDatetime
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+
 class ExternalMailMessageResponse(BaseModel):
     external_message_reference: SafeReference
     external_thread_reference: SafeReference

@@ -19,6 +19,7 @@ from app.integrations.contracts import (  # noqa: E402
     AuthorizationRequest,
     ConnectionHealthResult,
     CredentialRefreshResult,
+    ExternalCalendarEvent,
     ExternalIdentity,
     ExternalMailMessageContent,
     ExternalResource,
@@ -312,6 +313,103 @@ class IntegrationLifecycleServiceTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         adapter.list_mail_messages.assert_not_awaited()
+
+
+    async def test_calendar_read_requires_selected_calendar_and_tenant_bound_credentials(self) -> None:
+        credential_store = InMemoryIntegrationCredentialStore()
+        reference = await credential_store.store(
+            business_id=BUSINESS_ID,
+            connector_type="google_calendar",
+            purpose="oauth_credentials",
+            material=CredentialMaterial(
+                values={"access_token": "server-only-token"}
+            ),
+        )
+
+        connection = _connection(
+            connector_type="google_calendar",
+            credential_reference=reference,
+        )
+        connection.selected_resources = [
+            {
+                "resource_type": "calendar",
+                "external_reference": "primary@example.com",
+                "display_name": "Primary Calendar",
+            }
+        ]
+
+        starts_at = datetime(2026, 9, 1, 0, 0, tzinfo=UTC)
+        ends_at = starts_at + timedelta(days=30)
+
+        expected = [
+            ExternalCalendarEvent(
+                external_event_id="event-1",
+                external_calendar_reference="primary@example.com",
+                title="Client meeting",
+                starts_at=starts_at + timedelta(hours=2),
+                ends_at=starts_at + timedelta(hours=3),
+                status="confirmed",
+                updated_at=starts_at,
+            )
+        ]
+
+        adapter = _FakeConnector()
+        adapter.connector_type = "google_calendar"
+        adapter.list_calendar_events = AsyncMock(
+            return_value=expected
+        )
+
+        with patch(
+            "app.services.integrations._authorized_connection",
+            new=AsyncMock(return_value=connection),
+        ):
+            result = await service.list_calendar_events(
+                _Session(),  # type: ignore[arg-type]
+                business_id=BUSINESS_ID,
+                connection_id=connection.id,
+                starts_at=starts_at,
+                ends_at=ends_at,
+                adapters=ConnectorAdapterRegistry(
+                    {"google_calendar": adapter}
+                ),
+                credentials=credential_store,
+            )
+
+        self.assertEqual(result, expected)
+
+        call = adapter.list_calendar_events.await_args
+        self.assertEqual(
+            call.args[0].values["access_token"],
+            "server-only-token",
+        )
+        self.assertEqual(
+            call.kwargs["calendar_reference"],
+            "primary@example.com",
+        )
+        self.assertEqual(call.kwargs["starts_at"], starts_at)
+        self.assertEqual(call.kwargs["ends_at"], ends_at)
+
+        connection.selected_resources = []
+        adapter.list_calendar_events.reset_mock()
+
+        with patch(
+            "app.services.integrations._authorized_connection",
+            new=AsyncMock(return_value=connection),
+        ):
+            with self.assertRaises(IntegrationStateError):
+                await service.list_calendar_events(
+                    _Session(),  # type: ignore[arg-type]
+                    business_id=BUSINESS_ID,
+                    connection_id=connection.id,
+                    starts_at=starts_at,
+                    ends_at=ends_at,
+                    adapters=ConnectorAdapterRegistry(
+                        {"google_calendar": adapter}
+                    ),
+                    credentials=credential_store,
+                )
+
+        adapter.list_calendar_events.assert_not_awaited()
 
 
     async def test_gmail_content_read_requires_selected_mailbox_and_tenant_bound_credentials(self) -> None:

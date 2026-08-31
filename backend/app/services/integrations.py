@@ -34,6 +34,7 @@ from app.integrations.adapters import ConnectorAdapterRegistry, connector_adapte
 from app.integrations.action_adapters import connector_action_adapters
 from app.integrations.contracts import (
     AuthorizationRequest,
+    ExternalCalendarEvent,
     ExternalMailMessage,
     ExternalMailMessageContent,
     ExternalResource,
@@ -641,6 +642,121 @@ async def check_health(
     if before != result.health:
         _record_health_change(session, connection, actor_user_id, before)
     return connection
+
+
+async def list_calendar_events(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    connection_id: UUID,
+    starts_at: datetime,
+    ends_at: datetime,
+    adapters: ConnectorAdapterRegistry = connector_adapters,
+    credentials: IntegrationCredentialStore = credential_store,
+) -> list[ExternalCalendarEvent]:
+    if (
+        starts_at.tzinfo is None
+        or starts_at.utcoffset() is None
+        or ends_at.tzinfo is None
+        or ends_at.utcoffset() is None
+    ):
+        raise IntegrationValidationError(
+            "calendar_read_window_invalid"
+        )
+
+    starts_at = starts_at.astimezone(UTC)
+    ends_at = ends_at.astimezone(UTC)
+
+    if (
+        ends_at <= starts_at
+        or ends_at - starts_at > timedelta(days=90)
+    ):
+        raise IntegrationValidationError(
+            "calendar_read_window_invalid"
+        )
+
+    connection = await _authorized_connection(
+        session,
+        business_id,
+        connection_id,
+    )
+
+    if connection.connector_type != "google_calendar":
+        raise IntegrationValidationError(
+            "calendar_connector_invalid"
+        )
+
+    selected = [
+        item
+        for item in connection.selected_resources
+        if item.get("resource_type") == "calendar"
+        and isinstance(item.get("external_reference"), str)
+        and item.get("external_reference")
+    ]
+
+    if len(selected) != 1:
+        raise IntegrationStateError(
+            "calendar_selection_required"
+        )
+
+    calendar_reference = str(
+        selected[0]["external_reference"]
+    )
+
+    material = await _provider_read_material(
+        session,
+        business_id=business_id,
+        connection=connection,
+        adapters=adapters,
+        credentials=credentials,
+    )
+
+    adapter = adapters.get("google_calendar")
+    read_events = getattr(
+        adapter,
+        "list_calendar_events",
+        None,
+    )
+
+    if not callable(read_events):
+        raise IntegrationProviderUnavailableError(
+            "provider_unavailable"
+        )
+
+    try:
+        events = list(
+            await read_events(
+                material,
+                calendar_reference=calendar_reference,
+                starts_at=starts_at,
+                ends_at=ends_at,
+            )
+        )
+    except (
+        IntegrationProviderUnavailableError,
+        IntegrationCredentialUnavailableError,
+    ):
+        raise
+    except Exception:
+        raise IntegrationProviderUnavailableError(
+            "provider_unavailable"
+        ) from None
+
+    if len(events) > 100:
+        raise IntegrationProviderUnavailableError(
+            "provider_response_invalid"
+        )
+
+    for event in events:
+        if (
+            event.external_calendar_reference
+            != calendar_reference
+        ):
+            raise IntegrationProviderUnavailableError(
+                "provider_response_invalid"
+            )
+
+    return events
 
 
 async def list_mail_messages(
