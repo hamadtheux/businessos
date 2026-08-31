@@ -57,7 +57,15 @@ test("resource selection sends only provider-validated identity fields", async (
     body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     return json({});
   });
-  await api.selectResource(businessA, "connection-id", { resource_type: "calendar", external_reference: "calendar-id" });
+  const providerResource = {
+    resource_type: "calendar",
+    external_reference: "calendar-id",
+    display_name: "Business calendar",
+    parent_reference: "account-id",
+    metadata: { timezone: "UTC" },
+  };
+
+  await api.selectResource(businessA, "connection-id", providerResource);
   assert.deepEqual(body, { resource_type: "calendar", external_reference: "calendar-id" });
   for (const forbidden of ["display_name", "metadata", "credential_reference", "access_token", "refresh_token"]) {
     assert.equal(forbidden in body, false, forbidden);

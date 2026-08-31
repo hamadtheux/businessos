@@ -114,7 +114,10 @@ export function createIntegrationsApi(client: ApiClient) {
       resource: Pick<ExternalIntegrationResource, "resource_type" | "external_reference">,
     ) => client.request<IntegrationConnection>(businessPath(businessId, `/connections/${encodeURIComponent(connectionId)}/resources/select`), {
       method: "POST",
-      json: resource,
+      json: {
+        resource_type: resource.resource_type,
+        external_reference: resource.external_reference,
+      },
     }),
     health: (businessId: string, connectionId: string) =>
       client.request<IntegrationConnection>(businessPath(businessId, `/connections/${encodeURIComponent(connectionId)}/health`), { method: "POST" }),
