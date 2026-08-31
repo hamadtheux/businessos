@@ -6,6 +6,7 @@ import os
 import unittest
 from datetime import UTC, datetime
 from types import MappingProxyType
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 from sqlalchemy import CheckConstraint, ForeignKeyConstraint, UniqueConstraint
@@ -13,6 +14,7 @@ from sqlalchemy import CheckConstraint, ForeignKeyConstraint, UniqueConstraint
 os.environ.setdefault("AIBOS_DATABASE_URL", "postgresql+asyncpg://database.invalid/test")
 os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 
+from app.core.config import settings  # noqa: E402
 from app.domain.integrations import (  # noqa: E402
     CANONICAL_CONNECTOR_TYPES,
     ExternalConnectorWritesDisabledError,
@@ -30,6 +32,7 @@ from app.integrations.contracts import (  # noqa: E402
     ExternalResource,
     NormalizedIntegrationEvent,
 )
+from app.integrations.oauth_adapters import ConfiguredOAuthConnector  # noqa: E402
 from app.integrations.registry import CONNECTOR_REGISTRY, list_connector_definitions  # noqa: E402
 from app.integrations.webhooks import MetaWebhookSignatureVerifier  # noqa: E402
 from app.models.integration import (  # noqa: E402
@@ -131,6 +134,41 @@ class IntegrationFoundationTests(unittest.TestCase):
         ):
             with self.subTest(url=unsafe):
                 self.assertFalse(_authorization_url_is_safe(unsafe, definition))
+
+
+class ConfiguredGoogleOAuthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_google_connector_does_not_incrementally_merge_cross_connector_scopes(self) -> None:
+        connector = ConfiguredOAuthConnector(
+            connector_type="gmail",
+            provider="google",
+            client_id="client-id",
+            client_secret="client-secret",
+            configuration=settings,
+        )
+        request = AuthorizationRequest(
+            state="state",
+            code_challenge="challenge",
+            redirect_uri="https://api.example.test/api/v1/integrations/oauth/callback",
+            scopes=(
+                "openid",
+                "email",
+                "https://www.googleapis.com/auth/gmail.readonly",
+            ),
+        )
+
+        authorization_url = await connector.build_authorization_url(request)
+        query = parse_qs(urlsplit(authorization_url).query)
+
+        self.assertEqual(query["access_type"], ["offline"])
+        self.assertEqual(query["prompt"], ["consent"])
+        self.assertNotIn("include_granted_scopes", query)
+        self.assertEqual(
+            query["scope"],
+            [
+                "openid email "
+                "https://www.googleapis.com/auth/gmail.readonly"
+            ],
+        )
 
 
 class IntegrationCredentialTests(unittest.IsolatedAsyncioTestCase):

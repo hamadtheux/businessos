@@ -122,7 +122,10 @@ class ConfiguredOAuthConnector:
         }
         if self._provider == "google":
             values.update(
-                {"access_type": "offline", "include_granted_scopes": "true", "prompt": "consent"}
+                {
+                    "access_type": "offline",
+                    "prompt": "consent",
+                }
             )
         return f"{endpoint}?{urlencode(values)}"
 
