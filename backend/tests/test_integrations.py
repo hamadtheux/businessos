@@ -257,6 +257,95 @@ class ConfiguredGmailReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(method == "GET" for method, _, _ in http.calls))
 
 
+class ConfiguredGmailContentReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_gmail_reads_one_explicit_message_content_with_get_only(self) -> None:
+        class GmailHttp:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, object]] = []
+
+            async def request_json(self, method: str, url: str, **kwargs):
+                self.calls.append((method, url, kwargs.get("params")))
+
+                if url.endswith("/gmail/v1/users/me/messages/message-1"):
+                    return {
+                        "id": "message-1",
+                        "threadId": "thread-1",
+                        "snippet": "Customer needs help with order 1042.",
+                        "payload": {
+                            "mimeType": "text/plain",
+                            "headers": [
+                                {
+                                    "name": "From",
+                                    "value": "customer@example.com",
+                                },
+                                {
+                                    "name": "Subject",
+                                    "value": "Order 1042",
+                                },
+                            ],
+                            "body": {
+                                "data": (
+                                    "SGVsbG8sCgpJIG5lZWQgaGVscCB3aXRoIG9yZGVyIDEwNDIu"
+                                ),
+                            },
+                        },
+                    }
+
+                raise AssertionError(f"Unexpected provider URL: {url}")
+
+        http = GmailHttp()
+        connector = ConfiguredOAuthConnector(
+            connector_type="gmail",
+            provider="google",
+            client_id="client-id",
+            client_secret="client-secret",
+            configuration=settings,
+            http=http,  # type: ignore[arg-type]
+        )
+
+        message = await connector.read_mail_message(
+            CredentialMaterial(
+                values={"access_token": "server-only-token"}
+            ),
+            message_reference="message-1",
+        )
+
+        self.assertEqual(
+            message.external_message_reference,
+            "message-1",
+        )
+        self.assertEqual(
+            message.external_thread_reference,
+            "thread-1",
+        )
+        self.assertEqual(
+            message.sender,
+            "customer@example.com",
+        )
+        self.assertEqual(
+            message.subject,
+            "Order 1042",
+        )
+        self.assertEqual(
+            message.body_text,
+            "Hello,\n\nI need help with order 1042.",
+        )
+
+        self.assertEqual(
+            http.calls,
+            [
+                (
+                    "GET",
+                    "https://gmail.googleapis.com/gmail/v1/users/me/messages/message-1",
+                    {"format": "full"},
+                )
+            ],
+        )
+        self.assertTrue(
+            all(method == "GET" for method, _, _ in http.calls)
+        )
+
+
 class IntegrationCredentialTests(unittest.IsolatedAsyncioTestCase):
     async def test_memory_store_is_bounded_tenant_scoped_and_revocable(self) -> None:
         store = InMemoryIntegrationCredentialStore()

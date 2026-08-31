@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from datetime import UTC, date, datetime, timedelta
@@ -19,6 +20,7 @@ from app.integrations.contracts import (
     ExternalCalendarEvent,
     ExternalIdentity,
     ExternalMailMessage,
+    ExternalMailMessageContent,
     ExternalResource,
     NormalizedAdPerformance,
     NormalizedCampaignStatus,
@@ -469,6 +471,42 @@ class ConfiguredOAuthConnector:
             )
 
         return result
+
+    async def read_mail_message(
+        self,
+        credentials: CredentialMaterial,
+        *,
+        message_reference: str,
+    ) -> ExternalMailMessageContent:
+        if self.connector_type != "gmail":
+            raise IntegrationProviderUnavailableError("provider_unavailable")
+        if not 1 <= len(message_reference) <= 255:
+            raise IntegrationProviderUnavailableError("provider_response_invalid")
+
+        detail = await self._http.request_json(
+            "GET",
+            f"{_GMAIL_ROOT}/users/me/messages/{quote(message_reference, safe='')}",
+            headers=_bearer(_access_token(credentials)),
+            params={"format": "full"},
+        )
+
+        returned_reference = _required_string(detail, "id")
+        if returned_reference != message_reference:
+            raise IntegrationProviderUnavailableError("provider_response_invalid")
+
+        thread_reference = (
+            _optional_string(detail, "threadId")
+            or message_reference
+        )
+
+        return ExternalMailMessageContent(
+            external_message_reference=message_reference,
+            external_thread_reference=thread_reference[:255],
+            sender=_gmail_header(detail, "From")[:320],
+            subject=_gmail_header(detail, "Subject")[:500],
+            snippet=(_optional_string(detail, "snippet") or "")[:1_000],
+            body_text=_gmail_plain_text(detail)[:20_000],
+        )
 
     async def list_calendar_events(
         self,
@@ -1124,6 +1162,59 @@ def _resources(value: Mapping[str, object], resource_type: str, *, name_key: str
             )
         )
     return result
+
+
+def _gmail_plain_text(
+    message: Mapping[str, object],
+) -> str:
+    payload = message.get("payload")
+    if not isinstance(payload, Mapping):
+        return ""
+    return _gmail_plain_text_part(payload, depth=0)
+
+
+def _gmail_plain_text_part(
+    part: Mapping[str, object],
+    *,
+    depth: int,
+) -> str:
+    if depth > 12:
+        raise IntegrationProviderUnavailableError("provider_response_invalid")
+
+    mime_type = part.get("mimeType")
+    if mime_type == "text/plain":
+        body = part.get("body")
+        if not isinstance(body, Mapping):
+            return ""
+        data = body.get("data")
+        if not isinstance(data, str) or not data:
+            return ""
+        if len(data) > 100_000:
+            raise IntegrationProviderUnavailableError("provider_response_invalid")
+        try:
+            padded = data + "=" * (-len(data) % 4)
+            decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
+            return decoded.decode("utf-8", errors="replace")
+        except (ValueError, UnicodeEncodeError):
+            raise IntegrationProviderUnavailableError(
+                "provider_response_invalid"
+            ) from None
+
+    parts = part.get("parts")
+    if not isinstance(parts, list):
+        return ""
+
+    values: list[str] = []
+    for child in parts[:100]:
+        if not isinstance(child, Mapping):
+            continue
+        value = _gmail_plain_text_part(child, depth=depth + 1)
+        if value:
+            values.append(value)
+        if sum(len(item) for item in values) >= 20_000:
+            break
+
+    return "\n\n".join(values)[:20_000]
 
 
 def _gmail_header(

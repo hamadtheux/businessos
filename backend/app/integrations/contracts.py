@@ -97,6 +97,16 @@ class ExternalMailMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class ExternalMailMessageContent:
+    external_message_reference: str
+    external_thread_reference: str
+    sender: str
+    subject: str
+    snippet: str
+    body_text: str
+
+
+@dataclass(frozen=True, slots=True)
 class ExternalCalendarEvent:
     external_event_id: str
     external_calendar_reference: str
@@ -131,6 +141,13 @@ class MailReadConnector(IntegrationConnector, Protocol):
         *,
         limit: int,
     ) -> Sequence[ExternalMailMessage]: ...
+
+    async def read_mail_message(
+        self,
+        credentials: CredentialMaterial,
+        *,
+        message_reference: str,
+    ) -> ExternalMailMessageContent: ...
 
 
 @runtime_checkable

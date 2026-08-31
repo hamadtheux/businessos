@@ -31,6 +31,7 @@ from app.schemas.integration import (
     AuthorizationStartResponse,
     ConnectorDefinitionResponse,
     EntityLinkCreate,
+    ExternalMailMessageContentResponse,
     ExternalMailMessageResponse,
     ExternalResourceResponse,
     IntegrationConnectionResponse,
@@ -227,6 +228,28 @@ async def read_mail_messages(
             business_id=access.business.id,
             connection_id=connection_id,
             limit=limit,
+        ),
+    )
+
+
+@router.get(
+    "/businesses/{business_id}/integrations/connections/{connection_id}/mail/messages/{message_reference}",
+    response_model=ExternalMailMessageContentResponse,
+)
+async def read_mail_message(
+    connection_id: UUID,
+    message_reference: str,
+    access: BusinessAccessDependency,
+    response: Response,
+    session: SessionDependency,
+):
+    return await _read(
+        response,
+        service.read_mail_message(
+            session,
+            business_id=access.business.id,
+            connection_id=connection_id,
+            message_reference=message_reference,
         ),
     )
 

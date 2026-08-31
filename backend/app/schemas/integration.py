@@ -91,6 +91,16 @@ class ExternalMailMessageResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="forbid")
 
 
+class ExternalMailMessageContentResponse(BaseModel):
+    external_message_reference: SafeReference
+    external_thread_reference: SafeReference
+    sender: str = Field(max_length=320)
+    subject: str = Field(max_length=500)
+    snippet: str = Field(max_length=1000)
+    body_text: str = Field(max_length=20000)
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+
 class ResourceSelectionRequest(BaseModel):
     resource_type: str = Field(pattern=r"^[a-z][a-z0-9_]{0,47}$")
     external_reference: SafeReference

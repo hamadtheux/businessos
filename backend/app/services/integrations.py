@@ -35,6 +35,7 @@ from app.integrations.action_adapters import connector_action_adapters
 from app.integrations.contracts import (
     AuthorizationRequest,
     ExternalMailMessage,
+    ExternalMailMessageContent,
     ExternalResource,
     NormalizedAdPerformance,
     NormalizedIntegrationEvent,
@@ -616,6 +617,75 @@ async def list_mail_messages(
         )
 
     return messages
+
+
+async def read_mail_message(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    connection_id: UUID,
+    message_reference: str,
+    adapters: ConnectorAdapterRegistry = connector_adapters,
+    credentials: IntegrationCredentialStore = credential_store,
+) -> ExternalMailMessageContent:
+    if not 1 <= len(message_reference) <= 255:
+        raise IntegrationValidationError("mail_message_reference_invalid")
+
+    connection = await _authorized_connection(
+        session,
+        business_id,
+        connection_id,
+    )
+
+    if connection.connector_type != "gmail":
+        raise IntegrationValidationError("mail_connector_invalid")
+
+    mailbox_selected = any(
+        item.get("resource_type") == "mailbox"
+        and item.get("external_reference")
+        == connection.external_account_reference
+        for item in connection.selected_resources
+    )
+
+    if not mailbox_selected:
+        raise IntegrationStateError("mailbox_selection_required")
+
+    material = await credentials.retrieve(
+        _credential_reference(connection),
+        business_id=business_id,
+        connector_type="gmail",
+        purpose="oauth_credentials",
+    )
+
+    adapter = adapters.get("gmail")
+    read_mail = getattr(adapter, "read_mail_message", None)
+
+    if not callable(read_mail):
+        raise IntegrationProviderUnavailableError(
+            "provider_unavailable"
+        )
+
+    try:
+        message = await read_mail(
+            material,
+            message_reference=message_reference,
+        )
+    except (
+        IntegrationProviderUnavailableError,
+        IntegrationCredentialUnavailableError,
+    ):
+        raise
+    except Exception:
+        raise IntegrationProviderUnavailableError(
+            "provider_unavailable"
+        ) from None
+
+    if message.external_message_reference != message_reference:
+        raise IntegrationProviderUnavailableError(
+            "provider_response_invalid"
+        )
+
+    return message
 
 
 async def disconnect(

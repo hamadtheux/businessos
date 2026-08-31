@@ -27,7 +27,7 @@ from app.db.session import get_db_session  # noqa: E402
 from app.exceptions.integration import (  # noqa: E402
     IntegrationProviderUnavailableError,
 )
-from app.integrations.contracts import ExternalMailMessage  # noqa: E402
+from app.integrations.contracts import ExternalMailMessage, ExternalMailMessageContent  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.integration import IntegrationConnection  # noqa: E402
 
@@ -311,6 +311,50 @@ class IntegrationsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             operation.await_args.kwargs["limit"],
             5,
+        )
+        self._private(response)
+
+
+    async def test_selected_gmail_message_content_is_tenant_scoped_and_read_only(
+        self,
+    ) -> None:
+        connection_id = uuid4()
+
+        with patch(
+            "app.api.v1.integrations.service.read_mail_message",
+            new=AsyncMock(
+                return_value=ExternalMailMessageContent(
+                    external_message_reference="message-1",
+                    external_thread_reference="thread-1",
+                    sender="customer@example.com",
+                    subject="Order 1042",
+                    snippet="Customer needs help with order 1042.",
+                    body_text="Hello,\n\nI need help with order 1042.",
+                )
+            ),
+        ) as operation:
+            response = await self.client.get(
+                self._url(
+                    f"connections/{connection_id}/mail/messages/message-1"
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["body_text"],
+            "Hello,\n\nI need help with order 1042.",
+        )
+        self.assertEqual(
+            operation.await_args.kwargs["business_id"],
+            BUSINESS_ID,
+        )
+        self.assertEqual(
+            operation.await_args.kwargs["connection_id"],
+            connection_id,
+        )
+        self.assertEqual(
+            operation.await_args.kwargs["message_reference"],
+            "message-1",
         )
         self._private(response)
 
