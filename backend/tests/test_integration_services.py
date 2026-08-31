@@ -116,6 +116,86 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
                 adapters=adapters, credentials=credential_store, configuration=configuration,
             )
 
+    async def test_callback_accepts_google_canonical_identity_scope_alias(self) -> None:
+        class GoogleCanonicalScopeConnector(_FakeConnector):
+            async def exchange_authorization_code(
+                self,
+                *,
+                code: str,
+                code_verifier: str,
+                redirect_uri: str,
+            ) -> AuthorizationExchange:
+                return AuthorizationExchange(
+                    credentials=CredentialMaterial(
+                        values={
+                            "access_token": "server-only",
+                            "refresh_token": "server-only-refresh",
+                        }
+                    ),
+                    granted_scopes=(
+                        "openid",
+                        "https://www.googleapis.com/auth/userinfo.email",
+                        "https://www.googleapis.com/auth/gmail.readonly",
+                    ),
+                )
+
+        adapter = GoogleCanonicalScopeConnector()
+        adapters = ConnectorAdapterRegistry({"gmail": adapter})
+        credential_store = InMemoryIntegrationCredentialStore()
+
+        raw_state = "google-canonical-scope-state"
+        verifier_reference = await credential_store.store(
+            business_id=BUSINESS_ID,
+            connector_type="gmail",
+            purpose="oauth_pkce",
+            material=CredentialMaterial(
+                values={"code_verifier": "server-verifier"}
+            ),
+        )
+
+        oauth_state = IntegrationOAuthState(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            connector_type="gmail",
+            user_id=USER_ID,
+            state_hash=hashlib.sha256(raw_state.encode()).hexdigest(),
+            pkce_verifier_reference=verifier_reference,
+            redirect_target="/integrations",
+            expires_at=NOW + timedelta(minutes=5),
+            consumed_at=None,
+            created_at=NOW,
+        )
+
+        connection = _connection(
+            status="pending",
+            authentication_state="authorization_pending",
+            health="not_checked",
+        )
+        session = _Session([oauth_state, connection])
+
+        configuration = settings.model_copy(
+            update={
+                "integration_oauth_callback_url":
+                    "https://api.example.test/api/v1/integrations/oauth/callback",
+            }
+        )
+
+        with patch("app.services.integrations.datetime", wraps=datetime) as clock:
+            clock.now.return_value = NOW
+            result = await service.complete_authorization(
+                session,  # type: ignore[arg-type]
+                connector_type=None,
+                state=raw_state,
+                code="google-one-use-code",
+                adapters=adapters,
+                credentials=credential_store,
+                configuration=configuration,
+            )
+
+        self.assertEqual(result.status, "connected")
+        self.assertEqual(connection.status, "connected")
+        self.assertEqual(connection.authentication_state, "authorized")
+
     async def test_callback_rejects_expired_and_wrong_connector_state(self) -> None:
         raw_state = "state"
         expired = IntegrationOAuthState(

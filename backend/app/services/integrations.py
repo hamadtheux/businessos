@@ -357,8 +357,17 @@ async def complete_authorization(
     except Exception:
         raise IntegrationProviderUnavailableError("provider_unavailable") from None
 
-    granted = tuple(dict.fromkeys(exchange.granted_scopes))
-    if not granted or len(granted) > 30 or not set(granted).issubset(set(definition.oauth_scopes)):
+    granted = tuple(
+        dict.fromkeys(
+            _normalize_oauth_scope(scope)
+            for scope in exchange.granted_scopes
+        )
+    )
+    if (
+        not granted
+        or len(granted) > 30
+        or not set(granted).issubset(set(definition.oauth_scopes))
+    ):
         raise IntegrationStateError("granted_scopes_invalid")
     _validate_identity(identity.external_account_reference, identity.display_name)
     credential_reference = await credentials.store(
@@ -1413,6 +1422,14 @@ def _validate_resource(resource: ExternalResource, definition: ConnectorDefiniti
         ))
     ):
         raise IntegrationProviderUnavailableError("provider_response_invalid")
+
+
+def _normalize_oauth_scope(value: str) -> str:
+    """Normalize provider aliases into the canonical scope names we request."""
+    aliases = {
+        "https://www.googleapis.com/auth/userinfo.email": "email",
+    }
+    return aliases.get(value, value)
 
 
 def _authorization_url_is_safe(value: str, definition: ConnectorDefinition) -> bool:
