@@ -2,25 +2,237 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1"
+    />
+
     <title>9D Brain — AI Business Operating System</title>
+
     <meta name="application-name" content="9D Brain" />
-    <meta name="description" content="One AI team for your whole business." />
+    <meta
+      name="description"
+      content="9D Brain is an AI Business Operating System that helps businesses connect services, manage operations, customers, marketing, workflows and analytics, and use AI-assisted recommendations and governed actions from one workspace."
+    />
     <meta name="robots" content="index, follow" />
-    <meta property="og:title" content="9D Brain — AI Business Operating System" />
-    <meta property="og:description" content="One AI team for your whole business." />
+
+    <link rel="canonical" href="https://9dbrain.com/" />
+
+    <meta
+      property="og:title"
+      content="9D Brain — AI Business Operating System"
+    />
+    <meta
+      property="og:description"
+      content="Connect your business services, operations, customer workflows, marketing and analytics with an AI-assisted business operating system."
+    />
     <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://9dbrain.com/" />
+
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="9D Brain — AI Business Operating System" />
-    <meta name="twitter:description" content="One AI team for your whole business." />
-    <link rel="icon" type="image/png" href="/brand/9d-brain-logo-mark.png" />
-    <link rel="apple-touch-icon" href="/brand/9d-brain-logo-mark.png" />
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <meta
+      name="twitter:title"
+      content="9D Brain — AI Business Operating System"
+    />
+    <meta
+      name="twitter:description"
+      content="An AI Business Operating System for connected operations, workflows, marketing, analytics and governed AI-assisted actions."
+    />
+
+    <link
+      rel="icon"
+      type="image/png"
+      href="/brand/9d-brain-logo-mark.png"
+    />
+    <link
+      rel="apple-touch-icon"
+      href="/brand/9d-brain-logo-mark.png"
+    />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+
+    <style>
+      #initial-public-home {
+        min-height: 100vh;
+        box-sizing: border-box;
+        background:
+          radial-gradient(
+            circle at top left,
+            rgba(29, 134, 58, 0.12),
+            transparent 36%
+          ),
+          #f7faf8;
+        color: #102217;
+        font-family:
+          Inter,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+      }
+
+      #initial-public-home * {
+        box-sizing: border-box;
+      }
+
+      #initial-public-home header {
+        border-bottom: 1px solid rgba(16, 34, 23, 0.08);
+        background: rgba(247, 250, 248, 0.92);
+      }
+
+      #initial-public-home .initial-nav {
+        width: min(1120px, calc(100% - 40px));
+        min-height: 72px;
+        margin: 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+      }
+
+      #initial-public-home .initial-brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: #102217;
+        text-decoration: none;
+        font-weight: 800;
+      }
+
+      #initial-public-home .initial-brand img {
+        width: 36px;
+        height: 36px;
+        object-fit: contain;
+      }
+
+      #initial-public-home nav {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        flex-wrap: wrap;
+      }
+
+      #initial-public-home nav a {
+        color: #405247;
+        text-decoration: none;
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      #initial-public-home main {
+        width: min(1120px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 96px 0;
+      }
+
+      #initial-public-home .initial-eyebrow {
+        color: #176b31;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      #initial-public-home h1 {
+        max-width: 900px;
+        margin: 20px 0 0;
+        font-size: clamp(46px, 7vw, 82px);
+        line-height: 0.98;
+        letter-spacing: -0.055em;
+      }
+
+      #initial-public-home p {
+        max-width: 760px;
+        margin: 28px 0 0;
+        color: #526258;
+        font-size: clamp(17px, 2vw, 21px);
+        line-height: 1.65;
+      }
+
+      #initial-public-home .initial-actions {
+        display: flex;
+        gap: 12px;
+        margin-top: 32px;
+        flex-wrap: wrap;
+      }
+
+      #initial-public-home .initial-primary,
+      #initial-public-home .initial-secondary {
+        min-height: 44px;
+        padding: 0 18px;
+        border-radius: 12px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        text-decoration: none;
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      #initial-public-home .initial-primary {
+        background: #1d863a;
+        color: #ffffff;
+      }
+
+      #initial-public-home .initial-secondary {
+        background: #ffffff;
+        border: 1px solid rgba(16, 34, 23, 0.12);
+        color: #17301f;
+      }
+    </style>
   </head>
-  <body>
-    <div id="root"></div>
+
+  <body style="margin: 0">
+    <div id="root">
+      <div id="initial-public-home">
+        <header>
+          <div class="initial-nav">
+            <a class="initial-brand" href="/">
+              <img
+                src="/brand/9d-brain-logo-mark.png"
+                alt="9D Brain logo"
+              />
+              <span>9D Brain</span>
+            </a>
+
+            <nav aria-label="Public navigation">
+              <a href="/privacy">Privacy Policy</a>
+              <a href="/terms">Terms of Service</a>
+              <a href="/login">Sign in</a>
+            </nav>
+          </div>
+        </header>
+
+        <main>
+          <div class="initial-eyebrow">AI Business Operating System</div>
+
+          <h1>One intelligent system to help run your business.</h1>
+
+          <p>
+            9D Brain is an AI Business Operating System that helps businesses
+            connect authorized third-party services, manage operations,
+            customers, marketing, workflows and analytics, and use AI-assisted
+            recommendations and governed actions from one workspace.
+          </p>
+
+          <p>
+            Google integrations are connected only after a user explicitly
+            authorizes access to the Google account and permissions required
+            for the selected business features.
+          </p>
+
+          <div class="initial-actions">
+            <a class="initial-primary" href="/register">Create account</a>
+            <a class="initial-secondary" href="/privacy">Privacy Policy</a>
+            <a class="initial-secondary" href="/terms">Terms of Service</a>
+          </div>
+        </main>
+      </div>
+    </div>
+
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
