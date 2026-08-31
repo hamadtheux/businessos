@@ -40,7 +40,11 @@ from app.integrations.contracts import (
     NormalizedAdPerformance,
     NormalizedIntegrationEvent,
 )
-from app.integrations.credentials import IntegrationCredentialStore, credential_store
+from app.integrations.credentials import (
+    CredentialMaterial,
+    IntegrationCredentialStore,
+    credential_store,
+)
 from app.integrations.registry import ConnectorDefinition, list_connector_definitions, require_connector
 from app.integrations.webhooks import WebhookSignatureVerifier
 from app.models.appointment import Appointment
@@ -430,6 +434,90 @@ async def complete_authorization(
     )
 
 
+def _credential_expires_soon(
+    material: CredentialMaterial,
+    *,
+    skew_seconds: int = 60,
+) -> bool:
+    value = material.values.get("expires_at")
+
+    # Some providers do not return an expiry. In that case we
+    # preserve the existing credential rather than refreshing
+    # unnecessarily.
+    if value is None:
+        return False
+
+    if not isinstance(value, str) or not value:
+        return True
+
+    try:
+        expires_at = datetime.fromisoformat(value)
+    except ValueError:
+        return True
+
+    if (
+        expires_at.tzinfo is None
+        or expires_at.utcoffset() is None
+    ):
+        return True
+
+    return expires_at.astimezone(UTC) <= (
+        datetime.now(UTC) + timedelta(seconds=skew_seconds)
+    )
+
+
+async def _provider_read_material(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    connection: IntegrationConnection,
+    adapters: ConnectorAdapterRegistry,
+    credentials: IntegrationCredentialStore,
+) -> CredentialMaterial:
+    reference = _credential_reference(connection)
+
+    material = await credentials.retrieve(
+        reference,
+        business_id=business_id,
+        connector_type=connection.connector_type,
+        purpose="oauth_credentials",
+    )
+
+    if not _credential_expires_soon(material):
+        return material
+
+    refreshed = await refresh_connection_credentials(
+        session,
+        business_id=business_id,
+        connection_id=connection.id,
+        adapters=adapters,
+        credentials=credentials,
+    )
+
+    if (
+        refreshed.status != "connected"
+        or refreshed.authentication_state != "authorized"
+        or not refreshed.credential_reference
+    ):
+        if refreshed.status in {"reauth_required", "revoked"}:
+            raise IntegrationStateError(
+                "connection_not_authorized"
+            )
+
+        raise IntegrationProviderUnavailableError(
+            "provider_unavailable"
+        )
+
+    # rotate() preserves the opaque reference, so retrieve the
+    # freshly rotated material using the exact tenant binding.
+    return await credentials.retrieve(
+        refreshed.credential_reference,
+        business_id=business_id,
+        connector_type=refreshed.connector_type,
+        purpose="oauth_credentials",
+    )
+
+
 async def list_resources(
     session: AsyncSession,
     *,
@@ -439,11 +527,12 @@ async def list_resources(
     credentials: IntegrationCredentialStore = credential_store,
 ) -> list[ExternalResource]:
     connection = await _authorized_connection(session, business_id, connection_id)
-    material = await credentials.retrieve(
-        _credential_reference(connection),
+    material = await _provider_read_material(
+        session,
         business_id=business_id,
-        connector_type=connection.connector_type,
-        purpose="oauth_credentials",
+        connection=connection,
+        adapters=adapters,
+        credentials=credentials,
     )
     try:
         resources = list(await adapters.get(connection.connector_type).list_resources(material))
@@ -520,11 +609,12 @@ async def check_health(
     credentials: IntegrationCredentialStore = credential_store,
 ) -> IntegrationConnection:
     connection = await _authorized_connection(session, business_id, connection_id, for_update=True)
-    material = await credentials.retrieve(
-        _credential_reference(connection),
+    material = await _provider_read_material(
+        session,
         business_id=business_id,
-        connector_type=connection.connector_type,
-        purpose="oauth_credentials",
+        connection=connection,
+        adapters=adapters,
+        credentials=credentials,
     )
     try:
         result = await adapters.get(connection.connector_type).health_check(material)
@@ -582,11 +672,12 @@ async def list_mail_messages(
     if not mailbox_selected:
         raise IntegrationStateError("mailbox_selection_required")
 
-    material = await credentials.retrieve(
-        _credential_reference(connection),
+    material = await _provider_read_material(
+        session,
         business_id=business_id,
-        connector_type="gmail",
-        purpose="oauth_credentials",
+        connection=connection,
+        adapters=adapters,
+        credentials=credentials,
     )
 
     adapter = adapters.get("gmail")
@@ -650,11 +741,12 @@ async def read_mail_message(
     if not mailbox_selected:
         raise IntegrationStateError("mailbox_selection_required")
 
-    material = await credentials.retrieve(
-        _credential_reference(connection),
+    material = await _provider_read_material(
+        session,
         business_id=business_id,
-        connector_type="gmail",
-        purpose="oauth_credentials",
+        connection=connection,
+        adapters=adapters,
+        credentials=credentials,
     )
 
     adapter = adapters.get("gmail")
