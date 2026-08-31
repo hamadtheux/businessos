@@ -66,6 +66,18 @@ export type ExternalIntegrationResource = SelectedIntegrationResource & {
   metadata: Record<string, string> | null;
 };
 
+export type ExternalMailMessage = {
+  external_message_reference: string;
+  external_thread_reference: string;
+  sender: string;
+  subject: string;
+  snippet: string;
+};
+
+export type ExternalMailMessageContent = ExternalMailMessage & {
+  body_text: string;
+};
+
 export type IntegrationEvent = {
   id: string;
   business_id: string;
@@ -108,6 +120,31 @@ export function createIntegrationsApi(client: ApiClient) {
       }),
     resources: (businessId: string, connectionId: string, signal?: AbortSignal) =>
       client.request<ExternalIntegrationResource[]>(businessPath(businessId, `/connections/${encodeURIComponent(connectionId)}/resources`), { signal }),
+    mailMessages: (
+      businessId: string,
+      connectionId: string,
+      signal?: AbortSignal,
+    ) =>
+      client.request<ExternalMailMessage[]>(
+        businessPath(
+          businessId,
+          `/connections/${encodeURIComponent(connectionId)}/mail/messages?limit=5`,
+        ),
+        { signal },
+      ),
+    mailMessage: (
+      businessId: string,
+      connectionId: string,
+      messageReference: string,
+      signal?: AbortSignal,
+    ) =>
+      client.request<ExternalMailMessageContent>(
+        businessPath(
+          businessId,
+          `/connections/${encodeURIComponent(connectionId)}/mail/messages/${encodeURIComponent(messageReference)}`,
+        ),
+        { signal },
+      ),
     selectResource: (
       businessId: string,
       connectionId: string,

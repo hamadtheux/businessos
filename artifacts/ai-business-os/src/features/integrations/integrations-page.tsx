@@ -33,6 +33,7 @@ import {
   integrationsApi,
   type ConnectorDefinition,
   type ExternalIntegrationResource,
+  type ExternalMailMessage,
   type IntegrationConnection,
   type IntegrationConnectorType,
 } from "@/services/integrations";
@@ -91,6 +92,7 @@ export function IntegrationsPage() {
   const [disconnectTarget, setDisconnectTarget] =
     useState<IntegrationConnection | null>(null);
   const [resourceKey, setResourceKey] = useState("");
+  const [selectedMailReference, setSelectedMailReference] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -98,6 +100,7 @@ export function IntegrationsPage() {
     setConnectTarget(null);
     setDisconnectTarget(null);
     setResourceKey("");
+    setSelectedMailReference("");
     setError("");
   }, [activeBusinessId]);
 
@@ -164,6 +167,62 @@ export function IntegrationsPage() {
     ),
     retry: false,
   });
+  const gmailMailboxSelected = Boolean(
+    selectedConnection?.connector_type === "gmail" &&
+      selectedConnection.selected_resources.some(
+        (item) => item.resource_type === "mailbox",
+      ),
+  );
+
+  const mailMessages = useQuery({
+    queryKey: [
+      "integrations",
+      activeBusinessId,
+      "mail-messages",
+      selectedConnection?.id,
+    ],
+    queryFn: ({ signal }) =>
+      integrationsApi.mailMessages(
+        activeBusinessId,
+        selectedConnection!.id,
+        signal,
+      ),
+    enabled: Boolean(
+      activeBusinessId &&
+        selectedConnection?.id &&
+        selectedConnection.connector_type === "gmail" &&
+        canReadProvider &&
+        gmailMailboxSelected,
+    ),
+    retry: false,
+  });
+
+  const selectedMail = useQuery({
+    queryKey: [
+      "integrations",
+      activeBusinessId,
+      "mail-message",
+      selectedConnection?.id,
+      selectedMailReference,
+    ],
+    queryFn: ({ signal }) =>
+      integrationsApi.mailMessage(
+        activeBusinessId,
+        selectedConnection!.id,
+        selectedMailReference,
+        signal,
+      ),
+    enabled: Boolean(
+      activeBusinessId &&
+        selectedConnection?.id &&
+        selectedConnection.connector_type === "gmail" &&
+        canReadProvider &&
+        gmailMailboxSelected &&
+        selectedMailReference,
+    ),
+    retry: false,
+  });
+
   const events = useQuery({
     queryKey: [
       "integrations",
@@ -439,6 +498,7 @@ export function IntegrationsPage() {
           }
           onClose={() => {
             setSelectedType(null);
+            setSelectedMailReference("");
             setError("");
           }}
         >
@@ -564,6 +624,119 @@ export function IntegrationsPage() {
               )}
             </Card>
           )}
+          {selectedConnection.connector_type === "gmail" &&
+            canReadProvider &&
+            gmailMailboxSelected && (
+              <Card style={{ marginTop: 14 }}>
+                <SectionTitle
+                  title="Recent Gmail messages"
+                  action={<Badge tone="success">Live Gmail data</Badge>}
+                />
+
+                {mailMessages.isLoading ? (
+                  <p className="subtle">
+                    Reading recent messages from Gmail…
+                  </p>
+                ) : mailMessages.error ? (
+                  <div className="ai-banner">
+                    <AlertCircle />
+                    Gmail messages could not be loaded. Your connection has not
+                    been changed.
+                  </div>
+                ) : mailMessages.data?.length ? (
+                  <>
+                    {mailMessages.data.map(
+                      (message: ExternalMailMessage) => (
+                        <div
+                          className="list-row"
+                          key={message.external_message_reference}
+                        >
+                          <Mail />
+                          <div className="row-main">
+                            <strong>
+                              {message.subject || "No subject"}
+                            </strong>
+                            <div className="row-copy">
+                              {message.sender || "Unknown sender"}
+                            </div>
+                            {message.snippet && (
+                              <div className="row-copy">
+                                {message.snippet}
+                              </div>
+                            )}
+                          </div>
+                          <Button
+                            className="btn-sm"
+                            disabled={
+                              selectedMail.isFetching &&
+                              selectedMailReference ===
+                                message.external_message_reference
+                            }
+                            onClick={() =>
+                              setSelectedMailReference(
+                                message.external_message_reference,
+                              )
+                            }
+                          >
+                            {selectedMail.isFetching &&
+                            selectedMailReference ===
+                              message.external_message_reference
+                              ? "Opening…"
+                              : "Open"}
+                          </Button>
+                        </div>
+                      ),
+                    )}
+
+                    {selectedMailReference && (
+                      <div style={{ marginTop: 16 }}>
+                        {selectedMail.isLoading ? (
+                          <p className="subtle">Opening message…</p>
+                        ) : selectedMail.error ? (
+                          <div className="ai-banner">
+                            <AlertCircle />
+                            This Gmail message could not be read.
+                          </div>
+                        ) : selectedMail.data ? (
+                          <div>
+                            <div className="list-row">
+                              <Mail />
+                              <div className="row-main">
+                                <strong>
+                                  {selectedMail.data.subject || "No subject"}
+                                </strong>
+                                <div className="row-copy">
+                                  {selectedMail.data.sender ||
+                                    "Unknown sender"}
+                                </div>
+                              </div>
+                              <Badge tone="success">Gmail</Badge>
+                            </div>
+
+                            <div
+                              className="row-copy"
+                              style={{
+                                whiteSpace: "pre-wrap",
+                                marginTop: 14,
+                              }}
+                            >
+                              {selectedMail.data.body_text ||
+                                selectedMail.data.snippet ||
+                                "This message does not contain a plain-text body."}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <p className="subtle">
+                    Gmail returned no recent messages.
+                  </p>
+                )}
+              </Card>
+            )}
+
           <Card style={{ marginTop: 14 }}>
             <SectionTitle
               title="Recent inbound events"
