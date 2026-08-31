@@ -66,6 +66,16 @@ export type ExternalIntegrationResource = SelectedIntegrationResource & {
   metadata: Record<string, string> | null;
 };
 
+export type ExternalCalendarEvent = {
+  external_event_id: string;
+  external_calendar_reference: string;
+  title: string;
+  starts_at: string;
+  ends_at: string;
+  status: "confirmed" | "canceled";
+  updated_at: string;
+};
+
 export type ExternalMailMessage = {
   external_message_reference: string;
   external_thread_reference: string;
@@ -120,6 +130,26 @@ export function createIntegrationsApi(client: ApiClient) {
       }),
     resources: (businessId: string, connectionId: string, signal?: AbortSignal) =>
       client.request<ExternalIntegrationResource[]>(businessPath(businessId, `/connections/${encodeURIComponent(connectionId)}/resources`), { signal }),
+    calendarEvents: (
+      businessId: string,
+      connectionId: string,
+      startsAt: string,
+      endsAt: string,
+      signal?: AbortSignal,
+    ) => {
+      const query = new URLSearchParams({
+        starts_at: startsAt,
+        ends_at: endsAt,
+      });
+
+      return client.request<ExternalCalendarEvent[]>(
+        businessPath(
+          businessId,
+          `/connections/${encodeURIComponent(connectionId)}/calendar/events?${query.toString()}`,
+        ),
+        { signal },
+      );
+    },
     mailMessages: (
       businessId: string,
       connectionId: string,

@@ -32,6 +32,7 @@ import { humanizeApiError } from "@/services/api-client";
 import {
   integrationsApi,
   type ConnectorDefinition,
+  type ExternalCalendarEvent,
   type ExternalIntegrationResource,
   type ExternalMailMessage,
   type IntegrationConnection,
@@ -167,6 +168,44 @@ export function IntegrationsPage() {
     ),
     retry: false,
   });
+  const googleCalendarSelected = Boolean(
+    selectedConnection?.connector_type === "google_calendar" &&
+      selectedConnection.selected_resources.some(
+        (item) => item.resource_type === "calendar",
+      ),
+  );
+
+  const calendarEvents = useQuery({
+    queryKey: [
+      "integrations",
+      activeBusinessId,
+      "calendar-events",
+      selectedConnection?.id,
+    ],
+    queryFn: ({ signal }) => {
+      const startsAt = new Date();
+      const endsAt = new Date(
+        startsAt.getTime() + 30 * 24 * 60 * 60 * 1000,
+      );
+
+      return integrationsApi.calendarEvents(
+        activeBusinessId,
+        selectedConnection!.id,
+        startsAt.toISOString(),
+        endsAt.toISOString(),
+        signal,
+      );
+    },
+    enabled: Boolean(
+      activeBusinessId &&
+        selectedConnection?.id &&
+        selectedConnection.connector_type === "google_calendar" &&
+        canReadProvider &&
+        googleCalendarSelected,
+    ),
+    retry: false,
+  });
+
   const gmailMailboxSelected = Boolean(
     selectedConnection?.connector_type === "gmail" &&
       selectedConnection.selected_resources.some(
@@ -624,6 +663,65 @@ export function IntegrationsPage() {
               )}
             </Card>
           )}
+          {selectedConnection.connector_type === "google_calendar" &&
+            canReadProvider &&
+            googleCalendarSelected && (
+              <Card style={{ marginTop: 14 }}>
+                <SectionTitle
+                  title="Upcoming Google Calendar events"
+                  action={
+                    <Badge tone="success">
+                      Live Google Calendar data
+                    </Badge>
+                  }
+                />
+
+                {calendarEvents.isLoading ? (
+                  <p className="subtle">
+                    Reading upcoming events from Google Calendar…
+                  </p>
+                ) : calendarEvents.error ? (
+                  <div className="ai-banner">
+                    <AlertCircle />
+                    Google Calendar events could not be loaded. Your connection
+                    has not been changed.
+                  </div>
+                ) : calendarEvents.data?.length ? (
+                  calendarEvents.data
+                    .slice(0, 10)
+                    .map((event: ExternalCalendarEvent) => (
+                      <div
+                        className="list-row"
+                        key={event.external_event_id}
+                      >
+                        <Calendar />
+                        <div className="row-main">
+                          <strong>{event.title || "Busy"}</strong>
+                          <div className="row-copy">
+                            {formatDate(event.starts_at)}
+                            {" → "}
+                            {formatDate(event.ends_at)}
+                          </div>
+                        </div>
+                        <Badge
+                          tone={
+                            event.status === "confirmed"
+                              ? "success"
+                              : "neutral"
+                          }
+                        >
+                          {humanize(event.status)}
+                        </Badge>
+                      </div>
+                    ))
+                ) : (
+                  <p className="subtle">
+                    No events found in the next 30 days.
+                  </p>
+                )}
+              </Card>
+            )}
+
           {selectedConnection.connector_type === "gmail" &&
             canReadProvider &&
             gmailMailboxSelected && (
