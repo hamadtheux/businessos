@@ -2,6 +2,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { Link } from "wouter";
 import { ProductLogo } from "@/components/product-brand";
 import { PRODUCT_NAME } from "@/config/brand";
+import { MarketingHomePage } from "./public-home";
 
 const SUPPORT_EMAIL = "hamadtheux@gmail.com";
 const EFFECTIVE_DATE = "August 31, 2026";
@@ -316,66 +317,9 @@ function LegalSection({
 }
 
 export function PublicHomePage() {
-  return (
-    <PublicShell>
-      <main style={styles.main}>
-        <section style={styles.hero}>
-          <span style={styles.eyebrow}>AI Business Operating System</span>
-          <h1 style={styles.heroTitle}>
-            One intelligent system to help run your business.
-          </h1>
-          <p style={styles.heroText}>
-            {PRODUCT_NAME} connects your business context, customer operations,
-            marketing, workflows, analytics, and approved third-party services
-            so an AI team can understand what is happening, recommend the next
-            move, and execute governed work from one workspace.
-          </p>
-
-          <div style={styles.actions}>
-            <Link href="/register" style={styles.button}>
-              Create account
-            </Link>
-            <Link href="/login" style={styles.secondaryButton}>
-              Sign in
-            </Link>
-          </div>
-        </section>
-
-        <section style={styles.grid} aria-label={`${PRODUCT_NAME} capabilities`}>
-          <article style={styles.card}>
-            <div style={styles.cardNumber}>01</div>
-            <h2 style={styles.cardTitle}>Connect your business</h2>
-            <p style={styles.cardText}>
-              Connect supported services such as Google and other business
-              platforms with explicit authorization. Connections are isolated
-              to the business that created them.
-            </p>
-          </article>
-
-          <article style={styles.card}>
-            <div style={styles.cardNumber}>02</div>
-            <h2 style={styles.cardTitle}>Build shared business context</h2>
-            <p style={styles.cardText}>
-              Bring operations, customer information, business knowledge,
-              reporting, and selected integration data into a governed
-              workspace designed around the active business.
-            </p>
-          </article>
-
-          <article style={styles.card}>
-            <div style={styles.cardNumber}>03</div>
-            <h2 style={styles.cardTitle}>Act with control</h2>
-            <p style={styles.cardText}>
-              AI-assisted workflows can prepare recommendations and actions
-              while approvals, permissions, auditability, and provider controls
-              keep consequential work under business control.
-            </p>
-          </article>
-        </section>
-      </main>
-    </PublicShell>
-  );
+  return <MarketingHomePage />;
 }
+
 
 export function PrivacyPolicyPage() {
   return (
