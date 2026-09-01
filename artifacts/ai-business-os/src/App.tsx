@@ -24,6 +24,7 @@ import { AuthProvider, useAuth } from "@/features/auth/auth-context";
 import { LoginPage, RegisterPage } from "@/features/auth/auth-pages";
 import { OnboardingPage } from "@/features/onboarding/onboarding-page";
 import {
+  DataDeletionPage,
   PrivacyPolicyPage,
   PublicHomePage,
   TermsOfServicePage,
@@ -222,6 +223,7 @@ function AppRoutes() {
         <Route path="/" component={PublicHomePage} />
         <Route path="/privacy" component={PrivacyPolicyPage} />
         <Route path="/terms" component={TermsOfServicePage} />
+        <Route path="/data-deletion" component={DataDeletionPage} />
         <Route path="/login" component={LoginPage} />
         <Route path="/register" component={RegisterPage} />
         <Route path="/onboarding" component={OnboardingPage} />

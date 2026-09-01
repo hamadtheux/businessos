@@ -6,6 +6,7 @@ const PUBLIC_ROUTES = new Set([
   "/register",
   "/privacy",
   "/terms",
+  "/data-deletion",
 ]);
 
 const AUTH_ENTRY_ROUTES = new Set([
@@ -69,7 +70,9 @@ export function nextProtectedRoute({
 
   const normalizedLocation = normalizeRoute(location);
   const publicLegalRoute =
-    normalizedLocation === "/privacy" || normalizedLocation === "/terms";
+    normalizedLocation === "/privacy" ||
+    normalizedLocation === "/terms" ||
+    normalizedLocation === "/data-deletion";
 
   if (
     businessCount === 0 &&

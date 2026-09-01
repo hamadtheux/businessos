@@ -38,6 +38,7 @@ import { BRAND_LOGO_MAX_BYTES, type Business } from "../types/business.ts";
 import { deriveBrandTheme } from "./brand-theme.ts";
 import {
   isApplicationBootstrapping,
+  isPublicRoute,
   nextProtectedRoute,
 } from "../services/app-routing.ts";
 import {
@@ -547,6 +548,21 @@ test("route decisions wait for bootstrap and send empty accounts to onboarding",
       businessesError: "",
       businessCount: 0,
       location: "/dashboard",
+    }),
+    null,
+  );
+});
+
+test("data deletion instructions are public for signed-out and empty accounts", () => {
+  assert.equal(isPublicRoute("/data-deletion"), true);
+  assert.equal(isPublicRoute("/data-deletion?source=meta"), true);
+  assert.equal(
+    nextProtectedRoute({
+      status: "authenticated",
+      businessesLoading: false,
+      businessesError: "",
+      businessCount: 0,
+      location: "/data-deletion",
     }),
     null,
   );

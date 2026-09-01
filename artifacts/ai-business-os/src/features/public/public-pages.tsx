@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from "react";
+import { useEffect, type CSSProperties, type ReactNode } from "react";
 import { Link } from "wouter";
 import { ProductLogo } from "@/components/product-brand";
 import { PRODUCT_NAME } from "@/config/brand";
@@ -236,7 +236,60 @@ const styles: Record<string, CSSProperties> = {
     gap: 18,
     flexWrap: "wrap",
   },
+  relatedLinks: {
+    display: "flex",
+    gap: 18,
+    flexWrap: "wrap",
+    paddingTop: 28,
+    fontSize: 15,
+    fontWeight: 650,
+  },
 };
+
+function PageMetadata({
+  title,
+  description,
+  canonicalPath,
+}: {
+  title: string;
+  description: string;
+  canonicalPath: string;
+}) {
+  useEffect(() => {
+    const previousTitle = document.title;
+    const metadata = [
+      ["meta[name='description']", "content", description],
+      ["meta[property='og:title']", "content", title],
+      ["meta[property='og:description']", "content", description],
+      ["meta[property='og:url']", "content", `https://9dbrain.com${canonicalPath}`],
+      ["meta[name='twitter:title']", "content", title],
+      ["meta[name='twitter:description']", "content", description],
+      ["link[rel='canonical']", "href", `https://9dbrain.com${canonicalPath}`],
+    ] as const;
+    const previousValues = metadata.map(([selector, attribute]) => {
+      const element = document.head.querySelector(selector);
+      return { element, attribute, value: element?.getAttribute(attribute) };
+    });
+
+    document.title = title;
+    metadata.forEach(([selector, attribute, value]) => {
+      document.head.querySelector(selector)?.setAttribute(attribute, value);
+    });
+
+    return () => {
+      document.title = previousTitle;
+      previousValues.forEach(({ element, attribute, value }) => {
+        if (value === null || value === undefined) {
+          element?.removeAttribute(attribute);
+        } else {
+          element?.setAttribute(attribute, value);
+        }
+      });
+    };
+  }, [canonicalPath, description, title]);
+
+  return null;
+}
 
 function PublicHeader() {
   return (
@@ -274,6 +327,9 @@ function PublicFooter() {
           </Link>
           <Link href="/terms" style={styles.navLink}>
             Terms of Service
+          </Link>
+          <Link href="/data-deletion" style={styles.navLink}>
+            Data Deletion
           </Link>
           <a href={`mailto:${SUPPORT_EMAIL}`} style={styles.navLink}>
             Contact
@@ -318,6 +374,123 @@ function LegalSection({
 
 export function PublicHomePage() {
   return <MarketingHomePage />;
+}
+
+
+export function DataDeletionPage() {
+  return (
+    <PublicShell>
+      <PageMetadata
+        title="Data Deletion Instructions | 9D Brain"
+        description="Learn how to request deletion of your personal data and connected Meta integration data from 9D Brain."
+        canonicalPath="/data-deletion"
+      />
+      <main style={styles.legalWrap}>
+        <div style={styles.legalIntro}>
+          <span style={styles.eyebrow}>Legal & privacy</span>
+          <h1 style={styles.legalTitle}>Data Deletion Instructions</h1>
+          <p style={styles.legalLead}>
+            {PRODUCT_NAME} respects your privacy and gives you the ability to
+            request deletion of personal data associated with your account and
+            connected integrations.
+          </p>
+        </div>
+
+        <article style={styles.legalCard}>
+          <LegalSection title="How to Request Data Deletion">
+            <p style={styles.paragraph}>
+              Users can request deletion of their data in either of the
+              following ways:
+            </p>
+            <ol style={styles.list}>
+              <li>
+                <strong>From {PRODUCT_NAME}</strong>
+                <p style={styles.paragraph}>
+                  Sign in to your {PRODUCT_NAME} account and go to: Settings →
+                  Privacy / Account → Delete Account or Request Data Deletion.
+                </p>
+                <p style={styles.paragraph}>
+                  If this feature is not currently available in the UI, submit
+                  a deletion request by email using the method below.
+                </p>
+              </li>
+              <li>
+                <strong>By Email</strong>
+                <p style={styles.paragraph}>
+                  Send a data deletion request to{" "}
+                  <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a>.
+                </p>
+                <p style={styles.paragraph}>
+                  Include the email address associated with your {PRODUCT_NAME}
+                  account so the request can be verified.
+                </p>
+              </li>
+            </ol>
+          </LegalSection>
+
+          <LegalSection title="Meta / Facebook Data">
+            <p style={styles.paragraph}>
+              If you have connected Facebook, Instagram, Messenger, Meta Ads,
+              Pages, Leads, Catalogs, or another Meta service to {PRODUCT_NAME},
+              you may disconnect the integration from your {PRODUCT_NAME}
+              account.
+            </p>
+            <p style={styles.paragraph}>
+              When a valid deletion request is received, {PRODUCT_NAME} will
+              delete or anonymize personal data associated with you as
+              required, including applicable data obtained through Meta APIs,
+              subject to legitimate legal, security, fraud-prevention,
+              accounting, or regulatory retention requirements.
+            </p>
+          </LegalSection>
+
+          <LegalSection title="Processing Time">
+            <p style={styles.paragraph}>
+              Verified deletion requests will be processed within a reasonable
+              period and in accordance with applicable privacy laws.
+            </p>
+            <p style={styles.paragraph}>
+              Where applicable, you will receive confirmation when the
+              deletion request has been completed.
+            </p>
+          </LegalSection>
+
+          <LegalSection title="Information We May Retain">
+            <p style={styles.paragraph}>
+              Certain information may be retained when necessary for:
+            </p>
+            <ul style={styles.list}>
+              <li>Legal or regulatory obligations</li>
+              <li>Fraud and abuse prevention</li>
+              <li>Security and audit records</li>
+              <li>Billing and financial record requirements</li>
+              <li>Resolving disputes</li>
+              <li>Enforcing agreements</li>
+            </ul>
+            <p style={styles.paragraph}>
+              Any retained information will remain protected and will not be
+              used for unrelated purposes.
+            </p>
+          </LegalSection>
+
+          <LegalSection title="Contact" last>
+            <p style={styles.paragraph}>
+              For questions or requests regarding deletion of personal data,
+              contact {PRODUCT_NAME} at{" "}
+              <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a>.
+            </p>
+            <nav
+              aria-label="Related legal information"
+              style={styles.relatedLinks}
+            >
+              <Link href="/privacy">Privacy Policy</Link>
+              <Link href="/terms">Terms of Service</Link>
+            </nav>
+          </LegalSection>
+        </article>
+      </main>
+    </PublicShell>
+  );
 }
 
 
