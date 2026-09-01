@@ -30,6 +30,7 @@ from app.exceptions.integration import (  # noqa: E402
 from app.integrations.contracts import ExternalCalendarEvent, ExternalMailMessage, ExternalMailMessageContent  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.integration import IntegrationConnection  # noqa: E402
+from app.schemas.integration import AuthorizationCallbackResponse  # noqa: E402
 
 
 BUSINESS_ID = UUID("a1000000-0000-4000-8000-000000000001")
@@ -222,6 +223,37 @@ class IntegrationsApiTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(response.status_code, 422)
+
+    async def test_shared_callback_handles_meta_provider_error_without_code(self) -> None:
+        with patch(
+            "app.api.v1.integrations.service.complete_authorization",
+            new=AsyncMock(
+                return_value=AuthorizationCallbackResponse(
+                    connector_type="facebook",
+                    status="degraded",
+                    redirect_target="/integrations",
+                )
+            ),
+        ) as operation:
+            response = await self.client.get(
+                "/api/v1/integrations/oauth/callback",
+                params={
+                    "state": "opaque-one-time-state",
+                    "error": "access_denied",
+                    "error_description": "must-not-be-reflected",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "degraded")
+        self.assertNotIn("error_description", response.text)
+        self.assertNotIn("access_token", response.text)
+        self.assertIsNone(operation.await_args.kwargs["code"])
+        self.assertEqual(
+            operation.await_args.kwargs["provider_error"],
+            "access_denied",
+        )
+        self._private(response)
 
     async def test_member_cannot_change_sensitive_integration_configuration(
         self,

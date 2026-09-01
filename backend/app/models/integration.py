@@ -36,7 +36,8 @@ class IntegrationConnection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint("char_length(btrim(display_name)) BETWEEN 1 AND 160", name="valid_display_name"),
         CheckConstraint("credential_reference IS NULL OR char_length(btrim(credential_reference)) BETWEEN 1 AND 255", name="valid_credential_reference"),
         CheckConstraint("external_account_reference IS NULL OR char_length(btrim(external_account_reference)) BETWEEN 1 AND 255", name="valid_external_account_reference"),
-        CheckConstraint("jsonb_typeof(selected_resources) = 'array' AND jsonb_array_length(selected_resources) <= 20", name="valid_selected_resources"),
+        CheckConstraint("jsonb_typeof(selected_resources) = 'array' AND jsonb_array_length(selected_resources) <= 100", name="valid_selected_resources"),
+        CheckConstraint("jsonb_typeof(authorized_resources) = 'array' AND jsonb_array_length(authorized_resources) <= 100", name="valid_authorized_resources"),
         CheckConstraint("cardinality(scopes_granted) <= 30", name="valid_scopes_granted"),
         CheckConstraint("failure_code IS NULL OR failure_code ~ '^[a-z][a-z0-9_]{0,63}$'", name="valid_failure_code"),
         Index("ix_integration_connections_business_status", "business_id", "status", "connector_type", "id"),
@@ -53,6 +54,7 @@ class IntegrationConnection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     external_account_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
     external_account_display_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
     selected_resources: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    authorized_resources: Mapped[list[dict[str, object]]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
     scopes_granted: Mapped[list[str]] = mapped_column(ARRAY(String(255)), nullable=False, default=list, server_default=text("'{}'::varchar[]"))
     connected_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

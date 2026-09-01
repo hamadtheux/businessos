@@ -226,7 +226,12 @@ async def begin_authorization(
         business_id=business_id,
         connector_type=connector_type,
         purpose="oauth_pkce",
-        material=_material({"code_verifier": verifier}),
+        material=_material(
+            {
+                "code_verifier": verifier,
+                "oauth_provider": definition.oauth_provider,
+            }
+        ),
     )
     try:
         authorization_url = await adapters.get(connector_type).build_authorization_url(AuthorizationRequest(
@@ -309,12 +314,22 @@ async def complete_authorization(
     *,
     connector_type: str | None,
     state: str,
-    code: str,
+    code: str | None,
+    provider_error: str | None = None,
     adapters: ConnectorAdapterRegistry = connector_adapters,
     credentials: IntegrationCredentialStore = credential_store,
     configuration: Settings = settings,
 ) -> AuthorizationCallbackResponse:
-    if not state or len(state) > 512 or not code or len(code) > 4096:
+    if (
+        not state
+        or len(state) > 512
+        or (code is None) == (provider_error is None)
+        or (code is not None and (not code or len(code) > 4096))
+        or (
+            provider_error is not None
+            and (not provider_error or len(provider_error) > 255)
+        )
+    ):
         raise IntegrationValidationError("authorization_callback_invalid")
     if configuration.integration_oauth_callback_url is None:
         raise IntegrationProviderUnavailableError("provider_unavailable")
@@ -341,6 +356,19 @@ async def complete_authorization(
 
     connector_type = oauth_state.connector_type
     definition = require_connector(connector_type)
+    if provider_error is not None:
+        return await _fail_authorization(
+            session,
+            oauth_state=oauth_state,
+            definition=definition,
+            credentials=credentials,
+            now=now,
+            failure_code=(
+                "authorization_denied"
+                if provider_error.casefold() == "access_denied"
+                else "authorization_provider_error"
+            ),
+        )
 
     pkce_material = await credentials.retrieve(
         oauth_state.pkce_verifier_reference,
@@ -349,20 +377,49 @@ async def complete_authorization(
         purpose="oauth_pkce",
     )
     verifier = pkce_material.values.get("code_verifier")
-    if not verifier:
+    bound_provider = pkce_material.values.get("oauth_provider")
+    if (
+        not verifier
+        or (
+            bound_provider is not None
+            and bound_provider != definition.oauth_provider
+        )
+    ):
         raise IntegrationStateError("authorization_state_invalid")
     adapter = adapters.get(connector_type)
+    authorized_resources: list[ExternalResource] = []
     try:
         exchange = await adapter.exchange_authorization_code(
-            code=code,
+            code=code or "",
             code_verifier=verifier,
             redirect_uri=str(configuration.integration_oauth_callback_url),
         )
         identity = await adapter.get_identity(exchange.credentials)
-    except (IntegrationProviderUnavailableError, IntegrationCredentialUnavailableError):
-        raise
+        if connector_type == "facebook":
+            authorized_resources = list(
+                await adapter.list_resources(exchange.credentials)
+            )
+    except (
+        IntegrationProviderUnavailableError,
+        IntegrationCredentialUnavailableError,
+    ):
+        return await _fail_authorization(
+            session,
+            oauth_state=oauth_state,
+            definition=definition,
+            credentials=credentials,
+            now=now,
+            failure_code="authorization_exchange_failed",
+        )
     except Exception:
-        raise IntegrationProviderUnavailableError("provider_unavailable") from None
+        return await _fail_authorization(
+            session,
+            oauth_state=oauth_state,
+            definition=definition,
+            credentials=credentials,
+            now=now,
+            failure_code="authorization_exchange_failed",
+        )
 
     granted = tuple(
         dict.fromkeys(
@@ -374,9 +431,62 @@ async def complete_authorization(
         not granted
         or len(granted) > 30
         or not set(granted).issubset(set(definition.oauth_scopes))
+        or (
+            connector_type == "facebook"
+            and not set(definition.oauth_read_scopes).issubset(set(granted))
+        )
     ):
-        raise IntegrationStateError("granted_scopes_invalid")
-    _validate_identity(identity.external_account_reference, identity.display_name)
+        return await _fail_authorization(
+            session,
+            oauth_state=oauth_state,
+            definition=definition,
+            credentials=credentials,
+            now=now,
+            failure_code="granted_scopes_invalid",
+        )
+    try:
+        _validate_identity(
+            identity.external_account_reference,
+            identity.display_name,
+        )
+    except IntegrationProviderUnavailableError:
+        return await _fail_authorization(
+            session,
+            oauth_state=oauth_state,
+            definition=definition,
+            credentials=credentials,
+            now=now,
+            failure_code="provider_identity_invalid",
+        )
+    if connector_type == "facebook":
+        if (
+            not authorized_resources
+            or len(authorized_resources) > _RESOURCE_LIMIT
+            or not any(
+                resource.resource_type == "facebook_page"
+                for resource in authorized_resources
+            )
+        ):
+            return await _fail_authorization(
+                session,
+                oauth_state=oauth_state,
+                definition=definition,
+                credentials=credentials,
+                now=now,
+                failure_code="authorized_assets_unavailable",
+            )
+        try:
+            for resource in authorized_resources:
+                _validate_resource(resource, definition)
+        except IntegrationProviderUnavailableError:
+            return await _fail_authorization(
+                session,
+                oauth_state=oauth_state,
+                definition=definition,
+                credentials=credentials,
+                now=now,
+                failure_code="authorized_assets_invalid",
+            )
     credential_reference = await credentials.store(
         business_id=oauth_state.business_id,
         connector_type=connector_type,
@@ -399,6 +509,19 @@ async def complete_authorization(
         connection.external_account_reference = identity.external_account_reference
         connection.external_account_display_name = identity.display_name
         connection.scopes_granted = list(granted)
+        if connector_type == "facebook":
+            connection.authorized_resources = [
+                _authorized_resource_record(resource)
+                for resource in authorized_resources
+            ]
+            # The Login for Business configuration is itself the Page asset
+            # selector. Persist those authorized assets as the connection's
+            # selected webhook/read boundary without asking the browser to
+            # send tenant or Page identifiers back to the API.
+            connection.selected_resources = [
+                _selected_resource_record(resource)
+                for resource in authorized_resources
+            ]
         connection.connected_by_user_id = oauth_state.user_id
         connection.connected_at = now
         connection.failure_code = None
@@ -432,6 +555,62 @@ async def complete_authorization(
         connector_type=definition.connector_type,
         status="connected",
         redirect_target="/integrations",
+    )
+
+
+async def _fail_authorization(
+    session: AsyncSession,
+    *,
+    oauth_state: IntegrationOAuthState,
+    definition: ConnectorDefinition,
+    credentials: IntegrationCredentialStore,
+    now: datetime,
+    failure_code: str,
+) -> AuthorizationCallbackResponse:
+    try:
+        connection = await session.scalar(
+            select(IntegrationConnection)
+            .where(
+                IntegrationConnection.business_id == oauth_state.business_id,
+                IntegrationConnection.connector_type == oauth_state.connector_type,
+            )
+            .with_for_update()
+        )
+        if connection is None:
+            raise IntegrationStateError("authorization_state_invalid")
+        connection.status = "degraded"
+        connection.authentication_state = "failed"
+        connection.health = "degraded"
+        connection.failure_code = failure_code
+        oauth_state.consumed_at = now
+        await session.flush()
+    except IntegrationStateError:
+        raise
+    except SQLAlchemyError:
+        raise IntegrationPersistenceError("authorization_unavailable") from None
+
+    await _best_effort_revoke(
+        credentials,
+        oauth_state.pkce_verifier_reference,
+        oauth_state.business_id,
+        oauth_state.connector_type,
+        "oauth_pkce",
+    )
+    audit = record_audit(
+        session,
+        business_id=oauth_state.business_id,
+        actor_user_id=oauth_state.user_id,
+        event_type="integration.connection_failed",
+        entity_type="integration_connection",
+        entity_id=connection.id,
+        summary=f"Authorization failed for {definition.display_name}.",
+        after_value=f"status=degraded;failure_code={failure_code}",
+    )
+    audit.status = "failed"
+    return AuthorizationCallbackResponse(
+        connector_type=definition.connector_type,
+        status="degraded",
+        redirect_target=oauth_state.redirect_target,
     )
 
 
@@ -581,7 +760,7 @@ async def select_resource(
         "external_reference": selected.external_reference,
         "display_name": selected.display_name,
     })
-    if len(values) > 20:
+    if len(values) > _RESOURCE_LIMIT:
         raise IntegrationValidationError("resource_selection_invalid")
     connection.selected_resources = values
     try:
@@ -641,6 +820,20 @@ async def check_health(
         raise IntegrationPersistenceError("health_check_unavailable") from None
     if before != result.health:
         _record_health_change(session, connection, actor_user_id, before)
+        if result.health == "reauth_required":
+            record_audit(
+                session,
+                business_id=business_id,
+                actor_user_id=actor_user_id,
+                event_type="integration.reauthentication_required",
+                entity_type="integration_connection",
+                entity_id=connection.id,
+                summary=(
+                    f"{connection.display_name} requires reauthorization."
+                ),
+                before_value=f"health={before}",
+                after_value="health=reauth_required",
+            )
     return connection
 
 
@@ -929,11 +1122,12 @@ async def disconnect(
             )
         except IntegrationCredentialUnavailableError:
             pass
-    connection.status = "disabled"
-    connection.authentication_state = "revoked"
-    connection.health = "revoked"
+    connection.status = "disconnected"
+    connection.authentication_state = "not_authorized"
+    connection.health = "not_checked"
     connection.credential_reference = None
     connection.selected_resources = []
+    connection.authorized_resources = []
     connection.scopes_granted = []
     connection.failure_code = None
     try:
@@ -948,7 +1142,7 @@ async def disconnect(
         entity_type="integration_connection",
         entity_id=connection.id,
         summary=f"Disconnected {connection.display_name}; external operations are blocked.",
-        after_value="status=disabled",
+        after_value="status=disconnected",
     )
     if reference:
         record_audit(
@@ -965,7 +1159,7 @@ async def disconnect(
             recipient_user_id=connection.connected_by_user_id,
             category="integration_health",
             title=f"{connection.display_name} disconnected",
-            message="The local connection is disabled and its credential reference was removed.",
+            message="The local connection is disconnected and its credential reference was removed.",
             priority="medium",
             related_entity_type="integration_connection",
             related_entity_id=connection.id,
@@ -1767,6 +1961,25 @@ def _validate_resource(resource: ExternalResource, definition: ConnectorDefiniti
         ))
     ):
         raise IntegrationProviderUnavailableError("provider_response_invalid")
+
+
+def _selected_resource_record(resource: ExternalResource) -> dict[str, str]:
+    return {
+        "resource_type": resource.resource_type,
+        "external_reference": resource.external_reference,
+        "display_name": resource.display_name,
+    }
+
+
+def _authorized_resource_record(
+    resource: ExternalResource,
+) -> dict[str, object]:
+    value: dict[str, object] = _selected_resource_record(resource)
+    if resource.parent_reference is not None:
+        value["parent_reference"] = resource.parent_reference
+    if resource.metadata:
+        value["metadata"] = dict(resource.metadata)
+    return value
 
 
 def _normalize_oauth_scope(value: str) -> str:

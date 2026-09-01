@@ -52,9 +52,9 @@ CANONICAL_CONNECTOR_TYPES: Final[tuple[ConnectorType, ...]] = (
 CONNECTION_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
     "disconnected": frozenset({"pending", "disabled"}),
     "pending": frozenset({"connected", "disconnected", "disabled"}),
-    "connected": frozenset({"degraded", "reauth_required", "disabled", "revoked"}),
-    "degraded": frozenset({"connected", "reauth_required", "disabled", "revoked"}),
-    "reauth_required": frozenset({"pending", "disabled", "revoked"}),
+    "connected": frozenset({"disconnected", "degraded", "reauth_required", "disabled", "revoked"}),
+    "degraded": frozenset({"disconnected", "connected", "reauth_required", "disabled", "revoked"}),
+    "reauth_required": frozenset({"disconnected", "pending", "disabled", "revoked"}),
     "disabled": frozenset({"pending", "revoked"}),
     "revoked": frozenset({"pending"}),
 }

@@ -5,6 +5,7 @@ from typing import Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import (
+    AliasChoices,
     AnyHttpUrl,
     Field,
     SecretStr,
@@ -181,8 +182,32 @@ class Settings(BaseSettings):
     google_oauth_client_secret: SecretStr | None = None
     google_ads_developer_token: SecretStr | None = None
     google_ads_api_version: str = Field(default="v25", pattern=r"^v[0-9]{1,3}$")
-    meta_oauth_client_id: str | None = Field(default=None, max_length=255)
-    meta_oauth_client_secret: SecretStr | None = None
+    # Meta's deployment currently uses the unprefixed names created in
+    # Render. Keep the canonical AIBOS names as the first choice while
+    # accepting those existing production aliases server-side.
+    meta_oauth_client_id: str | None = Field(
+        default=None,
+        max_length=255,
+        validation_alias=AliasChoices(
+            "AIBOS_META_OAUTH_CLIENT_ID",
+            "META_APP_ID",
+        ),
+    )
+    meta_oauth_client_secret: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "AIBOS_META_OAUTH_CLIENT_SECRET",
+            "META_APP_SECRET",
+        ),
+    )
+    meta_login_configuration_id: str | None = Field(
+        default=None,
+        max_length=255,
+        validation_alias=AliasChoices(
+            "AIBOS_META_LOGIN_CONFIGURATION_ID",
+            "META_LOGIN_CONFIG_ID",
+        ),
+    )
     meta_graph_api_version: str = Field(default="v26.0", pattern=r"^v[0-9]{1,3}\.0$")
     meta_webhook_verify_token: SecretStr | None = None
     meta_webhook_signing_secret: SecretStr | None = None
@@ -211,6 +236,7 @@ class Settings(BaseSettings):
         env_prefix="AIBOS_",
         case_sensitive=False,
         extra="ignore",
+        populate_by_name=True,
     )
 
     @field_validator("auth_secret_key")
@@ -387,6 +413,14 @@ class Settings(BaseSettings):
                 raise ValueError(
                     f"{provider} OAuth requires a callback URL and secure credential storage"
                 )
+
+        if self.meta_oauth_client_id and not (
+            self.meta_login_configuration_id
+            and self.meta_login_configuration_id.strip()
+        ):
+            raise ValueError(
+                "Meta OAuth requires a Facebook Login for Business configuration ID"
+            )
 
         if (
             self.google_ads_developer_token is not None

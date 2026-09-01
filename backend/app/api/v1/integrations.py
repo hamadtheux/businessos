@@ -154,9 +154,10 @@ async def reconnect_connector(
 )
 async def oauth_callback(
     state: Annotated[str, Query(min_length=1, max_length=512)],
-    code: Annotated[str, Query(min_length=1, max_length=4096)],
     response: Response,
     session: SessionDependency,
+    code: Annotated[str | None, Query(min_length=1, max_length=4096)] = None,
+    error: Annotated[str | None, Query(min_length=1, max_length=255)] = None,
 ):
     return await _mutate(
         response,
@@ -166,6 +167,7 @@ async def oauth_callback(
             connector_type=None,
             state=state,
             code=code,
+            provider_error=error,
         ),
     )
 
@@ -178,9 +180,10 @@ async def oauth_callback(
 async def legacy_oauth_callback(
     connector_type: ConnectorType,
     state: Annotated[str, Query(min_length=1, max_length=512)],
-    code: Annotated[str, Query(min_length=1, max_length=4096)],
     response: Response,
     session: SessionDependency,
+    code: Annotated[str | None, Query(min_length=1, max_length=4096)] = None,
+    error: Annotated[str | None, Query(min_length=1, max_length=255)] = None,
 ):
     return await _mutate(
         response,
@@ -190,6 +193,7 @@ async def legacy_oauth_callback(
             connector_type=connector_type,
             state=state,
             code=code,
+            provider_error=error,
         ),
     )
 

@@ -9,6 +9,7 @@ from types import MappingProxyType
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
+from pydantic import SecretStr
 from sqlalchemy import CheckConstraint, ForeignKeyConstraint, UniqueConstraint
 
 os.environ.setdefault("AIBOS_DATABASE_URL", "postgresql+asyncpg://database.invalid/test")
@@ -23,6 +24,7 @@ from app.domain.integrations import (  # noqa: E402
 from app.integrations.action_boundary import CONNECTOR_ACTION_TYPES, prepare_connector_dispatch_context  # noqa: E402
 from app.integrations.adapters import ConnectorAdapterRegistry, DisabledIntegrationConnector  # noqa: E402
 from app.integrations.credentials import CredentialMaterial, InMemoryIntegrationCredentialStore  # noqa: E402
+from app.exceptions.integration import IntegrationProviderUnavailableError  # noqa: E402
 from app.integrations.contracts import (  # noqa: E402
     AuthorizationExchange,
     AuthorizationRequest,
@@ -32,7 +34,7 @@ from app.integrations.contracts import (  # noqa: E402
     ExternalResource,
     NormalizedIntegrationEvent,
 )
-from app.integrations.oauth_adapters import ConfiguredOAuthConnector  # noqa: E402
+from app.integrations.oauth_adapters import ConfiguredOAuthConnector, build_configured_oauth_adapters  # noqa: E402
 from app.integrations.registry import CONNECTOR_REGISTRY, list_connector_definitions  # noqa: E402
 from app.integrations.webhooks import MetaWebhookSignatureVerifier  # noqa: E402
 from app.models.integration import (  # noqa: E402
@@ -169,6 +171,226 @@ class ConfiguredGoogleOAuthTests(unittest.IsolatedAsyncioTestCase):
                 "https://www.googleapis.com/auth/gmail.readonly"
             ],
         )
+
+
+class ConfiguredMetaLoginForBusinessTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _configuration():
+        return settings.model_copy(
+            update={
+                "integration_credential_backend": "aws_secrets_manager",
+                "integration_secret_region": "us-east-1",
+                "integration_oauth_callback_url": (
+                    "https://api.example.test/api/v1/integrations/oauth/callback"
+                ),
+                "meta_oauth_client_id": "meta-app-id",
+                "meta_oauth_client_secret": SecretStr("meta-app-secret"),
+                "meta_login_configuration_id": "meta-login-config-id",
+                "meta_graph_api_version": "v26.0",
+            }
+        )
+
+    async def test_authorization_url_uses_configuration_version_and_shared_callback(self) -> None:
+        connector = ConfiguredOAuthConnector(
+            connector_type="facebook",
+            provider="meta",
+            client_id="meta-app-id",
+            client_secret="meta-app-secret",
+            configuration=self._configuration(),
+        )
+        request = AuthorizationRequest(
+            state="tenant-bound-opaque-state",
+            code_challenge="unused-meta-pkce-challenge",
+            redirect_uri=(
+                "https://api.example.test/api/v1/integrations/oauth/callback"
+            ),
+            scopes=CONNECTOR_REGISTRY["facebook"].oauth_scopes,
+        )
+
+        authorization_url = await connector.build_authorization_url(request)
+        parsed = urlsplit(authorization_url)
+        query = parse_qs(parsed.query)
+
+        self.assertEqual(
+            f"{parsed.scheme}://{parsed.netloc}{parsed.path}",
+            "https://www.facebook.com/v26.0/dialog/oauth",
+        )
+        self.assertEqual(query["client_id"], ["meta-app-id"])
+        self.assertEqual(query["config_id"], ["meta-login-config-id"])
+        self.assertEqual(query["response_type"], ["code"])
+        self.assertEqual(query["override_default_response_type"], ["true"])
+        self.assertEqual(query["auth_type"], ["rerequest"])
+        self.assertEqual(query["state"], ["tenant-bound-opaque-state"])
+        self.assertEqual(
+            query["redirect_uri"],
+            ["https://api.example.test/api/v1/integrations/oauth/callback"],
+        )
+        self.assertEqual(
+            set(query["scope"][0].split(",")),
+            set(CONNECTOR_REGISTRY["facebook"].oauth_scopes),
+        )
+        self.assertNotIn("client_secret", query)
+        self.assertNotIn("code_challenge", query)
+
+    async def test_code_exchange_accepts_only_valid_system_user_token(self) -> None:
+        class MetaHttp:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, dict[str, object]]] = []
+
+            async def request_json(self, method: str, url: str, **kwargs):
+                self.calls.append((method, url, kwargs))
+                if url.endswith("/oauth/access_token"):
+                    return {
+                        "data": {
+                            "access_token": "server-only-system-user-token",
+                            "token_type": "bearer",
+                        }
+                    }
+                if url.endswith("/debug_token"):
+                    return {
+                        "data": {
+                            "app_id": "meta-app-id",
+                            "type": "SYSTEM_USER",
+                            "is_valid": True,
+                            "user_id": "system-user-1",
+                            "expires_at": 0,
+                            "data_access_expires_at": 0,
+                            "scopes": list(
+                                CONNECTOR_REGISTRY["facebook"].oauth_scopes
+                            ),
+                        }
+                    }
+                raise AssertionError(f"Unexpected Meta URL: {url}")
+
+        http = MetaHttp()
+        connector = ConfiguredOAuthConnector(
+            connector_type="facebook",
+            provider="meta",
+            client_id="meta-app-id",
+            client_secret="meta-app-secret",
+            configuration=self._configuration(),
+            http=http,  # type: ignore[arg-type]
+        )
+
+        exchange = await connector.exchange_authorization_code(
+            code="one-use-meta-code",
+            code_verifier="not-sent-to-meta",
+            redirect_uri=(
+                "https://api.example.test/api/v1/integrations/oauth/callback"
+            ),
+        )
+
+        self.assertEqual(
+            exchange.credentials.values["access_token"],
+            "server-only-system-user-token",
+        )
+        self.assertEqual(
+            exchange.credentials.values["meta_token_type"],
+            "SYSTEM_USER",
+        )
+        self.assertNotIn("expires_at", exchange.credentials.values)
+        self.assertEqual(
+            set(exchange.granted_scopes),
+            set(CONNECTOR_REGISTRY["facebook"].oauth_scopes),
+        )
+        exchange_call = http.calls[0]
+        self.assertEqual(exchange_call[0], "POST")
+        self.assertEqual(
+            exchange_call[1],
+            "https://graph.facebook.com/v26.0/oauth/access_token",
+        )
+        self.assertNotIn("code_verifier", exchange_call[2]["data"])
+        self.assertNotIn("fb_exchange_token", exchange_call[2]["data"])
+        debug_call = http.calls[1]
+        self.assertEqual(debug_call[2]["params"]["input_token"], "server-only-system-user-token")
+        self.assertEqual(
+            debug_call[2]["headers"]["Authorization"],
+            "Bearer meta-app-id|meta-app-secret",
+        )
+
+    async def test_code_exchange_rejects_non_system_user_token(self) -> None:
+        class MetaHttp:
+            async def request_json(self, _method: str, url: str, **_kwargs):
+                if url.endswith("/oauth/access_token"):
+                    return {"access_token": "ordinary-user-token"}
+                return {
+                    "data": {
+                        "app_id": "meta-app-id",
+                        "type": "USER",
+                        "is_valid": True,
+                        "scopes": ["pages_show_list"],
+                    }
+                }
+
+        connector = ConfiguredOAuthConnector(
+            connector_type="facebook",
+            provider="meta",
+            client_id="meta-app-id",
+            client_secret="meta-app-secret",
+            configuration=self._configuration(),
+            http=MetaHttp(),  # type: ignore[arg-type]
+        )
+
+        with self.assertRaises(IntegrationProviderUnavailableError):
+            await connector.exchange_authorization_code(
+                code="one-use-meta-code",
+                code_verifier="not-sent-to-meta",
+                redirect_uri=(
+                    "https://api.example.test/api/v1/integrations/oauth/callback"
+                ),
+            )
+
+    async def test_authorized_pages_include_safe_business_and_capability_metadata(self) -> None:
+        class MetaHttp:
+            async def request_json(self, _method: str, url: str, **_kwargs):
+                if url.endswith("/me/accounts"):
+                    return {
+                        "data": [
+                            {
+                                "id": "page-1",
+                                "name": "Nine D Brain Page",
+                                "business": {
+                                    "id": "meta-business-1",
+                                    "name": "Nine D Brain Business",
+                                },
+                                "tasks": ["MESSAGING", "ANALYZE"],
+                            }
+                        ]
+                    }
+                raise AssertionError(f"Unexpected Meta URL: {url}")
+
+        connector = ConfiguredOAuthConnector(
+            connector_type="facebook",
+            provider="meta",
+            client_id="meta-app-id",
+            client_secret="meta-app-secret",
+            configuration=self._configuration(),
+            http=MetaHttp(),  # type: ignore[arg-type]
+        )
+        resources = list(
+            await connector.list_resources(
+                CredentialMaterial(values={"access_token": "server-only"})
+            )
+        )
+
+        self.assertEqual(
+            [resource.resource_type for resource in resources],
+            ["meta_business", "facebook_page"],
+        )
+        page = resources[1]
+        self.assertEqual(page.external_reference, "page-1")
+        self.assertEqual(page.parent_reference, "meta-business-1")
+        self.assertEqual(page.metadata["meta_business_id"], "meta-business-1")
+        self.assertEqual(page.metadata["capabilities"], "MESSAGING,ANALYZE")
+
+    def test_pages_configuration_does_not_enable_other_meta_connectors(self) -> None:
+        adapters = build_configured_oauth_adapters(self._configuration())
+        meta_connectors = {
+            connector_type
+            for connector_type, definition in CONNECTOR_REGISTRY.items()
+            if definition.oauth_provider == "meta" and connector_type in adapters
+        }
+        self.assertEqual(meta_connectors, {"facebook"})
 
 
 class ConfiguredGmailReadTests(unittest.IsolatedAsyncioTestCase):

@@ -12,7 +12,7 @@ os.environ.setdefault("AIBOS_DATABASE_URL", "postgresql+asyncpg://database.inval
 os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 
 from app.core.config import settings  # noqa: E402
-from app.exceptions.integration import IntegrationStateError, IntegrationValidationError, IntegrationWebhookVerificationError  # noqa: E402
+from app.exceptions.integration import IntegrationCredentialUnavailableError, IntegrationProviderUnavailableError, IntegrationStateError, IntegrationValidationError, IntegrationWebhookVerificationError  # noqa: E402
 from app.integrations.adapters import ConnectorAdapterRegistry  # noqa: E402
 from app.integrations.contracts import (  # noqa: E402
     AuthorizationExchange,
@@ -29,6 +29,7 @@ from app.integrations.contracts import (  # noqa: E402
 from app.integrations.credentials import CredentialMaterial, InMemoryIntegrationCredentialStore  # noqa: E402
 from app.models.conversation import Conversation, ConversationMessage  # noqa: E402
 from app.models.customer import Customer  # noqa: E402
+from app.models.audit_log import AuditLog  # noqa: E402
 from app.models.integration import IntegrationConnection, IntegrationEntityLink, IntegrationOAuthState, IntegrationWebhookEvent  # noqa: E402
 from app.models.marketing import MarketingPerformance  # noqa: E402
 from app.schemas.integration import ResourceSelectionRequest  # noqa: E402
@@ -67,7 +68,16 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(oauth_state.state_hash, hashlib.sha256(state.encode()).hexdigest())
             self.assertNotEqual(oauth_state.state_hash, state)
             self.assertNotIn(state, oauth_state.pkce_verifier_reference)
+            self.assertEqual(oauth_state.business_id, BUSINESS_ID)
+            self.assertEqual(oauth_state.user_id, USER_ID)
             self.assertEqual(oauth_state.redirect_target, "/integrations")
+            state_material = await credential_store.retrieve(
+                oauth_state.pkce_verifier_reference,
+                business_id=BUSINESS_ID,
+                connector_type="gmail",
+                purpose="oauth_pkce",
+            )
+            self.assertEqual(state_material.values["oauth_provider"], "google")
             self.assertEqual(connection.status, "pending")
             self.assertEqual(result.connector_type, "gmail")
             states.append(state)
@@ -226,8 +236,315 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
                     connector_type="facebook", state=raw_state, code="code", configuration=configuration,
                 )
 
+    async def test_callback_rejects_tampered_state(self) -> None:
+        configuration = settings.model_copy(
+            update={
+                "integration_oauth_callback_url": (
+                    "https://api.example.test/api/v1/integrations/oauth/callback"
+                )
+            }
+        )
+        with self.assertRaises(IntegrationStateError):
+            await service.complete_authorization(
+                _Session(),  # type: ignore[arg-type]
+                connector_type=None,
+                state="tampered-state-with-no-server-record",
+                code="one-use-code",
+                configuration=configuration,
+            )
+
+    async def test_meta_callback_persists_only_tenant_bound_authorized_assets(self) -> None:
+        class MetaConnector(_FakeConnector):
+            connector_type = "facebook"
+
+            async def exchange_authorization_code(self, **_kwargs):
+                return AuthorizationExchange(
+                    credentials=CredentialMaterial(
+                        values={
+                            "access_token": "server-only-system-user-token",
+                            "meta_token_type": "SYSTEM_USER",
+                        }
+                    ),
+                    granted_scopes=(
+                        "pages_show_list",
+                        "pages_read_engagement",
+                        "pages_manage_metadata",
+                        "pages_messaging",
+                        "leads_retrieval",
+                        "pages_manage_ads",
+                    ),
+                )
+
+            async def get_identity(self, _credentials):
+                return ExternalIdentity(
+                    external_account_reference="system-user-1",
+                    display_name="9D Brain business integration",
+                )
+
+            async def list_resources(self, _credentials):
+                return [
+                    ExternalResource(
+                        "meta_business",
+                        "meta-business-1",
+                        "Customer Business",
+                    ),
+                    ExternalResource(
+                        "facebook_page",
+                        "page-1",
+                        "Customer Page",
+                        parent_reference="meta-business-1",
+                        metadata={
+                            "meta_business_id": "meta-business-1",
+                            "capabilities": "MESSAGING,ANALYZE",
+                        },
+                    ),
+                ]
+
+        credential_store = InMemoryIntegrationCredentialStore()
+        raw_state = "tenant-a-meta-state"
+        verifier_reference = await credential_store.store(
+            business_id=BUSINESS_ID,
+            connector_type="facebook",
+            purpose="oauth_pkce",
+            material=CredentialMaterial(
+                values={"code_verifier": "server-verifier"}
+            ),
+        )
+        oauth_state = IntegrationOAuthState(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            connector_type="facebook",
+            user_id=USER_ID,
+            state_hash=hashlib.sha256(raw_state.encode()).hexdigest(),
+            pkce_verifier_reference=verifier_reference,
+            redirect_target="/integrations",
+            expires_at=NOW + timedelta(minutes=5),
+            consumed_at=None,
+            created_at=NOW,
+        )
+        connection = _connection(
+            connector_type="facebook",
+            status="pending",
+            authentication_state="authorization_pending",
+            health="not_checked",
+            credential_reference="",
+        )
+        configuration = settings.model_copy(
+            update={
+                "integration_oauth_callback_url": (
+                    "https://api.example.test/api/v1/integrations/oauth/callback"
+                )
+            }
+        )
+
+        with patch("app.services.integrations.datetime", wraps=datetime) as clock:
+            clock.now.return_value = NOW
+            result = await service.complete_authorization(
+                _Session([oauth_state, connection]),  # type: ignore[arg-type]
+                connector_type=None,
+                state=raw_state,
+                code="one-use-meta-code",
+                adapters=ConnectorAdapterRegistry(
+                    {"facebook": MetaConnector()}
+                ),
+                credentials=credential_store,
+                configuration=configuration,
+            )
+
+        self.assertEqual(result.status, "connected")
+        self.assertEqual(connection.business_id, BUSINESS_ID)
+        self.assertEqual(
+            [item["external_reference"] for item in connection.selected_resources],
+            ["meta-business-1", "page-1"],
+        )
+        self.assertEqual(
+            connection.authorized_resources[1]["metadata"],
+            {
+                "meta_business_id": "meta-business-1",
+                "capabilities": "MESSAGING,ANALYZE",
+            },
+        )
+        self.assertNotIn(
+            "server-only-system-user-token",
+            repr(connection.__dict__),
+        )
+        with self.assertRaises(IntegrationCredentialUnavailableError):
+            await credential_store.retrieve(
+                connection.credential_reference,
+                business_id=uuid4(),
+                connector_type="facebook",
+                purpose="oauth_credentials",
+            )
+
+    async def test_meta_provider_error_is_consumed_audited_and_safe(self) -> None:
+        credential_store = InMemoryIntegrationCredentialStore()
+        raw_state = "meta-denied-state"
+        verifier_reference = await credential_store.store(
+            business_id=BUSINESS_ID,
+            connector_type="facebook",
+            purpose="oauth_pkce",
+            material=CredentialMaterial(
+                values={"code_verifier": "server-verifier"}
+            ),
+        )
+        oauth_state = IntegrationOAuthState(
+            id=uuid4(), business_id=BUSINESS_ID, connector_type="facebook",
+            user_id=USER_ID,
+            state_hash=hashlib.sha256(raw_state.encode()).hexdigest(),
+            pkce_verifier_reference=verifier_reference,
+            redirect_target="/integrations",
+            expires_at=NOW + timedelta(minutes=5), consumed_at=None,
+            created_at=NOW,
+        )
+        connection = _connection(
+            connector_type="facebook", status="pending",
+            authentication_state="authorization_pending", health="not_checked",
+        )
+        session = _Session([oauth_state, connection])
+        configuration = settings.model_copy(
+            update={
+                "integration_oauth_callback_url": (
+                    "https://api.example.test/api/v1/integrations/oauth/callback"
+                )
+            }
+        )
+
+        with patch("app.services.integrations.datetime", wraps=datetime) as clock:
+            clock.now.return_value = NOW
+            result = await service.complete_authorization(
+                session,  # type: ignore[arg-type]
+                connector_type=None,
+                state=raw_state,
+                code=None,
+                provider_error="access_denied",
+                credentials=credential_store,
+                configuration=configuration,
+            )
+
+        self.assertEqual(result.status, "degraded")
+        self.assertEqual(connection.failure_code, "authorization_denied")
+        self.assertEqual(connection.authentication_state, "failed")
+        self.assertEqual(oauth_state.consumed_at, NOW)
+        audit = next(item for item in session.added if isinstance(item, AuditLog))
+        self.assertEqual(audit.event_type, "integration.connection_failed")
+        self.assertEqual(audit.status, "failed")
+        with self.assertRaises(IntegrationCredentialUnavailableError):
+            await credential_store.retrieve(
+                verifier_reference,
+                business_id=BUSINESS_ID,
+                connector_type="facebook",
+                purpose="oauth_pkce",
+            )
+
+    async def test_meta_token_exchange_failure_marks_connection_error(self) -> None:
+        class FailingMetaConnector(_FakeConnector):
+            connector_type = "facebook"
+
+            async def exchange_authorization_code(self, **_kwargs):
+                raise IntegrationProviderUnavailableError(
+                    "private-meta-error"
+                )
+
+        credential_store = InMemoryIntegrationCredentialStore()
+        raw_state = "meta-exchange-failure-state"
+        verifier_reference = await credential_store.store(
+            business_id=BUSINESS_ID,
+            connector_type="facebook",
+            purpose="oauth_pkce",
+            material=CredentialMaterial(
+                values={"code_verifier": "server-verifier"}
+            ),
+        )
+        oauth_state = IntegrationOAuthState(
+            id=uuid4(), business_id=BUSINESS_ID, connector_type="facebook",
+            user_id=USER_ID,
+            state_hash=hashlib.sha256(raw_state.encode()).hexdigest(),
+            pkce_verifier_reference=verifier_reference,
+            redirect_target="/integrations",
+            expires_at=NOW + timedelta(minutes=5), consumed_at=None,
+            created_at=NOW,
+        )
+        connection = _connection(
+            connector_type="facebook", status="pending",
+            authentication_state="authorization_pending", health="not_checked",
+        )
+        configuration = settings.model_copy(
+            update={
+                "integration_oauth_callback_url": (
+                    "https://api.example.test/api/v1/integrations/oauth/callback"
+                )
+            }
+        )
+
+        with patch("app.services.integrations.datetime", wraps=datetime) as clock:
+            clock.now.return_value = NOW
+            result = await service.complete_authorization(
+                _Session([oauth_state, connection]),  # type: ignore[arg-type]
+                connector_type=None,
+                state=raw_state,
+                code="one-use-meta-code",
+                adapters=ConnectorAdapterRegistry(
+                    {"facebook": FailingMetaConnector()}
+                ),
+                credentials=credential_store,
+                configuration=configuration,
+            )
+
+        self.assertEqual(result.status, "degraded")
+        self.assertEqual(
+            connection.failure_code,
+            "authorization_exchange_failed",
+        )
+
 
 class IntegrationLifecycleServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_meta_disconnect_revokes_tenant_credential_and_clears_assets(self) -> None:
+        credential_store = InMemoryIntegrationCredentialStore()
+        reference = await credential_store.store(
+            business_id=BUSINESS_ID,
+            connector_type="facebook",
+            purpose="oauth_credentials",
+            material=CredentialMaterial(
+                values={"access_token": "server-only-system-user-token"}
+            ),
+        )
+        connection = _connection(
+            connector_type="facebook",
+            credential_reference=reference,
+        )
+        connection.authorized_resources = [
+            {
+                "resource_type": "facebook_page",
+                "external_reference": "page-1",
+                "display_name": "Customer Page",
+            }
+        ]
+        connector = _FakeConnector()
+        connector.connector_type = "facebook"
+
+        result = await service.disconnect(
+            _Session([connection]),  # type: ignore[arg-type]
+            business_id=BUSINESS_ID,
+            connection_id=connection.id,
+            actor_user_id=USER_ID,
+            adapters=ConnectorAdapterRegistry({"facebook": connector}),
+            credentials=credential_store,
+        )
+
+        self.assertEqual(result.status, "disconnected")
+        self.assertEqual(result.authentication_state, "not_authorized")
+        self.assertEqual(result.health, "not_checked")
+        self.assertIsNone(result.credential_reference)
+        self.assertEqual(result.selected_resources, [])
+        self.assertEqual(result.authorized_resources, [])
+        with self.assertRaises(IntegrationCredentialUnavailableError):
+            await credential_store.retrieve(
+                reference,
+                business_id=BUSINESS_ID,
+                connector_type="facebook",
+                purpose="oauth_credentials",
+            )
+
     async def test_only_provider_returned_resource_can_be_selected(self) -> None:
         connection = _connection()
         returned = ExternalResource(

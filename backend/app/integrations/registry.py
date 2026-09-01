@@ -80,7 +80,7 @@ def _connector(
         resource_types=resources,
         required_configuration_fields={
             "google": ("google_oauth_client_id", "google_oauth_client_secret", "integration_oauth_callback_url", "credential_store"),
-            "meta": ("meta_oauth_client_id", "meta_oauth_client_secret", "integration_oauth_callback_url", "credential_store"),
+            "meta": ("meta_oauth_client_id", "meta_oauth_client_secret", "meta_login_configuration_id", "integration_oauth_callback_url", "credential_store"),
             "microsoft": ("microsoft_oauth_client_id", "microsoft_oauth_client_secret", "integration_oauth_callback_url", "credential_store"),
         }[oauth_provider],
         resource_selection_required=bool(resources),
@@ -129,11 +129,18 @@ _DEFINITIONS: Final[tuple[ConnectorDefinition, ...]] = (
         resources=("meta_business", "ad_account", "meta_catalog", "facebook_page", "conversion_dataset"), webhook=True,
     ),
     _connector(
-        "facebook", "Facebook", "Read selected Pages and content performance.",
-        "social", "meta", reads=("read_pages", "read_content_performance"),
+        "facebook", "Meta Pages & Messenger", "Connect authorized Facebook Pages for engagement, Messenger, and lead retrieval.",
+        "social", "meta", reads=("read_pages", "read_content_performance", "receive_messages", "retrieve_leads"),
         future_writes=("future_publish_content",),
-        scopes=("pages_show_list", "pages_read_engagement"),
-        write_scopes=("pages_manage_posts",), resources=("facebook_page",), webhook=True,
+        scopes=(
+            "pages_show_list",
+            "pages_read_engagement",
+            "pages_manage_metadata",
+            "pages_messaging",
+            "leads_retrieval",
+            "pages_manage_ads",
+        ),
+        resources=("meta_business", "facebook_page"), webhook=True,
     ),
     _connector(
         "instagram", "Instagram", "Read selected professional accounts and content performance.",

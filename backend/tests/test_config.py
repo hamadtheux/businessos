@@ -258,6 +258,48 @@ class SettingsValidationTests(unittest.TestCase):
         self.assertNotIn("storage-access-key", repr(config))
         self.assertNotIn("storage-secret-key", repr(config))
 
+    def test_meta_render_environment_aliases_are_supported_server_side(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "AIBOS_DATABASE_URL": TEST_DATABASE_URL,
+                "AIBOS_AUTH_SECRET_KEY": TEST_AUTH_SECRET,
+                "AIBOS_INTEGRATION_CREDENTIAL_BACKEND": "aws_secrets_manager",
+                "AIBOS_INTEGRATION_SECRET_REGION": "us-east-1",
+                "AIBOS_INTEGRATION_OAUTH_CALLBACK_URL": (
+                    "https://api.example.test/api/v1/integrations/oauth/callback"
+                ),
+                "META_APP_ID": "render-meta-app-id",
+                "META_APP_SECRET": "render-meta-app-secret",
+                "META_LOGIN_CONFIG_ID": "render-login-configuration-id",
+            },
+            clear=True,
+        ):
+            config = Settings(_env_file=None)
+
+        self.assertEqual(config.meta_oauth_client_id, "render-meta-app-id")
+        self.assertEqual(
+            config.meta_login_configuration_id,
+            "render-login-configuration-id",
+        )
+        self.assertEqual(
+            config.meta_oauth_client_secret.get_secret_value(),
+            "render-meta-app-secret",
+        )
+        self.assertNotIn("render-meta-app-secret", repr(config))
+
+    def test_meta_oauth_requires_login_for_business_configuration(self) -> None:
+        with self.assertRaises(ValidationError):
+            self._settings(
+                integration_credential_backend="aws_secrets_manager",
+                integration_secret_region="us-east-1",
+                integration_oauth_callback_url=(
+                    "https://api.example.test/api/v1/integrations/oauth/callback"
+                ),
+                meta_oauth_client_id="meta-app-id",
+                meta_oauth_client_secret="meta-app-secret",
+            )
+
     def test_refresh_cookie_samesite_none_is_not_supported(self) -> None:
         with self.assertRaises(ValidationError):
             self._settings(auth_refresh_cookie_samesite="none")

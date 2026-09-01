@@ -115,15 +115,25 @@ class ConfiguredOAuthConnector:
         self, request: AuthorizationRequest
     ) -> str:
         endpoint = OAUTH_PROVIDER_ENDPOINTS[self._provider].authorization_endpoint
+        if self._provider == "meta":
+            endpoint = (
+                "https://www.facebook.com/"
+                f"{self._configuration.meta_graph_api_version}/dialog/oauth"
+            )
         values = {
             "client_id": self._client_id,
             "redirect_uri": request.redirect_uri,
             "response_type": "code",
             "scope": " ".join(request.scopes),
             "state": request.state,
-            "code_challenge": request.code_challenge,
-            "code_challenge_method": "S256",
         }
+        if self._provider != "meta":
+            values.update(
+                {
+                    "code_challenge": request.code_challenge,
+                    "code_challenge_method": "S256",
+                }
+            )
         if self._provider == "google":
             values.update(
                 {
@@ -131,11 +141,38 @@ class ConfiguredOAuthConnector:
                     "prompt": "consent",
                 }
             )
+        elif self._provider == "meta":
+            configuration_id = self._configuration.meta_login_configuration_id
+            if not configuration_id:
+                raise IntegrationProviderUnavailableError(
+                    "provider_unavailable"
+                )
+            values.update(
+                {
+                    "scope": ",".join(request.scopes),
+                    "config_id": configuration_id,
+                    "auth_type": "rerequest",
+                    "override_default_response_type": "true",
+                }
+            )
         return f"{endpoint}?{urlencode(values)}"
 
     async def exchange_authorization_code(
         self, *, code: str, code_verifier: str, redirect_uri: str
     ) -> AuthorizationExchange:
+        if self._provider == "meta":
+            response = await self._http.request_json(
+                "POST",
+                f"{self._meta_root()}/oauth/access_token",
+                data={
+                    "client_id": self._client_id,
+                    "client_secret": self._client_secret,
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                },
+            )
+            return await self._meta_system_user_exchange(response)
+
         endpoint = OAUTH_PROVIDER_ENDPOINTS[self._provider].token_endpoint
         response = await self._http.request_json(
             "POST",
@@ -149,8 +186,6 @@ class ConfiguredOAuthConnector:
                 "grant_type": "authorization_code",
             },
         )
-        if self._provider == "meta":
-            response = await self._exchange_long_lived_meta_token(response)
         material = _token_material(response)
         scopes = _scopes(response.get("scope")) or CONNECTOR_REGISTRY[
             self.connector_type
@@ -186,11 +221,13 @@ class ConfiguredOAuthConnector:
                     status="refreshed",
                     credentials=CredentialMaterial(values=values),
                 )
-            response = await self._exchange_long_lived_meta_token(
-                {"access_token": credentials.values.get("access_token", "")}
-            )
+            # Facebook Login for Business returns a Business Integration
+            # System User token. It is not a short-lived user token and must
+            # not be sent through the fb_exchange_token flow. An expiring
+            # system-user credential requires a fresh business authorization.
             return CredentialRefreshResult(
-                status="refreshed", credentials=_token_material(response)
+                status="reauth_required",
+                failure_code="authorization_expired",
             )
         except _ProviderHttpError as exc:
             if exc.status_code in {400, 401, 403}:
@@ -614,19 +651,80 @@ class ConfiguredOAuthConnector:
             return NormalizedCampaignStatus(campaign_reference, normalized, provider_status[:64], issues)
         raise IntegrationProviderUnavailableError("provider_unavailable")
 
-    async def _exchange_long_lived_meta_token(
-        self, response: Mapping[str, object]
-    ) -> Mapping[str, object]:
-        token = _required_string(response, "access_token")
-        return await self._http.request_json(
+    async def _meta_system_user_exchange(
+        self,
+        response: Mapping[str, object],
+    ) -> AuthorizationExchange:
+        token_payload = response.get("data")
+        if not isinstance(token_payload, Mapping):
+            token_payload = response
+        token = _required_string(token_payload, "access_token")
+        debug_response = await self._http.request_json(
             "GET",
-            OAUTH_PROVIDER_ENDPOINTS["meta"].token_endpoint,
+            f"{self._meta_root()}/debug_token",
+            headers=_bearer(f"{self._client_id}|{self._client_secret}"),
             params={
-                "grant_type": "fb_exchange_token",
-                "client_id": self._client_id,
-                "client_secret": self._client_secret,
-                "fb_exchange_token": token,
+                "input_token": token,
             },
+        )
+        debug = debug_response.get("data")
+        if not isinstance(debug, Mapping):
+            raise IntegrationProviderUnavailableError(
+                "provider_response_invalid"
+            )
+        app_id = debug.get("app_id")
+        token_kind = debug.get("type")
+        if (
+            debug.get("is_valid") is not True
+            or str(app_id) != self._client_id
+            or token_kind not in {
+                "SYSTEM_USER",
+                "BUSINESS_INTEGRATION_SYSTEM_USER",
+            }
+        ):
+            raise IntegrationProviderUnavailableError(
+                "provider_response_invalid"
+            )
+
+        scopes = _string_sequence(debug.get("scopes"), limit=30)
+        if not scopes:
+            raise IntegrationProviderUnavailableError(
+                "provider_response_invalid"
+            )
+
+        values = {
+            "access_token": token,
+            "token_type": (
+                _optional_string(token_payload, "token_type") or "bearer"
+            ),
+            "meta_token_type": str(token_kind),
+            "scope": " ".join(scopes),
+        }
+        system_user_id = debug.get("user_id")
+        if isinstance(system_user_id, (str, int)) and str(system_user_id):
+            values["system_user_id"] = str(system_user_id)[:255]
+
+        expires_at = _positive_unix_timestamp(debug.get("expires_at"))
+        if expires_at is None:
+            expires_in = token_payload.get("expires_in")
+            if isinstance(expires_in, (int, float)) and expires_in > 0:
+                expires_at = datetime.now(UTC) + timedelta(
+                    seconds=min(int(expires_in), 31_536_000)
+                )
+        if expires_at is not None:
+            values["expires_at"] = expires_at.isoformat()
+
+        data_access_expires_at = _positive_unix_timestamp(
+            debug.get("data_access_expires_at")
+        )
+        if data_access_expires_at is not None:
+            values["data_access_expires_at"] = (
+                data_access_expires_at.isoformat()
+            )
+
+        return AuthorizationExchange(
+            credentials=CredentialMaterial(values=values),
+            granted_scopes=scopes,
         )
 
     async def _list_meta_resources(self, token: str) -> Sequence[ExternalResource]:
@@ -637,14 +735,46 @@ class ConfiguredOAuthConnector:
                 f"{root}/me/accounts",
                 token=token,
                 params={
-                    "fields": "id,name,instagram_business_account{id,username}",
+                    "fields": (
+                        "id,name,business{id,name},tasks,"
+                        "instagram_business_account{id,username}"
+                    ),
                     "limit": "100",
                 },
             )
+            businesses: dict[str, ExternalResource] = {}
             for item in pages:
                 page_id = _required_string(item, "id")
+                business = item.get("business")
+                metadata: dict[str, str] = {}
+                parent_reference: str | None = None
+                if isinstance(business, Mapping):
+                    business_id = _required_string(business, "id")
+                    business_name = (
+                        _optional_string(business, "name") or business_id
+                    )[:160]
+                    parent_reference = business_id
+                    metadata["meta_business_id"] = business_id
+                    if self.connector_type == "facebook":
+                        businesses.setdefault(
+                            business_id,
+                            ExternalResource(
+                                "meta_business",
+                                business_id,
+                                business_name,
+                            ),
+                        )
+                tasks = _string_sequence(item.get("tasks"), limit=20)
+                if tasks:
+                    metadata["capabilities"] = ",".join(tasks)[:255]
                 resources.append(
-                    ExternalResource("facebook_page", page_id, (_optional_string(item, "name") or page_id)[:160])
+                    ExternalResource(
+                        "facebook_page",
+                        page_id,
+                        (_optional_string(item, "name") or page_id)[:160],
+                        parent_reference=parent_reference,
+                        metadata=metadata or None,
+                    )
                 )
                 instagram = item.get("instagram_business_account")
                 if self.connector_type == "instagram" and isinstance(instagram, dict):
@@ -657,7 +787,7 @@ class ConfiguredOAuthConnector:
                             parent_reference=page_id,
                         )
                     )
-            return resources[:100]
+            return [*businesses.values(), *resources][:_MAX_PROVIDER_ITEMS]
         businesses = await self._meta_paged_items(
             f"{root}/me/businesses", token=token, params={"limit": "100"}
         )
@@ -928,6 +1058,14 @@ def build_configured_oauth_adapters(
         client_id, secret = providers[definition.oauth_provider]
         if not client_id or secret is None:
             continue
+        if definition.oauth_provider == "meta" and (
+            connector_type != "facebook"
+            or not configuration.meta_login_configuration_id
+        ):
+            # This production configuration is intentionally scoped to Pages,
+            # Messenger, and leads. Ads, Instagram, Catalog, and WhatsApp use
+            # separate future Login for Business configurations.
+            continue
         if connector_type == "google_ads" and configuration.google_ads_developer_token is None:
             continue
         values[connector_type] = ConfiguredOAuthConnector(
@@ -982,6 +1120,32 @@ def _scopes(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
         return tuple(item for item in value.split() if item)[:30]
     return ()
+
+
+def _string_sequence(value: object, *, limit: int) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) > limit:
+        return ()
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            return ()
+        normalized = item.strip()
+        if not normalized or len(normalized) > 255:
+            return ()
+        if normalized not in result:
+            result.append(normalized)
+    return tuple(result)
+
+
+def _positive_unix_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, (int, float)) or value <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(value, tz=UTC)
+    except (ValueError, OverflowError, OSError):
+        raise IntegrationProviderUnavailableError(
+            "provider_response_invalid"
+        ) from None
 
 
 def _items(value: Mapping[str, object]) -> list[Mapping[str, object]]:
