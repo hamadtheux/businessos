@@ -1,0 +1,401 @@
+@keyframes app-bootstrap-orbit-forward {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes app-bootstrap-orbit-reverse {
+  to {
+    transform: rotate(-360deg);
+  }
+}
+
+@keyframes app-bootstrap-breathe {
+  0%,
+  100% {
+    opacity: 0.54;
+    transform: scale(0.96);
+  }
+  50% {
+    opacity: 0.92;
+    transform: scale(1.04);
+  }
+}
+
+@keyframes app-bootstrap-stage {
+  0%,
+  29% {
+    color: #176b31;
+    opacity: 1;
+  }
+  33%,
+  100% {
+    color: #68786e;
+    opacity: 0.52;
+  }
+}
+
+@keyframes app-bootstrap-scan {
+  0% {
+    opacity: 0;
+    transform: translateX(-115%);
+  }
+  12%,
+  82% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(315%);
+  }
+}
+
+.app-bootstrap-screen {
+  position: relative;
+  isolation: isolate;
+  min-height: 100vh;
+  min-height: 100dvh;
+  width: 100%;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  padding: clamp(24px, 5vw, 56px);
+  color: #1a2e21;
+  background:
+    radial-gradient(circle at 50% 44%, rgba(127, 202, 72, 0.09), transparent 23rem),
+    radial-gradient(circle at 50% 115%, rgba(29, 134, 58, 0.055), transparent 32rem),
+    #f8f8f4;
+}
+
+.app-bootstrap-screen::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  left: 50%;
+  top: 50%;
+  width: min(72vw, 620px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 1px solid rgba(29, 134, 58, 0.035);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.app-bootstrap-content {
+  width: min(100%, 520px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.app-bootstrap-visual {
+  position: relative;
+  width: 188px;
+  height: 188px;
+  margin-bottom: 26px;
+  flex: none;
+}
+
+.app-bootstrap-aura {
+  position: absolute;
+  inset: 44px;
+  border-radius: 50%;
+  background: rgba(127, 202, 72, 0.2);
+  filter: blur(17px);
+  animation: app-bootstrap-breathe 3.8s ease-in-out infinite;
+}
+
+.app-bootstrap-system {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.app-bootstrap-guide,
+.app-bootstrap-orbit > circle:first-child {
+  fill: none;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.app-bootstrap-guide {
+  stroke: rgba(29, 134, 58, 0.105);
+  stroke-width: 1;
+}
+
+.app-bootstrap-guide.guide-middle {
+  stroke: rgba(29, 134, 58, 0.085);
+}
+
+.app-bootstrap-guide.guide-inner {
+  stroke: rgba(29, 134, 58, 0.075);
+}
+
+.app-bootstrap-orbit {
+  transform-box: view-box;
+  transform-origin: 100px 100px;
+  will-change: transform;
+}
+
+.app-bootstrap-orbit > circle:first-child {
+  stroke: #1d863a;
+  stroke-width: 1.35;
+}
+
+.app-bootstrap-orbit.orbit-outer {
+  animation: app-bootstrap-orbit-forward 19s linear infinite;
+}
+
+.app-bootstrap-orbit.orbit-outer > circle:first-child {
+  stroke-dasharray: 10 38 18 34;
+  stroke-opacity: 0.48;
+}
+
+.app-bootstrap-orbit.orbit-middle {
+  animation: app-bootstrap-orbit-reverse 14s linear infinite;
+}
+
+.app-bootstrap-orbit.orbit-middle > circle:first-child {
+  stroke: #47b345;
+  stroke-dasharray: 20 31 8 41;
+  stroke-opacity: 0.52;
+}
+
+.app-bootstrap-orbit.orbit-inner {
+  animation: app-bootstrap-orbit-forward 10s linear infinite;
+}
+
+.app-bootstrap-orbit.orbit-inner > circle:first-child {
+  stroke: #7fca48;
+  stroke-dasharray: 8 48 24 20;
+  stroke-opacity: 0.58;
+}
+
+.app-bootstrap-node {
+  fill: #7fca48;
+  filter: drop-shadow(0 0 4px rgba(127, 202, 72, 0.78));
+}
+
+.app-bootstrap-logo-core {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 94px;
+  height: 94px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(29, 134, 58, 0.11);
+  border-radius: 50%;
+  background: rgba(255, 255, 252, 0.92);
+  box-shadow:
+    0 18px 44px rgba(17, 81, 39, 0.105),
+    inset 0 1px 0 rgba(255, 255, 255, 0.94);
+  transform: translate(-50%, -50%);
+}
+
+.app-bootstrap-error-badge {
+  position: absolute;
+  left: calc(50% + 23px);
+  top: calc(50% + 25px);
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 3px solid #f8f8f4;
+  border-radius: 50%;
+  color: #a8541a;
+  background: #fff5e8;
+  box-shadow: 0 6px 16px rgba(127, 65, 22, 0.16);
+}
+
+.app-bootstrap-error-badge svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2.25;
+}
+
+.app-bootstrap-visual[data-state="error"] .app-bootstrap-aura {
+  background: rgba(199, 119, 54, 0.13);
+  animation: none;
+}
+
+.app-bootstrap-visual[data-state="error"] .app-bootstrap-guide {
+  stroke: rgba(168, 84, 26, 0.1);
+}
+
+.app-bootstrap-visual[data-state="error"] .app-bootstrap-orbit {
+  animation: none;
+}
+
+.app-bootstrap-visual[data-state="error"] .app-bootstrap-orbit > circle:first-child {
+  stroke: #b66a31;
+  stroke-opacity: 0.34;
+}
+
+.app-bootstrap-visual[data-state="error"] .app-bootstrap-node {
+  fill: #c1773b;
+  filter: none;
+}
+
+.app-bootstrap-content h1 {
+  margin: 0;
+  color: #192b20;
+  font-size: clamp(26px, 3.2vw, 30px);
+  font-weight: 600;
+  line-height: 1.18;
+  letter-spacing: -0.035em;
+}
+
+.app-bootstrap-description {
+  max-width: 440px;
+  margin: 10px 0 0;
+  color: #56675d;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.app-bootstrap-tertiary {
+  margin: 5px 0 0;
+  color: #7a8980;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.app-bootstrap-sequence {
+  width: min(100%, 410px);
+  margin-top: 24px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: center;
+}
+
+.app-bootstrap-stage {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: #68786e;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: nowrap;
+  opacity: 0.52;
+  animation: app-bootstrap-stage 6s ease-in-out infinite;
+}
+
+.app-bootstrap-stage::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.app-bootstrap-stage:nth-child(2) {
+  animation-delay: 2s;
+}
+
+.app-bootstrap-stage:nth-child(3) {
+  animation-delay: 4s;
+}
+
+.app-bootstrap-progress {
+  width: min(100%, 350px);
+  height: 2px;
+  margin-top: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(29, 134, 58, 0.09);
+}
+
+.app-bootstrap-progress span {
+  display: block;
+  width: 29%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, #7fca48 44%, #1d863a 70%, transparent);
+  box-shadow: 0 0 10px rgba(127, 202, 72, 0.44);
+  will-change: transform;
+  animation: app-bootstrap-scan 3.5s ease-in-out infinite;
+}
+
+.app-bootstrap-retry {
+  min-height: 42px;
+  margin-top: 24px;
+  padding-inline: 18px;
+  font-size: 12px;
+}
+
+@media (max-width: 520px) {
+  .app-bootstrap-screen {
+    padding: 22px;
+  }
+
+  .app-bootstrap-visual {
+    width: 168px;
+    height: 168px;
+    margin-bottom: 23px;
+  }
+
+  .app-bootstrap-logo-core {
+    width: 88px;
+    height: 88px;
+  }
+
+  .app-bootstrap-content h1 {
+    font-size: 25px;
+  }
+
+  .app-bootstrap-sequence {
+    margin-top: 22px;
+  }
+
+  .app-bootstrap-stage {
+    gap: 5px;
+    font-size: 12px;
+  }
+
+  .app-bootstrap-stage::before {
+    width: 4px;
+    height: 4px;
+  }
+}
+
+@media (max-width: 390px) {
+  .app-bootstrap-sequence {
+    gap: 8px 16px;
+    grid-template-columns: 1fr;
+  }
+
+  .app-bootstrap-progress {
+    width: min(100%, 230px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-bootstrap-aura,
+  .app-bootstrap-orbit,
+  .app-bootstrap-stage,
+  .app-bootstrap-progress span {
+    animation: none;
+  }
+
+  .app-bootstrap-stage:first-child {
+    color: #176b31;
+    opacity: 1;
+  }
+
+  .app-bootstrap-progress span {
+    width: 38%;
+    opacity: 0.68;
+    transform: none;
+  }
+}

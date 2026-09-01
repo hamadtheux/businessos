@@ -15,12 +15,11 @@ import {
   useLocation,
 } from "wouter";
 import { BusinessProvider, useBusiness } from "@/business-context";
+import { AppBootstrapScreen } from "@/components/app-bootstrap-screen";
 import { AppShell } from "@/components/app-shell";
 import { ErrorBoundary } from "@/components/error-boundary";
-import { ProductLogo } from "@/components/product-brand";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { PRODUCT_NAME } from "@/config/brand";
 import { AuthProvider, useAuth } from "@/features/auth/auth-context";
 import { LoginPage, RegisterPage } from "@/features/auth/auth-pages";
 import { OnboardingPage } from "@/features/onboarding/onboarding-page";
@@ -337,27 +336,15 @@ function RoutedApp() {
   ]);
 
   if (bootstrapping) {
-    return (
-      <div className="empty full-screen-loading">
-        <ProductLogo
-          className="product-logo-state product-logo-pulse"
-          size="lg"
-        />
-        <h3>Opening {PRODUCT_NAME}</h3>
-        <p>Restoring your secure workspace…</p>
-      </div>
-    );
+    return <AppBootstrapScreen />;
   }
   if (status === "recoverable_error") {
     return (
-      <div className="empty full-screen-loading">
-        <AlertCircle />
-        <h3>Cannot open {PRODUCT_NAME}</h3>
-        <p>{authError}</p>
-        <button className="btn btn-green" onClick={retryBootstrap}>
-          <RefreshCw /> Retry connection
-        </button>
-      </div>
+      <AppBootstrapScreen
+        mode="error"
+        error={authError}
+        onRetry={retryBootstrap}
+      />
     );
   }
   if (status === "authenticated" && businessesError) {
