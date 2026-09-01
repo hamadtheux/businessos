@@ -411,96 +411,112 @@ export function AppShell({ children }: { children: ReactNode }) {
       </aside>
       <main className="workspace">
         <header className="topbar">
-          <button
-            className="mobile-menu"
-            onClick={() => setOpen((value) => !value)}
-            aria-label="Toggle navigation"
-            data-testid="button-toggle-navigation"
-          >
-            {open ? <PanelLeftClose /> : <Menu />}
-          </button>
-          <form className="global-search" onSubmit={runCommand}>
-            <Search />
-            <input
-              value={command}
-              onChange={(event) => setCommand(event.target.value)}
-              placeholder="Ask your AI Business Manager..."
-              aria-label="Ask your AI Business Manager"
-              data-testid="input-global-command"
-            />
-          </form>
-          <div
-            className="business-select-wrap"
-            style={{ position: "relative" }}
-          >
+          <div className="topbar-left">
             <button
-              className="business-select"
-              onClick={() => setBusinessOpen((value) => !value)}
-              data-testid="button-business-selector"
+              className="mobile-menu"
+              onClick={() => setOpen((value) => !value)}
+              aria-label="Toggle navigation"
+              data-testid="button-toggle-navigation"
             >
-              <TenantLogo
-                businessName={activeBusiness.name}
-                logoUrl={resolveTenantLogoSource(activeBusiness.brandIdentity)}
-                tenantKey={activeBusiness.id}
-              />
-              <span>{activeBusiness.name}</span>
-              <ChevronDown size={13} />
+              {open ? <PanelLeftClose /> : <Menu />}
             </button>
-            {businessOpen && (
-              <div
-                className="card"
-                style={{
-                  position: "absolute",
-                  top: 42,
-                  right: 0,
-                  width: 245,
-                  zIndex: 30,
-                  padding: 7,
-                }}
+
+            <form className="global-search" onSubmit={runCommand}>
+              <Search />
+              <input
+                value={command}
+                onChange={(event) => setCommand(event.target.value)}
+                placeholder="Ask your AI Business Manager..."
+                aria-label="Ask your AI Business Manager"
+                data-testid="input-global-command"
+              />
+            </form>
+
+            <div
+              className="business-select-wrap"
+              style={{ position: "relative" }}
+            >
+              <button
+                className="business-select"
+                onClick={() => setBusinessOpen((value) => !value)}
+                data-testid="button-business-selector"
+                aria-expanded={businessOpen}
+                aria-haspopup="menu"
               >
-                {businesses.map((item) => (
-                  <button
-                    key={item.id}
-                    className={cx(
-                      "channel",
-                      item.id === activeBusinessId && "active",
-                    )}
-                    onClick={() => {
-                      selectBusiness(item.id);
-                      setBusinessOpen(false);
-                      notify(`Switched to ${item.name}`);
-                    }}
-                  >
-                    <span className="business-menu-name">
-                      <TenantLogo
-                        businessName={item.name}
-                        logoUrl={resolveTenantLogoSource(item.brandIdentity)}
-                        tenantKey={item.id}
-                      />
-                      {item.name}
-                    </span>
-                    {item.id === activeBusinessId && <Check size={13} />}
-                  </button>
-                ))}
-                <button
-                  className="channel"
-                  onClick={() => {
-                    setBusinessOpen(false);
-                    try {
-                      sessionStorage.removeItem(
-                        "ai-business-os:onboarding-draft:v2",
-                      );
-                    } catch {
-                      // Starting a fresh business must not depend on browser storage.
-                    }
-                    setLocation("/onboarding");
+                <TenantLogo
+                  businessName={activeBusiness.name}
+                  logoUrl={resolveTenantLogoSource(activeBusiness.brandIdentity)}
+                  tenantKey={activeBusiness.id}
+                />
+
+                <span>{activeBusiness.name}</span>
+
+                <ChevronDown size={13} />
+              </button>
+
+              {businessOpen && (
+                <div
+                  className="card business-select-menu"
+                  style={{
+                    position: "absolute",
+                    top: 42,
+                    left: 0,
+                    width: 245,
+                    zIndex: 30,
+                    padding: 7,
                   }}
                 >
-                  <Plus size={13} /> Add business
-                </button>
-              </div>
-            )}
+                  {businesses.map((item) => (
+                    <button
+                      key={item.id}
+                      className={cx(
+                        "channel",
+                        item.id === activeBusinessId && "active",
+                      )}
+                      onClick={() => {
+                        selectBusiness(item.id);
+                        setBusinessOpen(false);
+                        notify(`Switched to ${item.name}`);
+                      }}
+                    >
+                      <span className="business-menu-name">
+                        <TenantLogo
+                          businessName={item.name}
+                          logoUrl={resolveTenantLogoSource(item.brandIdentity)}
+                          tenantKey={item.id}
+                        />
+
+                        {item.name}
+                      </span>
+
+                      {item.id === activeBusinessId && <Check size={13} />}
+                    </button>
+                  ))}
+
+                  <button
+                    className="channel"
+                    onClick={() => {
+                      setBusinessOpen(false);
+
+                      try {
+                        sessionStorage.removeItem(
+                          "ai-business-os:onboarding-draft:v2",
+                        );
+                      } catch {
+                        // Starting a fresh business must not depend on browser storage.
+                      }
+
+                      setLocation("/onboarding");
+                    }}
+                  >
+                    <Plus size={13} />
+                    Add business
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
+
           <div className="top-actions">
             <button
               className="icon-btn help-btn"
@@ -510,6 +526,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             >
               <CircleHelp />
             </button>
+
             <button
               className="icon-btn"
               aria-label="Notifications"
@@ -517,15 +534,24 @@ export function AppShell({ children }: { children: ReactNode }) {
               onClick={() => setNotificationsOpen(true)}
             >
               <Bell />
+
               {unreadNotifications > 0 && <i className="notif-dot" />}
             </button>
-            <Avatar name={displayName} />
+
             <Button
               variant="primary"
-              onClick={() => setLocation(canAutomate ? "/automations" : "/billing?feature=automations")}
+              onClick={() =>
+                setLocation(
+                  canAutomate
+                    ? "/automations"
+                    : "/billing?feature=automations",
+                )
+              }
               data-testid="button-new-automation"
             >
-              {canAutomate ? <Plus /> : <CreditCard />} {canAutomate ? "New automation" : "View plan"}
+              {canAutomate ? <Plus /> : <CreditCard />}
+
+              {canAutomate ? "New automation" : "View plan"}
             </Button>
           </div>
         </header>
