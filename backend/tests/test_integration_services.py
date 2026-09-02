@@ -777,6 +777,32 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
 
         adapter.revoke_credentials.assert_awaited_once()
 
+    async def test_meta_public_profile_is_accepted_without_pages_manage_ads(self) -> None:
+        granted_scopes = (
+            "pages_show_list",
+            "pages_read_engagement",
+            "pages_manage_metadata",
+            "pages_messaging",
+            "leads_retrieval",
+            "public_profile",
+        )
+        adapter = _MetaAuthorizationConnector(
+            granted_scopes=granted_scopes
+        )
+        adapter.revoke_credentials = AsyncMock()
+
+        result, connection, _, _, _ = await self._complete_meta_callback(
+            adapter,
+            raw_state="meta-public-profile-state",
+        )
+
+        self.assertEqual(result.status, "connected")
+        self.assertEqual(connection.status, "connected")
+        self.assertEqual(connection.authentication_state, "authorized")
+        self.assertEqual(set(connection.scopes_granted), set(granted_scopes))
+        self.assertNotIn("pages_manage_ads", connection.scopes_granted)
+        adapter.revoke_credentials.assert_not_awaited()
+
     async def test_meta_missing_or_invalid_granted_scopes_are_revoked(self) -> None:
         cases = (
             ("missing", ()),

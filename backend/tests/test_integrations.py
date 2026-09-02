@@ -662,6 +662,32 @@ class ConfiguredMetaLoginForBusinessTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    def test_facebook_pages_ads_permission_is_optional_when_writes_disabled(self) -> None:
+        definition = CONNECTOR_REGISTRY["facebook"]
+
+        self.assertEqual(
+            definition.oauth_read_scopes,
+            (
+                "pages_show_list",
+                "pages_read_engagement",
+                "pages_manage_metadata",
+                "pages_messaging",
+                "leads_retrieval",
+            ),
+        )
+        self.assertEqual(
+            definition.oauth_write_scopes,
+            ("pages_manage_ads",),
+        )
+        self.assertNotIn(
+            "pages_manage_ads",
+            definition.requested_oauth_scopes("disabled"),
+        )
+        self.assertIn(
+            "pages_manage_ads",
+            definition.oauth_scopes,
+        )
+
     def test_pages_configuration_does_not_enable_other_meta_connectors(self) -> None:
         adapters = build_configured_oauth_adapters(self._configuration())
         meta_connectors = {

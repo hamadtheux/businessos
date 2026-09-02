@@ -442,10 +442,14 @@ async def complete_authorization(
             for scope in exchange.granted_scopes
         )
     )
+    allowed_granted_scopes = set(definition.oauth_scopes)
+    if definition.oauth_provider == "meta":
+        allowed_granted_scopes.add("public_profile")
+
     if (
         not granted
         or len(granted) > 30
-        or not set(granted).issubset(set(definition.oauth_scopes))
+        or not set(granted).issubset(allowed_granted_scopes)
         or (
             connector_type == "facebook"
             and not set(definition.oauth_read_scopes).issubset(set(granted))
