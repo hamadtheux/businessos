@@ -61,11 +61,17 @@ class BackgroundJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             ["opportunities.id", "opportunities.business_id"],
             name="fk_jobs_opportunity_business",
         ),
+        ForeignKeyConstraint(
+            ["conversation_message_id", "business_id"],
+            ["conversation_messages.id", "conversation_messages.business_id"],
+            name="fk_jobs_conversation_message_business",
+            ondelete="CASCADE",
+        ),
         UniqueConstraint("idempotency_key", name="uq_background_jobs_idempotency_key"),
         CheckConstraint(
             "job_type IN ('process_automation_event','resume_workflow_run',"
             "'process_scheduled_workflow','process_integration_event','customer_agent_response',"
-            "'dispatch_action_execution',"
+            "'dispatch_action_execution','dispatch_conversation_message',"
             "'reconcile_uncertain_attempt','mark_social_schedule_ready',"
             "'maintain_subscription','discover_competitors',"
             "'generate_content_plan','analyze_campaign_opportunities',"
@@ -122,6 +128,11 @@ class BackgroundJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "(job_type <> 'analyze_business_opportunity' AND opportunity_id IS NULL)",
             name="consistent_opportunity_reference",
         ),
+        CheckConstraint(
+            "(job_type = 'dispatch_conversation_message' AND conversation_message_id IS NOT NULL) OR "
+            "(job_type <> 'dispatch_conversation_message' AND conversation_message_id IS NULL)",
+            name="consistent_conversation_message_reference",
+        ),
         Index(
             "ix_background_jobs_claim",
             "status", "priority", "available_at", "id",
@@ -176,6 +187,7 @@ class BackgroundJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     action_execution_attempt_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("action_execution_attempts.id", ondelete="CASCADE"), nullable=True,
     )
+    conversation_message_id: Mapped[UUID | None] = mapped_column(nullable=True)
     social_schedule_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("social_content_schedules.id", ondelete="CASCADE"), nullable=True,
     )

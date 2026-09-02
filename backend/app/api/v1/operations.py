@@ -22,7 +22,9 @@ from app.exceptions.operations import (
 from app.schemas.operations import (
     AuditLogResponse,
     ConversationCreate,
+    ConversationControlRequest,
     ConversationResponse,
+    ConversationSendRequest,
     ConversationUpdate,
     CoreAnalyticsResponse,
     ConversationStatus,
@@ -146,8 +148,8 @@ async def change_order_status(order_id: UUID, data: OrderStatusUpdate, access: B
 
 
 @router.get("/conversations", response_model=PageResponse[ConversationResponse])
-async def read_conversations(access: BusinessAccessDependency, response: Response, session: SessionDependency, page: Page = 1, page_size: PageSize = 25, search: Search = None, conversation_status: Annotated[ConversationStatus | None, Query(alias="status")] = None):
-    records, total = await _read(response, service.list_conversations(session, business_id=access.business.id, page=page, page_size=page_size, search=search, status=conversation_status))
+async def read_conversations(access: BusinessAccessDependency, response: Response, session: SessionDependency, page: Page = 1, page_size: PageSize = 25, search: Search = None, conversation_status: Annotated[ConversationStatus | None, Query(alias="status")] = None, channel: Annotated[str | None, Query(max_length=24, pattern=r"^(website|whatsapp|email|facebook|instagram|manual|other)$")] = None):
+    records, total = await _read(response, service.list_conversations(session, business_id=access.business.id, page=page, page_size=page_size, search=search, status=conversation_status, channel=channel))
     items = await _read(response, service.conversation_responses(session, records))
     return _page(items, total, page, page_size)
 
@@ -173,6 +175,34 @@ async def patch_conversation(conversation_id: UUID, data: ConversationUpdate, ac
 @router.post("/conversations/{conversation_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
 async def record_message(conversation_id: UUID, data: MessageCreate, access: BusinessAccessDependency, response: Response, session: SessionDependency):
     return await _mutate(response, session, service.add_message(session, business_id=access.business.id, conversation_id=conversation_id, actor_user_id=access.user.id, data=data))
+
+
+@router.post("/conversations/{conversation_id}/send", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
+async def send_message(conversation_id: UUID, data: ConversationSendRequest, access: BusinessAccessDependency, response: Response, session: SessionDependency):
+    return await _mutate(
+        response,
+        session,
+        service.send_conversation_message(
+            session,
+            business_id=access.business.id,
+            conversation_id=conversation_id,
+            actor_user_id=access.user.id,
+            content=data.content,
+            client_request_id=data.client_request_id,
+        ),
+    )
+
+
+@router.post("/conversations/{conversation_id}/control", response_model=ConversationResponse)
+async def control_conversation(conversation_id: UUID, data: ConversationControlRequest, access: BusinessAccessDependency, response: Response, session: SessionDependency):
+    record = await _mutate(None, session, service.control_conversation(session, business_id=access.business.id, conversation_id=conversation_id, actor_user_id=access.user.id, action=data.action, reason=data.reason))
+    return await _read(response, service.conversation_response(session, record))
+
+
+@router.post("/conversations/{conversation_id}/read", response_model=ConversationResponse)
+async def mark_conversation_read(conversation_id: UUID, access: BusinessAccessDependency, response: Response, session: SessionDependency):
+    record = await _mutate(None, session, service.mark_conversation_read(session, business_id=access.business.id, conversation_id=conversation_id, actor_user_id=access.user.id))
+    return await _read(response, service.conversation_response(session, record))
 
 
 @router.get("/notifications", response_model=PageResponse[NotificationResponse])

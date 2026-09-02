@@ -25,6 +25,7 @@ from app.services.approval import _enqueue_workflow_resume  # noqa: E402
 from app.services.job_handlers import (  # noqa: E402
     JOB_HANDLERS,
     handle_analyze_business_opportunity,
+    handle_dispatch_conversation_message,
     handle_process_automation_event,
     handle_process_integration_event,
     handle_process_scheduled_workflow,
@@ -44,6 +45,7 @@ class JobHandlerTests(unittest.IsolatedAsyncioTestCase):
             "process_integration_event", "reconcile_uncertain_attempt", "mark_social_schedule_ready",
             "customer_agent_response",
             "dispatch_action_execution",
+            "dispatch_conversation_message",
             "maintain_subscription",
             "discover_competitors", "generate_content_plan", "analyze_campaign_opportunities",
             "analyze_business_opportunity",
@@ -53,6 +55,19 @@ class JobHandlerTests(unittest.IsolatedAsyncioTestCase):
         })
         with self.assertRaises(TypeError):
             JOB_HANDLERS["dynamic"] = AsyncMock()  # type: ignore[index]
+
+    async def test_manual_message_dispatch_refuses_generic_transaction_handler(self) -> None:
+        outcome = await handle_dispatch_conversation_message(
+            _Session(),  # type: ignore[arg-type]
+            SimpleNamespace(
+                job_type="dispatch_conversation_message",
+                conversation_message_id=uuid4(),
+                business_id=BUSINESS_ID,
+            ),
+        )
+        self.assertFalse(outcome.succeeded)
+        self.assertEqual(outcome.failure_code, "invalid_job_state")
+        self.assertFalse(outcome.retryable)
 
     async def test_opportunity_analysis_resolves_server_provider_and_delegates(self) -> None:
         opportunity_id = uuid4()

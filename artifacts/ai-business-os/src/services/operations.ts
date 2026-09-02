@@ -3,10 +3,18 @@ import type {
   AuditLog, BusinessReport, Conversation, ConversationMessage, CoreAnalytics,
   Customer, CustomerCreate, CustomerUpdate, Lead, LeadCreate, LeadStage,
   LeadUpdate, Notification, Opportunity, OpportunityCreate, OpportunityStatus,
-  Order, OrderCreate, OrderStatus, PageResponse,
+  Order, OrderCreate, OrderStatus, PageResponse, SupportCase,
+  SupportCaseCategory, SupportCasePriority, SupportCaseStatus, SupportMetrics,
 } from "./api-types.ts";
 
-type ListOptions = { page?: number; pageSize?: number; search?: string; status?: string };
+type ListOptions = {
+  page?: number;
+  pageSize?: number;
+  search?: string;
+  status?: string;
+  channel?: string;
+  priority?: string;
+};
 
 const businessPath = (businessId: string, path: string) =>
   `/api/v1/businesses/${encodeURIComponent(businessId)}${path}`;
@@ -18,6 +26,8 @@ function query(options: ListOptions = {}) {
   });
   if (options.search) params.set("search", options.search);
   if (options.status) params.set("status", options.status);
+  if (options.channel) params.set("channel", options.channel);
+  if (options.priority) params.set("priority", options.priority);
   return params.toString();
 }
 
@@ -47,6 +57,33 @@ export function createOperationsApi(client: ApiClient) {
     create: (id: string, data: { customer_id?: string | null; channel: Conversation["channel"]; external_reference?: string | null; assigned_user_id?: string | null }) => client.request<Conversation>(businessPath(id, "/conversations"), { method: "POST", json: data }),
     update: (id: string, conversationId: string, data: { status?: Conversation["status"]; assigned_user_id?: string | null }) => client.request<Conversation>(businessPath(id, `/conversations/${conversationId}`), { method: "PATCH", json: data }),
     message: (id: string, conversationId: string, content: string) => client.request<ConversationMessage>(businessPath(id, `/conversations/${conversationId}/messages`), { method: "POST", json: { direction: "internal", content } }),
+    send: (
+      id: string,
+      conversationId: string,
+      data: { content: string; client_request_id: string },
+    ) => client.request<ConversationMessage>(
+      businessPath(id, `/conversations/${conversationId}/send`),
+      { method: "POST", json: data },
+    ),
+    control: (id: string, conversationId: string, action: "take_over" | "resume_ai" | "pause_ai" | "escalate" | "resolve" | "reopen", reason?: string) => client.request<Conversation>(businessPath(id, `/conversations/${conversationId}/control`), { method: "POST", json: { action, ...(reason ? { reason } : {}) } }),
+    read: (id: string, conversationId: string) => client.request<Conversation>(businessPath(id, `/conversations/${conversationId}/read`), { method: "POST" }),
+  },
+  support: {
+    list: (id: string, options?: ListOptions, signal?: AbortSignal) => client.request<PageResponse<SupportCase>>(businessPath(id, `/support/cases?${query(options)}`), { signal }),
+    get: (id: string, caseId: string, signal?: AbortSignal) => client.request<SupportCase>(businessPath(id, `/support/cases/${caseId}`), { signal }),
+    metrics: (id: string, signal?: AbortSignal) => client.request<SupportMetrics>(businessPath(id, "/support/metrics"), { signal }),
+    update: (
+      id: string,
+      caseId: string,
+      data: {
+        status?: SupportCaseStatus;
+        priority?: SupportCasePriority;
+        category?: SupportCaseCategory;
+        assigned_user_id?: string | null;
+        escalation_reason?: string;
+        resolution_summary?: string;
+      },
+    ) => client.request<SupportCase>(businessPath(id, `/support/cases/${caseId}`), { method: "PATCH", json: data }),
   },
   notifications: {
     list: (id: string, unreadOnly = false, signal?: AbortSignal) => client.request<PageResponse<Notification>>(businessPath(id, `/notifications?page=1&page_size=100&unread_only=${unreadOnly}`), { signal }),

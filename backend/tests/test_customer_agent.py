@@ -218,9 +218,10 @@ class CustomerAgentSafetyContractTests(unittest.TestCase):
             {
                 "email": "gmail",
                 "whatsapp": "whatsapp_business",
+                "facebook": "facebook",
             },
         )
-        for channel in ("facebook", "instagram", "website", "manual"):
+        for channel in ("instagram", "website", "manual"):
             self.assertNotIn(channel, service._SUPPORTED_CONNECTORS)
 
     def test_customer_agent_has_no_direct_connector_dispatch_boundary(self) -> None:
@@ -745,6 +746,46 @@ class CustomerAgentDeliveryTests(unittest.IsolatedAsyncioTestCase):
             payload=payload,
         )
         self.assertEqual(target, customer.email)
+
+    async def test_dispatch_blocks_ai_after_human_takeover_at_locked_final_gate(
+        self,
+    ) -> None:
+        customer = _customer(email="customer@example.test")
+        conversation = _conversation("email", customer.id)
+        conversation.handling_state = "human_takeover"
+
+        payload = SendEmailPayload(
+            recipient_ref=str(customer.id),
+            subject="Re: Support",
+            body="This AI reply must not be sent after human takeover.",
+            conversation_ref=str(conversation.id),
+        )
+
+        class _LockCaptureSession:
+            def __init__(self) -> None:
+                self.statement = None
+
+            async def scalar(self, statement):
+                self.statement = statement
+                return conversation
+
+        session = _LockCaptureSession()
+
+        with self.assertRaisesRegex(
+            IntegrationStateError,
+            "conversation_ai_handling_inactive",
+        ):
+            await _conversation_connection_binding(
+                session,  # type: ignore[arg-type]
+                business_id=BUSINESS_ID,
+                action_type="send_email",
+                payload=payload,
+            )
+
+        self.assertIsNotNone(session.statement)
+        self.assertIsNotNone(
+            getattr(session.statement, "_for_update_arg", None)
+        )
 
     async def test_dispatch_rejects_free_text_recipient_injection(self) -> None:
         payload = SendEmailPayload(

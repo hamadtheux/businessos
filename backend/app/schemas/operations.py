@@ -15,6 +15,9 @@ LeadStage = Literal["new", "qualified", "contacted", "viewing", "proposal", "won
 OrderStatus = Literal["draft", "confirmed", "processing", "completed", "canceled"]
 ConversationChannel = Literal["website", "whatsapp", "email", "facebook", "instagram", "manual", "other"]
 ConversationStatus = Literal["open", "escalated", "resolved"]
+ConversationHandlingState = Literal["ai_active", "ai_paused", "human_takeover", "escalated"]
+SupportCaseStatus = Literal["new", "open", "ai_handling", "waiting_for_customer", "waiting_for_business", "escalated", "resolved", "closed"]
+SupportCaseCategory = Literal["general", "order", "delivery", "return", "refund", "product", "account", "appointment", "technical", "complaint", "payment"]
 OpportunityStatus = Literal["open", "in_progress", "won", "lost", "dismissed"]
 Priority = Literal["low", "medium", "high", "urgent"]
 
@@ -255,6 +258,28 @@ class ConversationUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ConversationControlRequest(BaseModel):
+    action: Literal["take_over", "resume_ai", "pause_ai", "escalate", "resolve", "reopen"]
+    reason: str | None = Field(default=None, min_length=1, max_length=1000)
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def trim_reason(cls, value: Any) -> Any:
+        return _trim(value)
+
+
+class ConversationSendRequest(BaseModel):
+    client_request_id: UUID
+    content: str = Field(min_length=1, max_length=10000)
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def trim_content(cls, value: Any) -> Any:
+        return _trim(value)
+
+
 class MessageCreate(BaseModel):
     direction: Literal["outbound", "internal"] = "outbound"
     content: str = Field(min_length=1, max_length=10000)
@@ -277,9 +302,19 @@ class MessageResponse(BaseModel):
     sent_at: AwareDatetime
     external_reference: str | None
     delivery_status: Literal[
-        "received", "recorded", "submitted", "sent", "delivered", "read", "failed",
+        "received",
+        "recorded",
+        "queued",
+        "dispatching",
+        "submitted",
+        "sent",
+        "delivered",
+        "read",
+        "failed",
+        "uncertain",
     ]
     action_execution_attempt_id: UUID | None = None
+    client_request_id: UUID | None = None
     created_at: AwareDatetime
     updated_at: AwareDatetime
     model_config = ConfigDict(from_attributes=True, extra="forbid")
@@ -290,17 +325,112 @@ class ConversationResponse(BaseModel):
     business_id: UUID
     customer_id: UUID | None
     integration_connection_id: UUID | None = None
+    customer_channel_identity_id: UUID | None = None
     customer_display_name: str | None
+    customer_email: str | None = None
+    customer_phone: str | None = None
     channel: ConversationChannel
     external_reference: str | None
+    external_resource_reference: str | None = None
     status: ConversationStatus
+    handling_state: ConversationHandlingState = "ai_active"
+    unread_count: int = Field(default=0, ge=0)
     assigned_user_id: UUID | None
     last_activity_at: AwareDatetime
     latest_message: str | None
     unread: bool
+    can_send_externally: bool = False
+    send_unavailable_reason: str | None = None
     messages: list[MessageResponse] = Field(default_factory=list)
     created_at: AwareDatetime
     updated_at: AwareDatetime
+    model_config = ConfigDict(extra="forbid")
+
+
+class SupportCaseCreate(BaseModel):
+    conversation_id: UUID
+    priority: Priority = "medium"
+    category: SupportCaseCategory = "general"
+    issue_summary: str = Field(min_length=1, max_length=500)
+    escalation_reason: str | None = Field(default=None, min_length=1, max_length=1000)
+    related_order_id: UUID | None = None
+    related_product_id: UUID | None = None
+    related_lead_id: UUID | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("issue_summary", "escalation_reason", mode="before")
+    @classmethod
+    def trim_text(cls, value: Any) -> Any:
+        return _trim(value)
+
+
+class SupportCaseUpdate(BaseModel):
+    status: SupportCaseStatus | None = None
+    priority: Priority | None = None
+    category: SupportCaseCategory | None = None
+    assigned_user_id: UUID | None = None
+    escalation_reason: str | None = Field(default=None, min_length=1, max_length=1000)
+    resolution_summary: str | None = Field(default=None, min_length=1, max_length=2000)
+    related_order_id: UUID | None = None
+    related_product_id: UUID | None = None
+    related_lead_id: UUID | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("status", "priority", "category")
+    @classmethod
+    def required_state_when_supplied(cls, value: Any) -> Any:
+        if value is None:
+            raise ValueError("field cannot be null")
+        return value
+
+    @field_validator("escalation_reason", "resolution_summary", mode="before")
+    @classmethod
+    def trim_text(cls, value: Any) -> Any:
+        return _trim(value)
+
+
+class SupportCaseResponse(BaseModel):
+    id: UUID
+    business_id: UUID
+    case_number: str
+    customer_id: UUID | None
+    customer_display_name: str | None
+    customer_email: str | None
+    customer_phone: str | None
+    conversation_id: UUID
+    integration_connection_id: UUID | None
+    channel: ConversationChannel
+    assigned_user_id: UUID | None
+    assigned_ai_role: Literal["support"] | None
+    status: SupportCaseStatus
+    priority: Priority
+    category: SupportCaseCategory
+    issue_summary: str
+    escalation_reason: str | None
+    resolution_summary: str | None
+    source: str
+    related_order_id: UUID | None
+    related_order_number: str | None
+    related_product_id: UUID | None
+    related_product_name: str | None
+    related_lead_id: UUID | None
+    opened_at: AwareDatetime
+    last_activity_at: AwareDatetime
+    escalated_at: AwareDatetime | None
+    resolved_at: AwareDatetime | None
+    closed_at: AwareDatetime | None
+    conversation: ConversationResponse | None = None
+    created_at: AwareDatetime
+    updated_at: AwareDatetime
+    model_config = ConfigDict(extra="forbid")
+
+
+class SupportMetricsResponse(BaseModel):
+    open_issues: int = Field(ge=0)
+    ai_handling: int = Field(ge=0)
+    escalated: int = Field(ge=0)
+    waiting_for_customer: int = Field(ge=0)
+    resolved_today: int = Field(ge=0)
     model_config = ConfigDict(extra="forbid")
 
 

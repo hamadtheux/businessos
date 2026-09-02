@@ -76,7 +76,8 @@ const TrendIntelligencePage = lazyNamed(() => import("@/features/intelligence/in
 const CmoPage = lazyNamed(() => import("@/features/marketing/cmo-page"), "CmoPage");
 const CampaignsPage = lazyNamed(() => import("@/features/marketing/marketing-pages"), "CampaignsPage");
 const SocialManagementPage = lazyNamed(() => import("@/features/marketing/marketing-pages"), "SocialManagementPage");
-const ConversationsPage = lazyNamed(() => import("@/features/operations/operation-pages"), "ConversationsPage");
+const ConversationsPage = lazyNamed(() => import("@/features/operations/conversations-page"), "ConversationsPage");
+const CustomerSupportPage = lazyNamed(() => import("@/features/support/customer-support-page"), "CustomerSupportPage");
 const CrmPage = lazyNamed(() => import("@/features/operations/operation-pages"), "CrmPage");
 const CustomersPage = lazyNamed(() => import("@/features/operations/operation-pages"), "CustomersPage");
 const OrdersPage = lazyNamed(() => import("@/features/operations/operation-pages"), "OrdersPage");
@@ -188,6 +189,10 @@ const ConversationsRoute = () => (
   <WorkspaceModuleRoute module="conversations" component={ConversationsPage} />
 );
 
+const CustomerSupportRoute = () => (
+  <WorkspaceModuleRoute module="support" component={CustomerSupportPage} />
+);
+
 const OrdersRoute = () => (
   <WorkspaceModuleRoute module="orders" component={OrdersPage} />
 );
@@ -234,6 +239,7 @@ function AppRoutes() {
           component={CommandRoute}
         />
         <Route path="/conversations" component={ConversationsRoute} />
+        <Route path="/support" component={CustomerSupportRoute} />
         <Route path="/orders" component={OrdersRoute} />
         <Route path="/customers" component={CustomersRoute} />
         <Route path="/crm" component={CrmRoute} />

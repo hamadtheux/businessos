@@ -29,6 +29,7 @@ import {
   ScrollText,
   Search,
   Settings2,
+  ShieldCheck,
   ShoppingBag,
   Sparkles,
   Target,
@@ -70,6 +71,7 @@ function pageWidthForRoute(location: string): PageWidth {
   if (
     location.startsWith("/automations") ||
     location.startsWith("/conversations") ||
+    location.startsWith("/support") ||
     location.startsWith("/analytics") ||
     location.startsWith("/marketing") ||
     location.startsWith("/campaigns") ||
@@ -106,6 +108,7 @@ const NAV_MODULE_BY_HREF: Readonly<Record<string, WorkspaceModule>> = {
   "/command": "ai_command_center",
   "/reports/daily": "daily_report",
   "/conversations": "conversations",
+  "/support": "support",
   "/orders": "orders",
   "/customers": "customers",
   "/crm": "crm",
@@ -137,6 +140,7 @@ const navGroups: NavGroup[] = [
     label: "Operations",
     items: [
       { href: "/conversations", label: "Conversations", icon: Inbox },
+      { href: "/support", label: "Customer Support", icon: ShieldCheck },
       { href: "/orders", label: "Orders", icon: ShoppingBag },
       { href: "/customers", label: "Customers", icon: Users },
       { href: "/crm", label: "Leads & CRM", icon: Target },

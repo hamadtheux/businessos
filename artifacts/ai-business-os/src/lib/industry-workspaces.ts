@@ -5,6 +5,7 @@ export type WorkspaceModule =
   | "ai_command_center"
   | "daily_report"
   | "conversations"
+  | "support"
   | "orders"
   | "customers"
   | "crm"
@@ -76,6 +77,7 @@ const COMMON_AI_MODULES = [
   "ai_command_center",
   "daily_report",
   "conversations",
+  "support",
   "website_chatbot",
   "ai_agents",
   "automations",

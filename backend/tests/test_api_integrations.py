@@ -25,7 +25,9 @@ from app.api.dependencies.business import (  # noqa: E402
 )
 from app.db.session import get_db_session  # noqa: E402
 from app.exceptions.integration import (  # noqa: E402
+    IntegrationNotFoundError,
     IntegrationProviderUnavailableError,
+    IntegrationWebhookVerificationError,
 )
 from app.integrations.contracts import ExternalCalendarEvent, ExternalMailMessage, ExternalMailMessageContent  # noqa: E402
 from app.main import app  # noqa: E402
@@ -109,6 +111,12 @@ class IntegrationsApiTests(unittest.IsolatedAsyncioTestCase):
             "/api/v1/integrations/webhooks/{connector_type}/{connection_id}",
             schema["paths"],
         )
+        self.assertIn(
+            "/api/v1/integrations/webhooks/meta",
+            schema["paths"],
+        )
+        self.assertIn("get", schema["paths"]["/api/v1/integrations/webhooks/meta"])
+        self.assertIn("post", schema["paths"]["/api/v1/integrations/webhooks/meta"])
 
     async def test_registry_is_tenant_authorized_and_contains_no_provider_secrets(
         self,
@@ -539,6 +547,79 @@ class IntegrationsApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 422)
         self._private(response)
+
+    async def test_shared_meta_webhook_accepts_valid_delivery_and_commits(self) -> None:
+        payload = {
+            "object": "page",
+            "entry": [{"id": "page-a", "messaging": []}],
+        }
+        with patch(
+            "app.api.v1.integrations.service.ingest_shared_meta_webhook",
+            new=AsyncMock(return_value=()),
+        ) as operation:
+            response = await self.client.post(
+                "/api/v1/integrations/webhooks/meta",
+                json=payload,
+                headers={"x-hub-signature-256": "sha256=valid"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.text, "EVENT_RECEIVED")
+        self.assertEqual(self.session.commit_calls, 1)
+        self.assertEqual(operation.await_args.kwargs["payload"], payload)
+        self.assertEqual(operation.await_args.kwargs["headers"]["x-hub-signature-256"], "sha256=valid")
+        self._private(response)
+
+    async def test_shared_meta_webhook_maps_invalid_signature_without_commit(self) -> None:
+        with patch(
+            "app.api.v1.integrations.service.ingest_shared_meta_webhook",
+            new=AsyncMock(side_effect=IntegrationWebhookVerificationError("private")),
+        ):
+            response = await self.client.post(
+                "/api/v1/integrations/webhooks/meta",
+                json={"object": "page", "entry": [{"id": "page-a"}]},
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(self.session.commit_calls, 0)
+        self.assertEqual(self.session.rollback_calls, 1)
+        self.assertNotIn("private", response.text)
+        self._private(response)
+
+    async def test_shared_meta_webhook_maps_unknown_page_to_not_found(self) -> None:
+        with patch(
+            "app.api.v1.integrations.service.ingest_shared_meta_webhook",
+            new=AsyncMock(side_effect=IntegrationNotFoundError("unknown-page")),
+        ):
+            response = await self.client.post(
+                "/api/v1/integrations/webhooks/meta",
+                json={"object": "page", "entry": [{"id": "unknown-page"}]},
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertNotIn("unknown-page", response.text)
+        self._private(response)
+
+    async def test_shared_meta_webhook_rejects_malformed_and_oversized_json(self) -> None:
+        malformed = await self.client.post(
+            "/api/v1/integrations/webhooks/meta",
+            content=b"not-json",
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(malformed.status_code, 422)
+        self._private(malformed)
+
+        with patch(
+            "app.api.v1.integrations.settings.integration_webhook_max_bytes",
+            8,
+        ):
+            oversized = await self.client.post(
+                "/api/v1/integrations/webhooks/meta",
+                content=b'{"entry":[]}',
+                headers={"content-type": "application/json"},
+            )
+        self.assertEqual(oversized.status_code, 413)
+        self._private(oversized)
 
     @staticmethod
     def _url(

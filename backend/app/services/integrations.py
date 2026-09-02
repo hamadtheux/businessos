@@ -9,7 +9,7 @@ from typing import Mapping
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +32,8 @@ from app.exceptions.operations import (
 )
 from app.integrations.adapters import ConnectorAdapterRegistry, connector_adapters
 from app.integrations.action_adapters import connector_action_adapters
+from app.integrations.action_adapters import ConnectorRejectedError, ConnectorRequestNotSentError
+from app.domain.integrations import require_external_connector_writes_enabled
 from app.integrations.contracts import (
     AuthorizationRequest,
     ExternalCalendarEvent,
@@ -51,7 +53,8 @@ from app.integrations.registry import ConnectorDefinition, list_connector_defini
 from app.integrations.webhooks import WebhookSignatureVerifier
 from app.models.appointment import Appointment
 from app.services.billing import require_capacity, require_feature
-from app.models.conversation import Conversation, ConversationMessage
+from app.models.conversation import Conversation, ConversationMessage, CustomerChannelIdentity
+from app.models.customer import Customer
 from app.models.integration import (
     IntegrationConnection,
     IntegrationEntityLink,
@@ -68,6 +71,7 @@ from app.schemas.integration import (
     ResourceSelectionRequest,
 )
 from app.schemas.marketing import PerformanceCreate
+from app.schemas.ai_action_payload import SendCustomerMessagePayload, SendEmailPayload, SendWhatsAppMessagePayload
 from app.services.automation_events import record_automation_event
 from app.services.background_jobs import enqueue_job
 from app.services.customer_identity import resolve_customer_identity
@@ -82,8 +86,10 @@ _SAFE_WEBHOOK_FIELDS = frozenset({
     "sender_email",
     "sender_phone",
     "sender_display_name",
+    "sender_external_reference",
     "content",
     "delivery_status",
+    "delivery_watermark",
     "external_resource_reference",
     "external_campaign_reference",
 })
@@ -514,6 +520,21 @@ async def complete_authorization(
                 now=now,
                 failure_code="authorized_assets_invalid",
             )
+        subscribe_resources = getattr(adapter, "subscribe_resources", None)
+        if callable(subscribe_resources):
+            try:
+                await subscribe_resources(exchange.credentials, authorized_resources)
+            except Exception:
+                return await _fail_exchanged_authorization(
+                    session,
+                    adapter=adapter,
+                    provider_credentials=exchange.credentials,
+                    oauth_state=oauth_state,
+                    definition=definition,
+                    credentials=credentials,
+                    now=now,
+                    failure_code="webhook_subscription_failed",
+                )
     try:
         credential_reference = await credentials.store(
             business_id=oauth_state.business_id,
@@ -1406,6 +1427,173 @@ async def ingest_webhook(
         ))
     except SQLAlchemyError:
         raise IntegrationPersistenceError("webhook_unavailable") from None
+    return await _ingest_webhook_for_connection(
+        session,
+        connector_type=connector_type,
+        connection=connection,
+        payload=payload,
+        adapters=adapters,
+    )
+
+
+async def ingest_shared_meta_webhook(
+    session: AsyncSession,
+    *,
+    body: bytes,
+    headers: Mapping[str, str],
+    payload: Mapping[str, object],
+    verifier: WebhookSignatureVerifier,
+    adapters: ConnectorAdapterRegistry = connector_adapters,
+) -> tuple[IntegrationWebhookEvent, ...]:
+    """Route a signed shared Meta callback from provider assets to tenants."""
+    if not verifier.verify(body=body, headers=headers):
+        raise IntegrationWebhookVerificationError("webhook_verification_failed")
+    routes = _meta_webhook_entry_routes(payload)
+    predicates = [
+        and_(
+            IntegrationConnection.connector_type == connector_type,
+            IntegrationConnection.selected_resources.contains([{
+                "resource_type": resource_type,
+                "external_reference": resource_reference,
+            }]),
+            IntegrationConnection.authorized_resources.contains([{
+                "resource_type": resource_type,
+                "external_reference": resource_reference,
+            }]),
+        )
+        for connector_type, resource_type, resource_reference, _entry in routes
+    ]
+    try:
+        candidates = list((await session.scalars(
+            select(IntegrationConnection).where(
+                IntegrationConnection.status.in_(("connected", "degraded")),
+                IntegrationConnection.authentication_state == "authorized",
+                or_(*predicates),
+            )
+        )).all())
+    except SQLAlchemyError:
+        raise IntegrationPersistenceError("webhook_unavailable") from None
+
+    grouped: dict[tuple[str, UUID], tuple[IntegrationConnection, list[object]]] = {}
+    for connector_type, resource_type, resource_reference, entry in routes:
+        matches = [
+            connection
+            for connection in candidates
+            if connection.connector_type == connector_type
+            and _connection_has_meta_resource(
+                connection,
+                resource_type=resource_type,
+                resource_reference=resource_reference,
+            )
+            and _meta_entry_matches_connection(connector_type, entry, connection)
+        ]
+        if not matches:
+            # A correctly signed callback can arrive briefly after a Page was
+            # disconnected or deselected. Acknowledge that stale provider
+            # delivery without routing it into any tenant.
+            continue
+        if len(matches) != 1:
+            raise IntegrationWebhookVerificationError(
+                "meta_webhook_resource_ambiguous"
+            )
+        connection = matches[0]
+        key = (connector_type, connection.id)
+        grouped.setdefault(key, (connection, []))[1].append(entry)
+
+    events: list[IntegrationWebhookEvent] = []
+    object_name = payload.get("object")
+    for (connector_type, _connection_id), (connection, entries) in grouped.items():
+        event = await _ingest_webhook_for_connection(
+            session,
+            connector_type=connector_type,
+            connection=connection,
+            payload={"object": object_name, "entry": entries},
+            adapters=adapters,
+        )
+        events.append(event)
+    return tuple(events)
+
+
+def _meta_webhook_entry_routes(
+    payload: Mapping[str, object],
+) -> tuple[tuple[str, str, str, object], ...]:
+    object_name = payload.get("object")
+    route = {
+        "page": ("facebook", "facebook_page"),
+        "instagram": ("instagram", "instagram_account"),
+        "whatsapp_business_account": (
+            "whatsapp_business",
+            "whatsapp_business_account",
+        ),
+    }.get(object_name)
+    entries = payload.get("entry")
+    if (
+        route is None
+        or not isinstance(entries, list)
+        or not entries
+        or len(entries) > 100
+    ):
+        raise IntegrationValidationError("meta_webhook_payload_invalid")
+    result: list[tuple[str, str, str, object]] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise IntegrationValidationError("meta_webhook_payload_invalid")
+        reference = str(entry.get("id") or "").strip()
+        if not reference or len(reference) > 255:
+            raise IntegrationValidationError("meta_webhook_payload_invalid")
+        result.append((*route, reference, entry))
+    return tuple(result)
+
+
+def _connection_has_meta_resource(
+    connection: IntegrationConnection,
+    *,
+    resource_type: str,
+    resource_reference: str,
+) -> bool:
+    def has(resources: object) -> bool:
+        return isinstance(resources, list) and any(
+            isinstance(item, Mapping)
+            and item.get("resource_type") == resource_type
+            and item.get("external_reference") == resource_reference
+            for item in resources
+        )
+
+    return has(connection.selected_resources) and has(connection.authorized_resources)
+
+
+def _meta_entry_matches_connection(
+    connector_type: str,
+    entry: object,
+    connection: IntegrationConnection,
+) -> bool:
+    if connector_type != "whatsapp_business" or not isinstance(entry, Mapping):
+        return True
+    phone_ids: set[str] = set()
+    changes = entry.get("changes")
+    if isinstance(changes, list):
+        for change in changes:
+            value = change.get("value") if isinstance(change, Mapping) else None
+            metadata = value.get("metadata") if isinstance(value, Mapping) else None
+            phone_id = metadata.get("phone_number_id") if isinstance(metadata, Mapping) else None
+            if isinstance(phone_id, (str, int)):
+                phone_ids.add(str(phone_id))
+    selected_phone_ids = {
+        str(item.get("external_reference"))
+        for item in connection.selected_resources
+        if item.get("resource_type") == "phone_number"
+    }
+    return not phone_ids or phone_ids.issubset(selected_phone_ids)
+
+
+async def _ingest_webhook_for_connection(
+    session: AsyncSession,
+    *,
+    connector_type: str,
+    connection: IntegrationConnection | None,
+    payload: Mapping[str, object],
+    adapters: ConnectorAdapterRegistry,
+) -> IntegrationWebhookEvent:
     if connection is None:
         raise IntegrationNotFoundError("connection_not_found")
     if not _webhook_matches_selected_resources(
@@ -1712,6 +1900,7 @@ async def _record_inbound_message(
     channel = _MESSAGE_CONNECTOR_CHANNEL.get(connection.connector_type)
     if not channel or not conversation_reference or len(conversation_reference) > 255 or not content or len(content) > 10_000:
         raise IntegrationValidationError("message_payload_invalid")
+    resource_reference = _message_resource_reference(connection, payload)
     customer_id = await _match_customer(
         session,
         business_id=connection.business_id,
@@ -1720,19 +1909,39 @@ async def _record_inbound_message(
         phone=_optional_text(payload.get("sender_phone"), 32),
         source=connection.connector_type,
     )
+    channel_identity_id = await _upsert_channel_identity(
+        session,
+        connection=connection,
+        external_resource_reference=resource_reference,
+        external_user_reference=_optional_text(
+            payload.get("sender_external_reference"), 255
+        ),
+        display_name=_optional_text(payload.get("sender_display_name"), 160),
+        customer_id=customer_id,
+        occurred_at=occurred_at,
+    )
     conversation = await session.scalar(select(Conversation).where(
         Conversation.business_id == connection.business_id,
+        Conversation.integration_connection_id == connection.id,
         Conversation.channel == channel,
+        or_(
+            Conversation.external_resource_reference == resource_reference,
+            Conversation.external_resource_reference.is_(None),
+        ),
         Conversation.external_reference == conversation_reference,
     ).with_for_update())
     if conversation is None:
         conversation = Conversation(
             business_id=connection.business_id,
             customer_id=customer_id,
+            customer_channel_identity_id=channel_identity_id,
             integration_connection_id=connection.id,
             channel=channel,
             external_reference=conversation_reference,
+            external_resource_reference=resource_reference,
             status="open",
+            handling_state="ai_active",
+            unread_count=1,
             last_activity_at=occurred_at,
         )
         session.add(conversation)
@@ -1741,11 +1950,24 @@ async def _record_inbound_message(
         if conversation.integration_connection_id not in {None, connection.id}:
             raise IntegrationValidationError("conversation_connection_conflict")
         conversation.integration_connection_id = connection.id
+        if (
+            conversation.external_resource_reference is not None
+            and conversation.external_resource_reference != resource_reference
+        ):
+            raise IntegrationValidationError("conversation_resource_conflict")
+        conversation.external_resource_reference = resource_reference
         if conversation.customer_id is None and customer_id is not None:
             conversation.customer_id = customer_id
+        if (
+            conversation.customer_channel_identity_id is None
+            and channel_identity_id is not None
+        ):
+            conversation.customer_channel_identity_id = channel_identity_id
         conversation.last_activity_at = max(conversation.last_activity_at, occurred_at)
+        conversation.unread_count = min((conversation.unread_count or 0) + 1, 2_147_483_647)
         if conversation.status == "resolved":
             conversation.status = "open"
+            conversation.handling_state = "ai_active"
     existing_message = await session.scalar(select(ConversationMessage.id).where(
         ConversationMessage.business_id == connection.business_id,
         ConversationMessage.conversation_id == conversation.id,
@@ -1799,6 +2021,285 @@ async def _record_inbound_message(
     )
 
 
+async def send_manual_conversation_message(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    conversation_id: UUID,
+    actor_user_id: UUID,
+    content: str,
+    client_request_id: UUID,
+    adapters=connector_action_adapters,
+    credentials: IntegrationCredentialStore = credential_store,
+    configuration: Settings = settings,
+) -> ConversationMessage:
+    """Persist one explicitly human-authorized reply for durable dispatch.
+
+    This function intentionally performs no provider I/O. The message and its
+    one-shot dispatch job are committed atomically by the API transaction.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    _ = credentials
+
+    require_external_connector_writes_enabled(
+        configuration.external_connector_writes_enabled
+        and configuration.external_connector_write_mode == "enabled"
+    )
+    await require_feature(session, business_id=business_id, key="integrations")
+
+    # Fast idempotent retry path. A browser/network retry of the exact same
+    # accepted Send intent must return the original durable message.
+    try:
+        existing = await session.scalar(
+            select(ConversationMessage).where(
+                ConversationMessage.business_id == business_id,
+                ConversationMessage.client_request_id == client_request_id,
+            )
+        )
+    except SQLAlchemyError:
+        raise IntegrationPersistenceError("manual_message_lookup_failed") from None
+
+    if existing is not None:
+        if (
+            existing.conversation_id != conversation_id
+            or existing.direction != "outbound"
+            or existing.sender_type != "user"
+            or existing.sender_user_id != actor_user_id
+            or existing.content != content
+        ):
+            raise IntegrationStateError("client_request_id_conflict")
+        return existing
+
+    conversation = await session.scalar(
+        select(Conversation)
+        .where(
+            Conversation.id == conversation_id,
+            Conversation.business_id == business_id,
+        )
+        .with_for_update()
+    )
+    if conversation is None or conversation.integration_connection_id is None:
+        raise IntegrationNotFoundError("conversation_not_found")
+
+    connection = await session.scalar(
+        select(IntegrationConnection).where(
+            IntegrationConnection.id == conversation.integration_connection_id,
+            IntegrationConnection.business_id == business_id,
+            IntegrationConnection.status == "connected",
+            IntegrationConnection.authentication_state == "authorized",
+        )
+    )
+    if connection is None or not connection.credential_reference:
+        raise IntegrationStateError("conversation_connection_unavailable")
+
+    action_type: str
+
+    if conversation.channel == "facebook":
+        latest_inbound = await session.scalar(
+            select(ConversationMessage.sent_at)
+            .where(
+                ConversationMessage.business_id == business_id,
+                ConversationMessage.conversation_id == conversation.id,
+                ConversationMessage.direction == "inbound",
+                ConversationMessage.sender_type == "customer",
+            )
+            .order_by(
+                ConversationMessage.sent_at.desc(),
+                ConversationMessage.id.desc(),
+            )
+            .limit(1)
+        )
+        if (
+            latest_inbound is None
+            or latest_inbound < datetime.now(UTC) - timedelta(hours=24)
+        ):
+            raise IntegrationStateError(
+                "messenger_customer_service_window_closed"
+            )
+
+        identity = await session.scalar(
+            select(CustomerChannelIdentity).where(
+                CustomerChannelIdentity.id
+                == conversation.customer_channel_identity_id,
+                CustomerChannelIdentity.business_id == business_id,
+                CustomerChannelIdentity.integration_connection_id
+                == connection.id,
+                CustomerChannelIdentity.external_resource_reference
+                == conversation.external_resource_reference,
+            )
+        )
+        if (
+            identity is None
+            or identity.provider != "facebook"
+            or not conversation.external_resource_reference
+            or not conversation.external_reference
+            or identity.external_user_reference != conversation.external_reference
+        ):
+            raise IntegrationStateError("delivery_target_required")
+
+        action_type = "send_customer_message"
+
+    else:
+        customer = await session.scalar(
+            select(Customer).where(
+                Customer.id == conversation.customer_id,
+                Customer.business_id == business_id,
+                Customer.status != "archived",
+            )
+        )
+        if customer is None:
+            raise IntegrationStateError("delivery_target_required")
+
+        if conversation.channel == "email" and customer.email:
+            action_type = "send_email"
+
+        elif conversation.channel == "whatsapp" and customer.phone:
+            latest_inbound = await session.scalar(
+                select(ConversationMessage.sent_at)
+                .where(
+                    ConversationMessage.business_id == business_id,
+                    ConversationMessage.conversation_id == conversation.id,
+                    ConversationMessage.direction == "inbound",
+                    ConversationMessage.sender_type == "customer",
+                )
+                .order_by(
+                    ConversationMessage.sent_at.desc(),
+                    ConversationMessage.id.desc(),
+                )
+                .limit(1)
+            )
+            if (
+                latest_inbound is None
+                or latest_inbound < datetime.now(UTC) - timedelta(hours=24)
+            ):
+                raise IntegrationStateError(
+                    "whatsapp_customer_service_window_closed"
+                )
+            action_type = "send_whatsapp_message"
+
+        else:
+            raise IntegrationStateError("conversation_channel_unsupported")
+
+    adapter = adapters.get(connection.connector_type, action_type)
+    definition = require_connector(connection.connector_type)
+    capability = (
+        "future_send_email"
+        if action_type == "send_email"
+        else "future_send_messages"
+    )
+    if adapter is None or capability not in definition.future_write_capabilities:
+        raise IntegrationStateError("connector_dispatch_not_authorized")
+
+    instant = datetime.now(UTC)
+    message_id = uuid4()
+
+    values = {
+        "id": message_id,
+        "business_id": business_id,
+        "conversation_id": conversation.id,
+        "client_request_id": client_request_id,
+        "direction": "outbound",
+        "sender_type": "user",
+        "sender_user_id": actor_user_id,
+        "content": content,
+        "sent_at": instant,
+        "external_reference": None,
+        "delivery_status": "queued",
+    }
+
+    try:
+        inserted_id = await session.scalar(
+            pg_insert(ConversationMessage)
+            .values(**values)
+            .on_conflict_do_nothing(
+                constraint="uq_conversation_messages_business_client_request"
+            )
+            .returning(ConversationMessage.id)
+        )
+
+        if inserted_id is None:
+            message = await session.scalar(
+                select(ConversationMessage).where(
+                    ConversationMessage.business_id == business_id,
+                    ConversationMessage.client_request_id == client_request_id,
+                )
+            )
+        else:
+            message = await session.scalar(
+                select(ConversationMessage).where(
+                    ConversationMessage.id == inserted_id,
+                    ConversationMessage.business_id == business_id,
+                )
+            )
+    except SQLAlchemyError:
+        raise IntegrationPersistenceError("manual_message_queue_failed") from None
+
+    if message is None:
+        raise IntegrationPersistenceError("manual_message_queue_failed")
+
+    # Protect against an idempotency key being reused for different content,
+    # actor, or conversation, including a concurrent request.
+    if (
+        message.conversation_id != conversation.id
+        or message.direction != "outbound"
+        or message.sender_type != "user"
+        or message.sender_user_id != actor_user_id
+        or message.content != content
+    ):
+        raise IntegrationStateError("client_request_id_conflict")
+
+    if inserted_id is None:
+        return message
+
+    conversation.handling_state = "human_takeover"
+    conversation.status = "open"
+    conversation.assigned_user_id = actor_user_id
+    conversation.last_activity_at = instant
+
+    # The durable message must exist before enqueue_job validates the
+    # tenant-bound conversation_message_id reference.
+    try:
+        await session.flush()
+    except SQLAlchemyError:
+        raise IntegrationPersistenceError("manual_message_queue_failed") from None
+
+    await enqueue_job(
+        session,
+        business_id=business_id,
+        job_type="dispatch_conversation_message",
+        idempotency_key=f"dispatch-conversation-message:{message.id}",
+        conversation_message_id=message.id,
+    )
+
+    record_automation_event(
+        session,
+        business_id=business_id,
+        event_type="outbound_message_recorded",
+        entity_type="conversation_message",
+        entity_id=message.id,
+        payload={
+            "channel": conversation.channel,
+            "delivery_status": "queued",
+            "sender_type": "user",
+        },
+    )
+    record_audit(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        event_type="conversation.manual_outbound_message_queued",
+        entity_type="conversation_message",
+        entity_id=message.id,
+        summary=(
+            f"Queued a manual reply for durable delivery through the "
+            f"tenant-bound {conversation.channel} connector; no provider "
+            "was invoked in the request transaction."
+        ),
+    )
+    return message
+
+
 async def _reconcile_message_delivery(
     session: AsyncSession,
     connection: IntegrationConnection,
@@ -1816,8 +2317,47 @@ async def _reconcile_message_delivery(
         "failed": "failed",
         "undeliverable": "failed",
     }.get(raw_status)
-    if not external_reference or len(external_reference) > 255 or normalized is None:
+    watermark = payload.get("delivery_watermark")
+    if normalized is None or (
+        (not external_reference or len(external_reference) > 255)
+        and not isinstance(watermark, int)
+    ):
         raise IntegrationValidationError("message_status_payload_invalid")
+    if isinstance(watermark, int):
+        conversation_reference = str(
+            payload.get("external_conversation_reference") or ""
+        ).strip()
+        resource_reference = str(
+            payload.get("external_resource_reference") or ""
+        ).strip()
+        if not conversation_reference or not resource_reference:
+            raise IntegrationValidationError("message_status_payload_invalid")
+        try:
+            before = datetime.fromtimestamp(watermark / 1000, tz=UTC)
+        except (ValueError, OverflowError, OSError):
+            raise IntegrationValidationError("message_status_payload_invalid") from None
+        messages = list((await session.scalars(
+            select(ConversationMessage)
+            .join(
+                Conversation,
+                (Conversation.id == ConversationMessage.conversation_id)
+                & (Conversation.business_id == ConversationMessage.business_id),
+            )
+            .where(
+                ConversationMessage.business_id == connection.business_id,
+                ConversationMessage.direction == "outbound",
+                ConversationMessage.sent_at <= before,
+                Conversation.integration_connection_id == connection.id,
+                Conversation.external_reference == conversation_reference,
+                Conversation.external_resource_reference == resource_reference,
+            )
+            .with_for_update()
+        )).all())
+        rank = {"recorded": 0, "submitted": 1, "sent": 2, "delivered": 3, "read": 4}
+        for message in messages:
+            if rank.get(normalized, 0) > rank.get(message.delivery_status, -1):
+                message.delivery_status = normalized
+        return
     message = await session.scalar(
         select(ConversationMessage)
         .join(
@@ -1852,6 +2392,89 @@ async def _reconcile_message_delivery(
         entity_id=message.id,
         summary=f"Reconciled outbound message delivery state to {message.delivery_status}.",
     )
+
+
+def _message_resource_reference(
+    connection: IntegrationConnection,
+    payload: Mapping[str, object],
+) -> str:
+    supplied = _optional_text(payload.get("external_resource_reference"), 255)
+    resource_types = {
+        "facebook": {"facebook_page"},
+        "instagram": {"instagram_account"},
+        "whatsapp_business": {"phone_number"},
+        "gmail": {"mailbox"},
+        "microsoft_outlook": {"mailbox"},
+    }.get(connection.connector_type, set())
+    selected = {
+        str(item.get("external_reference"))
+        for item in connection.selected_resources
+        if item.get("resource_type") in resource_types
+        and isinstance(item.get("external_reference"), str)
+    }
+    if supplied:
+        if supplied not in selected and connection.connector_type in {
+            "facebook", "instagram", "whatsapp_business"
+        }:
+            raise IntegrationValidationError("message_resource_not_selected")
+        return supplied
+    if len(selected) == 1:
+        return next(iter(selected))
+    fallback = (connection.external_account_reference or "").strip()
+    if not selected and fallback:
+        return fallback[:255]
+    if len(selected) != 1:
+        raise IntegrationValidationError("message_resource_ambiguous")
+    raise IntegrationValidationError("message_resource_ambiguous")
+
+
+async def _upsert_channel_identity(
+    session: AsyncSession,
+    *,
+    connection: IntegrationConnection,
+    external_resource_reference: str,
+    external_user_reference: str | None,
+    display_name: str | None,
+    customer_id: UUID | None,
+    occurred_at: datetime,
+) -> UUID | None:
+    if external_user_reference is None:
+        return None
+    identity = await session.scalar(
+        select(CustomerChannelIdentity).where(
+            CustomerChannelIdentity.business_id == connection.business_id,
+            CustomerChannelIdentity.provider == connection.connector_type,
+            CustomerChannelIdentity.external_resource_reference
+            == external_resource_reference,
+            CustomerChannelIdentity.external_user_reference
+            == external_user_reference,
+        ).with_for_update()
+    )
+    if identity is None:
+        identity = CustomerChannelIdentity(
+            business_id=connection.business_id,
+            integration_connection_id=connection.id,
+            customer_id=customer_id,
+            provider=connection.connector_type,
+            external_resource_reference=external_resource_reference,
+            external_user_reference=external_user_reference,
+            display_name=display_name,
+            verified_at=occurred_at,
+            last_seen_at=occurred_at,
+        )
+        session.add(identity)
+        await session.flush()
+    else:
+        if identity.integration_connection_id != connection.id:
+            raise IntegrationValidationError("customer_identity_connection_conflict")
+        if identity.customer_id not in {None, customer_id} and customer_id is not None:
+            raise IntegrationValidationError("customer_identity_link_conflict")
+        if identity.customer_id is None:
+            identity.customer_id = customer_id
+        if display_name:
+            identity.display_name = display_name
+        identity.last_seen_at = max(identity.last_seen_at, occurred_at)
+    return identity.id
 
 
 async def _match_customer(

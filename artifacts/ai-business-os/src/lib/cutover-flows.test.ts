@@ -910,8 +910,8 @@ test("Add business starts a fresh onboarding identity instead of restoring a sta
     "utf8",
   );
 
-  const label = '<Plus size={13} /> Add business';
-  const labelIndex = shell.indexOf(label);
+  const labelMatch = /<Plus size=\{13\} \/>\s*Add business/.exec(shell);
+  const labelIndex = labelMatch?.index ?? -1;
   assert.ok(labelIndex >= 0);
 
   const blockStart = shell.lastIndexOf('className="channel"', labelIndex);

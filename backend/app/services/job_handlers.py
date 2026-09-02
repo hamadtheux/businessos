@@ -151,6 +151,16 @@ async def handle_dispatch_action_execution(
     return HandlerOutcome(False, "invalid_job_state")
 
 
+async def handle_dispatch_conversation_message(
+    session: AsyncSession, job: BackgroundJob,
+) -> HandlerOutcome:
+    # Human-authorized customer sends cross a non-replayable provider
+    # boundary. The worker must invoke the special dispatcher only after the
+    # generic transaction has been closed.
+    _ = session, job
+    return HandlerOutcome(False, "invalid_job_state")
+
+
 async def handle_process_automation_event(
     session: AsyncSession, job: BackgroundJob,
 ) -> HandlerOutcome:
@@ -630,6 +640,7 @@ JOB_HANDLERS: Final = MappingProxyType({
     "process_integration_event": handle_process_integration_event,
     "customer_agent_response": handle_customer_agent_response,
     "dispatch_action_execution": handle_dispatch_action_execution,
+    "dispatch_conversation_message": handle_dispatch_conversation_message,
     "reconcile_uncertain_attempt": handle_reconcile_uncertain_attempt,
     "mark_social_schedule_ready": handle_mark_social_schedule_ready,
     "maintain_subscription": handle_maintain_subscription,

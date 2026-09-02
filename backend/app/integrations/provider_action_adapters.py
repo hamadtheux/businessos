@@ -38,7 +38,7 @@ _GMAIL_SEND = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
 _ACTION_TYPES = MappingProxyType({
     "gmail": frozenset({"send_email", "send_customer_message"}),
     "whatsapp_business": frozenset({"send_whatsapp_message", "send_customer_message"}),
-    "facebook": frozenset({"publish_social_post"}),
+    "facebook": frozenset({"publish_social_post", "send_customer_message"}),
     "instagram": frozenset({"publish_social_post"}),
     "meta_ads": frozenset({
         "create_meta_campaign", "launch_meta_campaign",
@@ -91,6 +91,13 @@ class ProviderConnectorActionAdapter:
             if self.connector_type == "whatsapp_business":
                 return await self._send_whatsapp(
                     payload, delivery_target, selected_resources, headers
+                )
+            if (
+                self.connector_type == "facebook"
+                and action_type == "send_customer_message"
+            ):
+                return await self._send_meta_customer_message(
+                    payload, delivery_target, selected_resources, token
                 )
             if self.connector_type in {"facebook", "instagram"}:
                 return await self._publish_social(
@@ -168,6 +175,53 @@ class ProviderConnectorActionAdapter:
             succeeded=True,
             external_reference_id=reference,
             safe_metadata={"provider": "whatsapp_business", "delivery_status": "submitted"},
+        )
+
+    async def _send_meta_customer_message(self, payload, target, resources, token):
+        if not isinstance(payload, SendCustomerMessagePayload):
+            raise ConnectorRequestNotSentError("payload_invalid")
+        if not target or not payload.channel_resource_ref:
+            raise ConnectorRequestNotSentError("delivery_target_required")
+        if self.connector_type != "facebook":
+            raise ConnectorRequestNotSentError(
+                "customer_messaging_not_configured"
+            )
+        resource_type = "facebook_page"
+        resource = _resource(
+            resources,
+            resource_type,
+            expected_reference=payload.channel_resource_ref,
+        )
+        if resource is None:
+            raise ConnectorRequestNotSentError("channel_resource_not_selected")
+        token_response = await self._http.request_json(
+            "GET",
+            f"{self._meta_root()}/{resource}",
+            params={"fields": "access_token", "access_token": token},
+        )
+        provider_token = token_response.get("access_token")
+        if not isinstance(provider_token, str) or not provider_token:
+            raise ConnectorRequestNotSentError(
+                "page_access_token_unavailable"
+            )
+        response = await self._http.request_json(
+            "POST",
+            f"{self._meta_root()}/{resource}/messages",
+            headers={"Authorization": f"Bearer {provider_token}"},
+            json_body={
+                "recipient": {"id": target},
+                "messaging_type": "RESPONSE",
+                "message": {"text": payload.message},
+            },
+        )
+        reference = _required_reference(response, "message_id")
+        return ConnectorActionResult(
+            succeeded=True,
+            external_reference_id=reference,
+            safe_metadata={
+                "provider": self.connector_type,
+                "delivery_status": "submitted",
+            },
         )
 
     async def _publish_social(self, payload, resources, headers):
@@ -574,11 +628,20 @@ def _google_retail_pmax_operations(customer: str, payload, micros: str) -> list[
     return operations
 
 
-def _resource(resources, resource_type: str) -> str | None:
+def _resource(
+    resources,
+    resource_type: str,
+    *,
+    expected_reference: str | None = None,
+) -> str | None:
     for item in resources:
         if item.get("resource_type") == resource_type:
             value = item.get("external_reference")
-            if isinstance(value, str) and value:
+            if (
+                isinstance(value, str)
+                and value
+                and (expected_reference is None or value == expected_reference)
+            ):
                 return value
     return None
 

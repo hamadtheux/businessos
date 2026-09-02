@@ -524,7 +524,15 @@ async def _persist_customer_message_result(session, *, context, result) -> None:
     raw_customer = getattr(context.payload, "recipient_ref", None) or getattr(
         context.payload, "customer_ref", None
     )
-    if conversation.customer_id is None or raw_customer != str(conversation.customer_id):
+    if conversation.channel in {"facebook", "instagram"}:
+        if (
+            conversation.customer_channel_identity_id is None
+            or raw_customer != str(conversation.customer_channel_identity_id)
+            or getattr(context.payload, "channel_resource_ref", None)
+            != conversation.external_resource_reference
+        ):
+            raise RuntimeError("conversation_customer_conflict")
+    elif conversation.customer_id is None or raw_customer != str(conversation.customer_id):
         raise RuntimeError("conversation_customer_conflict")
     content = getattr(context.payload, "body", None) or getattr(
         context.payload, "message", None

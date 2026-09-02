@@ -425,6 +425,39 @@ async def verify_meta_webhook(
     return Response(content=hub_challenge, media_type="text/plain", headers=_PRIVATE_HEADERS)
 
 
+@router.post("/integrations/webhooks/meta", response_class=Response)
+async def receive_shared_meta_webhook(
+    request: Request,
+    session: SessionDependency,
+):
+    body = await request.body()
+    if not body or len(body) > settings.integration_webhook_max_bytes:
+        raise HTTPException(413, "Webhook payload is too large.", headers=_PRIVATE_HEADERS)
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(422, "Webhook payload is invalid.", headers=_PRIVATE_HEADERS) from None
+    if not isinstance(payload, Mapping):
+        raise HTTPException(422, "Webhook payload is invalid.", headers=_PRIVATE_HEADERS)
+    try:
+        await service.ingest_shared_meta_webhook(
+            session,
+            body=body,
+            headers=request.headers,
+            payload=payload,
+            verifier=_webhook_verifier("facebook"),
+        )
+        await session.commit()
+    except Exception as exc:
+        await _rollback(session)
+        raise _http_error(exc) from None
+    return Response(
+        content="EVENT_RECEIVED",
+        media_type="text/plain",
+        headers=_PRIVATE_HEADERS,
+    )
+
+
 @router.post(
     "/integrations/webhooks/{connector_type}/{connection_id}",
     response_model=IntegrationWebhookEventResponse,

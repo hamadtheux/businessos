@@ -32,6 +32,7 @@ from app.schemas.background_jobs import BackgroundJobResponse  # noqa: E402
 from app.services.background_jobs import (  # noqa: E402
     cancel_job,
     claim_jobs,
+    dead_letter_exhausted_leases,
     enqueue_job,
     record_job_failure,
     record_job_success,
@@ -57,6 +58,7 @@ class BackgroundJobModelAndRegistryTests(unittest.TestCase):
         self.assertNotIn("payload", BackgroundJob.__table__.columns)
         self.assertNotIn("handler", BackgroundJob.__table__.columns)
         self.assertIn("opportunity_id", BackgroundJob.__table__.columns)
+        self.assertIn("conversation_message_id", BackgroundJob.__table__.columns)
         self.assertFalse(any(
             token in column.name
             for column in BackgroundJob.__table__.columns
@@ -74,6 +76,7 @@ class BackgroundJobModelAndRegistryTests(unittest.TestCase):
             "ck_background_jobs_consistent_failure",
             "ck_background_jobs_valid_attempt_count",
             "ck_background_jobs_consistent_opportunity_reference",
+            "ck_background_jobs_consistent_conversation_message_reference",
         ):
             self.assertIn(expected, names)
 
@@ -111,6 +114,34 @@ class BackgroundJobModelAndRegistryTests(unittest.TestCase):
             ["opportunities.id", "opportunities.business_id"],
         )
         self.assertIsNone(constraint.ondelete)
+
+    def test_conversation_message_reference_uses_composite_tenant_foreign_key(self) -> None:
+        foreign_keys = [
+            value for value in BackgroundJob.__table__.constraints
+            if isinstance(value, ForeignKeyConstraint)
+        ]
+        constraint = next(
+            value for value in foreign_keys
+            if value.name == "fk_jobs_conversation_message_business"
+        )
+        self.assertEqual(
+            [column.name for column in constraint.columns],
+            ["conversation_message_id", "business_id"],
+        )
+        self.assertEqual(
+            [element.target_fullname for element in constraint.elements],
+            ["conversation_messages.id", "conversation_messages.business_id"],
+        )
+        self.assertEqual(constraint.ondelete, "CASCADE")
+
+    def test_manual_message_dispatch_policy_is_bounded_and_crash_recoverable(self) -> None:
+        policy = require_job_policy("dispatch_conversation_message")
+        self.assertEqual(policy.reference_field, "conversation_message_id")
+        self.assertEqual(policy.priority, 100)
+        self.assertEqual(policy.max_attempts, 3)
+        self.assertTrue(policy.retryable)
+        self.assertFalse(policy.manually_retryable)
+        self.assertTrue(policy.lease_recoverable)
 
     def test_registry_is_immutable_bounded_and_has_no_dispatch_type(self) -> None:
         with self.assertRaises(TypeError):
@@ -387,6 +418,96 @@ class BackgroundJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(session.added), 1)
         self.assertEqual(session.added[0].category, "processing_failure")
 
+    async def test_manual_message_transient_failure_requeues_only_before_boundary(self) -> None:
+        job = _conversation_dispatch_job(attempt_count=1)
+        message = SimpleNamespace(
+            id=job.conversation_message_id,
+            business_id=BUSINESS_ID,
+            delivery_status="queued",
+        )
+        session = _Session(scalar_values=[job, message])
+
+        result = await record_job_failure(
+            session,  # type: ignore[arg-type]
+            job_id=job.id,
+            worker_id="worker-a",
+            failure_code="dependency_unavailable",
+            retryable=True,
+        )
+
+        self.assertEqual(result.status, "queued")
+        self.assertIsNone(result.worker_id)
+        self.assertEqual(message.delivery_status, "queued")
+        # The linked message was intentionally not consumed/finalized because
+        # another bounded attempt is still safe before the provider boundary.
+        self.assertEqual(session.scalar_values, [message])
+
+    async def test_manual_message_retry_exhaustion_finalizes_delivery_truthfully(self) -> None:
+        for initial, expected in (
+            ("queued", "failed"),
+            ("dispatching", "uncertain"),
+        ):
+            with self.subTest(initial=initial):
+                job = _conversation_dispatch_job(attempt_count=3)
+                message = SimpleNamespace(
+                    id=job.conversation_message_id,
+                    business_id=BUSINESS_ID,
+                    delivery_status=initial,
+                )
+                session = _Session(scalar_values=[job, message])
+
+                result = await record_job_failure(
+                    session,  # type: ignore[arg-type]
+                    job_id=job.id,
+                    worker_id="worker-a",
+                    failure_code="dependency_unavailable",
+                    retryable=True,
+                )
+
+                self.assertEqual(
+                    (result.status, result.failure_code),
+                    ("dead_letter", "retry_exhausted"),
+                )
+                self.assertEqual(message.delivery_status, expected)
+                self.assertEqual(len(session.added), 1)
+                self.assertEqual(
+                    session.added[0].category,
+                    "processing_failure",
+                )
+
+    async def test_exhausted_manual_message_lease_cannot_leave_message_stuck(self) -> None:
+        for initial, expected in (
+            ("queued", "failed"),
+            ("dispatching", "uncertain"),
+        ):
+            with self.subTest(initial=initial):
+                job = _conversation_dispatch_job(
+                    attempt_count=3,
+                    claimed_at=NOW - timedelta(minutes=2),
+                    lease_expires_at=NOW - timedelta(minutes=1),
+                    worker_id="dead-worker",
+                )
+                message = SimpleNamespace(
+                    id=job.conversation_message_id,
+                    business_id=BUSINESS_ID,
+                    delivery_status=initial,
+                )
+                session = _Session(
+                    scalar_values=[message],
+                    scalar_items=[job],
+                )
+
+                count = await dead_letter_exhausted_leases(
+                    session,  # type: ignore[arg-type]
+                    now=NOW,
+                    limit=10,
+                )
+
+                self.assertEqual(count, 1)
+                self.assertEqual(job.status, "dead_letter")
+                self.assertEqual(job.failure_code, "retry_exhausted")
+                self.assertEqual(message.delivery_status, expected)
+
     async def test_permanent_and_uncertain_failures_do_not_retry(self) -> None:
         for code in ("invalid_job_state", "uncertain_external_outcome"):
             job = _processing_job()
@@ -555,6 +676,37 @@ def _processing_job(
         worker_id="worker-a",
         completed_at=completed_at,
         failure_code=failure_code,
+    )
+
+
+def _conversation_dispatch_job(
+    *,
+    status: str = "processing",
+    attempt_count: int = 1,
+    claimed_at: datetime | None = NOW - timedelta(seconds=10),
+    lease_expires_at: datetime | None = NOW + timedelta(seconds=50),
+    worker_id: str | None = "worker-a",
+    conversation_message_id: UUID | None = None,
+) -> BackgroundJob:
+    message_id = conversation_message_id or uuid4()
+    return BackgroundJob(
+        id=uuid4(),
+        business_id=BUSINESS_ID,
+        job_type="dispatch_conversation_message",
+        status=status,
+        priority=100,
+        idempotency_key=f"dispatch-conversation-message:{message_id}",
+        attempt_count=attempt_count,
+        max_attempts=3,
+        available_at=NOW - timedelta(seconds=1),
+        claimed_at=claimed_at,
+        lease_expires_at=lease_expires_at,
+        worker_id=worker_id,
+        completed_at=None,
+        failure_code=None,
+        conversation_message_id=message_id,
+        created_at=NOW,
+        updated_at=NOW,
     )
 
 

@@ -411,6 +411,17 @@ class ConfiguredOAuthConnector:
             status_events = _normalize_whatsapp_status_events(payload)
             if status_events:
                 return status_events
+            message_events = _normalize_whatsapp_message_events(payload)
+            if message_events:
+                return message_events
+
+        if self.connector_type in {"facebook", "instagram"}:
+            messaging_events = _normalize_meta_messaging_events(
+                payload,
+                connector_type=self.connector_type,
+            )
+            if messaging_events:
+                return messaging_events
 
         event_id = _event_reference(payload, serialized)
         event_type = _event_type(self.connector_type, payload)
@@ -431,6 +442,38 @@ class ConfiguredOAuthConnector:
                 safe_payload=safe_payload,
             ),
         )
+
+    async def subscribe_resources(
+        self,
+        credentials: CredentialMaterial,
+        resources: Sequence[ExternalResource],
+    ) -> None:
+        """Subscribe authorized Facebook Pages to the app's supported events."""
+        if self.connector_type != "facebook":
+            return
+        system_token = _access_token(credentials)
+        pages = [item for item in resources if item.resource_type == "facebook_page"]
+        if not pages:
+            raise IntegrationProviderUnavailableError("provider_response_invalid")
+        for page in pages:
+            token_response = await self._http.request_json(
+                "GET",
+                f"{self._meta_root()}/{page.external_reference}",
+                params={"fields": "access_token", "access_token": system_token},
+            )
+            page_token = _required_string(token_response, "access_token")
+            subscribed = await self._http.request_json(
+                "POST",
+                f"{self._meta_root()}/{page.external_reference}/subscribed_apps",
+                data={
+                    "subscribed_fields": (
+                        "messages,messaging_postbacks,message_deliveries,message_reads"
+                    ),
+                    "access_token": page_token,
+                },
+            )
+            if subscribed.get("success") is not True:
+                raise IntegrationProviderUnavailableError("provider_response_invalid")
 
     async def normalize_webhook(
         self, payload: Mapping[str, object]
@@ -1265,6 +1308,259 @@ def _mapping_items(
     if not isinstance(items, list):
         raise IntegrationProviderUnavailableError("provider_unavailable")
     return [item for item in items[:100] if isinstance(item, dict)]
+
+
+def _normalize_meta_messaging_events(
+    payload: Mapping[str, object],
+    *,
+    connector_type: str,
+) -> tuple[NormalizedIntegrationEvent, ...]:
+    """Normalize bounded Messenger/Instagram messaging webhook evidence."""
+    expected_object = "page" if connector_type == "facebook" else "instagram"
+    if payload.get("object") != expected_object:
+        return ()
+    entries = payload.get("entry")
+    if not isinstance(entries, list) or not entries or len(entries) > 100:
+        raise IntegrationProviderUnavailableError("provider_response_invalid")
+    result: list[NormalizedIntegrationEvent] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise IntegrationProviderUnavailableError("provider_response_invalid")
+        resource_reference = _bounded_provider_reference(entry.get("id"))
+        if resource_reference is None:
+            raise IntegrationProviderUnavailableError("provider_response_invalid")
+        messaging = entry.get("messaging")
+        if not isinstance(messaging, list) or len(messaging) > 100:
+            raise IntegrationProviderUnavailableError("provider_response_invalid")
+        for item in messaging:
+            if not isinstance(item, Mapping):
+                raise IntegrationProviderUnavailableError("provider_response_invalid")
+            occurred_at = _meta_millis_time(item.get("timestamp", entry.get("time")))
+            sender = item.get("sender")
+            recipient = item.get("recipient")
+            sender_reference = (
+                _bounded_provider_reference(sender.get("id"))
+                if isinstance(sender, Mapping)
+                else None
+            )
+            recipient_reference = (
+                _bounded_provider_reference(recipient.get("id"))
+                if isinstance(recipient, Mapping)
+                else None
+            )
+            message = item.get("message")
+            postback = item.get("postback")
+            delivery = item.get("delivery")
+            read = item.get("read")
+
+            if isinstance(message, Mapping):
+                message_reference = _bounded_provider_reference(message.get("mid"))
+                if message.get("is_echo") is True:
+                    if message_reference:
+                        result.append(_meta_delivery_event(
+                            resource_reference=resource_reference,
+                            message_reference=message_reference,
+                            delivery_status="sent",
+                            occurred_at=occurred_at,
+                        ))
+                    continue
+                content = message.get("text")
+                if (
+                    not sender_reference
+                    or not recipient_reference
+                    or not message_reference
+                    or recipient_reference != resource_reference
+                    or not isinstance(content, str)
+                    or not content.strip()
+                    or len(content.strip()) > 10_000
+                ):
+                    # Attachments are not claimed as supported until durable
+                    # attachment storage exists. Refuse malformed text evidence.
+                    raise IntegrationProviderUnavailableError("provider_response_invalid")
+                result.append(NormalizedIntegrationEvent(
+                    external_event_id=message_reference,
+                    event_type="message_received",
+                    occurred_at=occurred_at,
+                    safe_payload={
+                        "external_conversation_reference": sender_reference,
+                        "external_message_reference": message_reference,
+                        "sender_external_reference": sender_reference,
+                        "external_resource_reference": resource_reference,
+                        "content": content.strip(),
+                    },
+                ))
+            elif isinstance(postback, Mapping):
+                if (
+                    not sender_reference
+                    or not recipient_reference
+                    or recipient_reference != resource_reference
+                ):
+                    raise IntegrationProviderUnavailableError(
+                        "provider_response_invalid"
+                    )
+                raw_content = postback.get("title") or postback.get("payload")
+                if not isinstance(raw_content, str) or not raw_content.strip():
+                    raise IntegrationProviderUnavailableError("provider_response_invalid")
+                identity = json.dumps(item, sort_keys=True, separators=(",", ":"))
+                reference = _bounded_provider_reference(postback.get("mid")) or (
+                    "meta_postback_" + hashlib.sha256(identity.encode()).hexdigest()
+                )
+                result.append(NormalizedIntegrationEvent(
+                    external_event_id=reference,
+                    event_type="message_received",
+                    occurred_at=occurred_at,
+                    safe_payload={
+                        "external_conversation_reference": sender_reference,
+                        "external_message_reference": reference,
+                        "sender_external_reference": sender_reference,
+                        "external_resource_reference": resource_reference,
+                        "content": raw_content.strip()[:10_000],
+                    },
+                ))
+            elif isinstance(delivery, Mapping):
+                mids = delivery.get("mids")
+                if not isinstance(mids, list) or not mids or len(mids) > 100:
+                    raise IntegrationProviderUnavailableError("provider_response_invalid")
+                for mid in mids:
+                    reference = _bounded_provider_reference(mid)
+                    if not reference:
+                        raise IntegrationProviderUnavailableError("provider_response_invalid")
+                    result.append(_meta_delivery_event(
+                        resource_reference=resource_reference,
+                        message_reference=reference,
+                        delivery_status="delivered",
+                        occurred_at=occurred_at,
+                    ))
+            elif isinstance(read, Mapping):
+                watermark = read.get("watermark")
+                if (
+                    not sender_reference
+                    or not isinstance(watermark, (int, float))
+                    or watermark <= 0
+                ):
+                    raise IntegrationProviderUnavailableError("provider_response_invalid")
+                identity = (
+                    f"{resource_reference}\n"
+                    f"{sender_reference}\n"
+                    f"read\n{int(watermark)}"
+                )
+                result.append(NormalizedIntegrationEvent(
+                    external_event_id="meta_read_" + hashlib.sha256(identity.encode()).hexdigest(),
+                    event_type="message_status_updated",
+                    occurred_at=_meta_millis_time(watermark),
+                    safe_payload={
+                        "delivery_status": "read",
+                        "delivery_watermark": int(watermark),
+                        "external_conversation_reference": sender_reference,
+                        "external_resource_reference": resource_reference,
+                    },
+                ))
+            else:
+                raise IntegrationProviderUnavailableError("provider_response_invalid")
+            if len(result) > 100:
+                raise IntegrationProviderUnavailableError("provider_response_invalid")
+    return tuple(result)
+
+
+def _normalize_whatsapp_message_events(
+    payload: Mapping[str, object],
+) -> tuple[NormalizedIntegrationEvent, ...]:
+    if payload.get("object") != "whatsapp_business_account":
+        return ()
+    entries = payload.get("entry")
+    if not isinstance(entries, list) or not entries or len(entries) > 100:
+        raise IntegrationProviderUnavailableError("provider_response_invalid")
+    result: list[NormalizedIntegrationEvent] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise IntegrationProviderUnavailableError("provider_response_invalid")
+        changes = entry.get("changes")
+        if not isinstance(changes, list) or len(changes) > 100:
+            raise IntegrationProviderUnavailableError("provider_response_invalid")
+        for change in changes:
+            value = change.get("value") if isinstance(change, Mapping) else None
+            if not isinstance(value, Mapping) or "messages" not in value:
+                continue
+            metadata = value.get("metadata")
+            phone_reference = (
+                _bounded_provider_reference(metadata.get("phone_number_id"))
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            messages = value.get("messages")
+            contacts = value.get("contacts")
+            if not phone_reference or not isinstance(messages, list) or len(messages) > 100:
+                raise IntegrationProviderUnavailableError("provider_response_invalid")
+            names: dict[str, str] = {}
+            if isinstance(contacts, list):
+                for contact in contacts[:100]:
+                    profile = contact.get("profile") if isinstance(contact, Mapping) else None
+                    wa_id = contact.get("wa_id") if isinstance(contact, Mapping) else None
+                    name = profile.get("name") if isinstance(profile, Mapping) else None
+                    if isinstance(wa_id, str) and isinstance(name, str) and name.strip():
+                        names[wa_id] = name.strip()[:160]
+            for message in messages:
+                if not isinstance(message, Mapping) or message.get("type") != "text":
+                    raise IntegrationProviderUnavailableError("provider_response_invalid")
+                reference = _bounded_provider_reference(message.get("id"))
+                sender = _bounded_provider_reference(message.get("from"))
+                text_value = message.get("text")
+                content = text_value.get("body") if isinstance(text_value, Mapping) else None
+                if not reference or not sender or not isinstance(content, str) or not content.strip():
+                    raise IntegrationProviderUnavailableError("provider_response_invalid")
+                safe_payload: dict[str, object] = {
+                    "external_conversation_reference": sender,
+                    "external_message_reference": reference,
+                    "sender_external_reference": sender,
+                    "sender_phone": sender,
+                    "external_resource_reference": phone_reference,
+                    "content": content.strip()[:10_000],
+                }
+                if sender in names:
+                    safe_payload["sender_display_name"] = names[sender]
+                result.append(NormalizedIntegrationEvent(
+                    external_event_id=reference,
+                    event_type="message_received",
+                    occurred_at=_whatsapp_status_time(message.get("timestamp")),
+                    safe_payload=safe_payload,
+                ))
+                if len(result) > 100:
+                    raise IntegrationProviderUnavailableError("provider_response_invalid")
+    return tuple(result)
+
+
+def _bounded_provider_reference(value: object) -> str | None:
+    normalized = str(value).strip() if isinstance(value, (str, int)) else ""
+    return normalized if 1 <= len(normalized) <= 255 else None
+
+
+def _meta_millis_time(value: object) -> datetime:
+    if isinstance(value, (int, float)) and value > 0:
+        try:
+            return datetime.fromtimestamp(float(value) / 1000, tz=UTC)
+        except (ValueError, OverflowError, OSError):
+            pass
+    raise IntegrationProviderUnavailableError("provider_response_invalid")
+
+
+def _meta_delivery_event(
+    *,
+    resource_reference: str,
+    message_reference: str,
+    delivery_status: str,
+    occurred_at: datetime,
+) -> NormalizedIntegrationEvent:
+    identity = f"{resource_reference}\n{message_reference}\n{delivery_status}\n{occurred_at.isoformat()}"
+    return NormalizedIntegrationEvent(
+        external_event_id="meta_status_" + hashlib.sha256(identity.encode()).hexdigest(),
+        event_type="message_status_updated",
+        occurred_at=occurred_at,
+        safe_payload={
+            "external_message_reference": message_reference,
+            "delivery_status": delivery_status,
+            "external_resource_reference": resource_reference,
+        },
+    )
 
 
 def _normalize_whatsapp_status_events(

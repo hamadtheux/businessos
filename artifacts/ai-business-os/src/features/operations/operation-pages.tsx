@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, ArrowLeft, ArrowRight, Check, ChevronRight, MessageCircle, Plus, Search, Send, ShoppingBag, Users } from "lucide-react";
+import { AlertCircle, ArrowLeft, ArrowRight, ChevronRight, MessageCircle, Plus, Search, ShoppingBag, Users } from "lucide-react";
 import { useBusiness } from "@/business-context";
 import {
   getIndustryTerminology,
@@ -9,7 +9,7 @@ import {
 import { Avatar, Badge, Button, Card, Modal, PageHeader } from "@/components/product-ui";
 import { humanizeApiError } from "@/services/api-client";
 import { operationsApi } from "@/services/operations";
-import type { ConversationStatus, Customer, Lead, LeadStage, Order, OrderStatus } from "@/services/api-types";
+import type { Customer, Lead, LeadStage, Order, OrderStatus } from "@/services/api-types";
 
 const money = (value: string | number, currency = "USD") => new Intl.NumberFormat(undefined, { style: "currency", currency }).format(Number(value));
 const when = (value: string) => new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
@@ -552,28 +552,5 @@ export function CrmPage() {
   const next = leadStages[index + 1];
   if (next) stage.mutate({ id: selected.id, next });
 }}>Move stage <ArrowRight /></Button></div>{error && <p className="form-error">{error}</p>}</Modal>}
-  </>;
-}
-
-export function ConversationsPage() {
-  const { activeBusinessId, activeBusiness } = useBusiness(); const client = useQueryClient();
-  const terminology = getIndustryTerminology(activeBusiness?.industry);
-  const customerSingular = terminology.customerSingular;
-  const customerPlural = terminology.customerPlural;
-  const customerSingularLower = customerSingular.toLowerCase();
-  const [search, setSearch] = useState(""); const [status, setStatus] = useState(""); const [page, setPage] = useState(1); const [selectedId, setSelectedId] = useState(""); const [message, setMessage] = useState(""); const [creating, setCreating] = useState(false); const [error, setError] = useState("");
-  const conversations = useQuery({ queryKey: ["operations", activeBusinessId, "conversations", search, status, page], queryFn: ({ signal }) => operationsApi.conversations.list(activeBusinessId, { search, status: status || undefined, page, pageSize: 50 }, signal), enabled: Boolean(activeBusinessId) });
-  useEffect(() => { if (!selectedId && conversations.data?.items[0]) setSelectedId(conversations.data.items[0].id); }, [conversations.data, selectedId]);
-  const detail = useQuery({ queryKey: ["operations", activeBusinessId, "conversation", selectedId], queryFn: ({ signal }) => operationsApi.conversations.get(activeBusinessId, selectedId, signal), enabled: Boolean(activeBusinessId && selectedId) });
-  const refresh = () => { void client.invalidateQueries({ queryKey: ["operations", activeBusinessId, "conversations"] }); void client.invalidateQueries({ queryKey: ["operations", activeBusinessId, "conversation", selectedId] }); };
-  const send = useMutation({ mutationFn: () => operationsApi.conversations.message(activeBusinessId, selectedId, message.trim()), onSuccess: () => { setMessage(""); setError(""); refresh(); }, onError: (reason) => setError(humanizeApiError(reason, "Message record could not be saved.")) });
-  const update = useMutation({ mutationFn: (next: ConversationStatus) => operationsApi.conversations.update(activeBusinessId, selectedId, { status: next }), onSuccess: refresh, onError: (reason) => setError(humanizeApiError(reason, "Conversation could not be updated.")) });
-  const create = useMutation({ mutationFn: (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); return operationsApi.conversations.create(activeBusinessId, { channel: String(form.get("channel")) as "manual", external_reference: String(form.get("external_reference")) || null }); }, onSuccess: (record) => { setCreating(false); setSelectedId(record.id); refresh(); }, onError: (reason) => setError(humanizeApiError(reason, "Conversation could not be created.")) });
-  if (conversations.isError) return <ErrorState error={conversations.error} retry={() => void conversations.refetch()} />;
-  const selected = detail.data;
-  return <>
-    <PageHeader eyebrow={`${customerPlural} communications`} title="Conversations" subtitle={`Internal conversation records for ${customerPlural.toLowerCase()} across channels. Recording a message here never sends it externally.`} action={<Button variant="primary" onClick={() => setCreating(true)}><Plus /> New record</Button>} />
-    <div className="card conversation-layout enhanced-inbox"><div className="conversation-panel"><div className="panel-label">Status</div>{["", "open", "escalated", "resolved"].map((item) => <button className={`channel ${status === item ? "active" : ""}`} onClick={() => { setStatus(item); setPage(1); }} key={item || "all"}>{item || "All"}</button>)}</div><div className="conversation-panel"><div className="inbox-search"><Search /><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Search inbox" /></div>{conversations.data?.items.map((item) => <button className={`convo-item ${selectedId === item.id ? "active" : ""}`} onClick={() => setSelectedId(item.id)} key={item.id}><div className="convo-line"><Avatar name={item.customer_display_name || item.channel} /><div className="row-main"><div className="convo-name">{item.customer_display_name || `Unmatched ${customerSingularLower}`}</div><div className="convo-msg">{item.latest_message || "No messages recorded"}</div><div className="row-copy">{item.channel} · {item.status}</div></div><div className="time">{when(item.last_activity_at)}</div></div></button>)}{conversations.data && <Pager page={page} pageSize={conversations.data.page_size} total={conversations.data.total} onPage={setPage} />}</div><div className="conversation-panel">{selected ? <><div className="chat-head"><div className="conversation-contact"><Avatar name={selected.customer_display_name || selected.channel} /><div><div className="row-title">{selected.customer_display_name || `Unmatched ${customerSingularLower}`}</div><div className="row-copy">{selected.channel} · {selected.status}</div></div></div><Badge tone={selected.status === "escalated" ? "warning" : selected.status === "resolved" ? "neutral" : "success"}>{selected.status}</Badge></div><div className="chat-body"><div className="ai-banner"><MessageCircle />Messages entered here are recorded internally; no connector or external send is performed.</div>{selected.messages.map((item) => <div className={`bubble-wrap ${item.direction === "inbound" ? "customer" : ""}`} key={item.id}><div className="bubble">{item.content}<span className="bubble-time">{when(item.sent_at)} · {item.sender_type}</span></div></div>)}{!selected.messages.length && <EmptyState icon={<MessageCircle />} title="No messages recorded" copy="Add an internal note below." />}<div className="toolbar conversation-actions"><Button className="btn-sm" onClick={() => update.mutate("open")} disabled={update.isPending}>Open</Button><Button className="btn-sm" onClick={() => update.mutate("escalated")} disabled={update.isPending}>Escalate</Button><Button className="btn-sm" onClick={() => update.mutate("resolved")} disabled={update.isPending}><Check /> Resolve</Button></div></div><div className="chat-compose"><input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Record an internal message…" /><Button variant="green" onClick={() => send.mutate()} disabled={!message.trim() || send.isPending}><Send /></Button></div>{error && <p className="form-error">{error}</p>}</> : <EmptyState icon={<MessageCircle />} title="Select a conversation" copy="Choose a record to view its history." />}</div></div>
-    {creating && <Modal title="New conversation record" description="This creates metadata only and does not connect or message an external service." onClose={() => setCreating(false)}><form onSubmit={(event) => create.mutate(event)}><div className="form-grid"><div className="field"><label>Channel</label><select name="channel"><option value="manual">Manual</option><option value="website">Website</option><option value="email">Email</option><option value="whatsapp">WhatsApp</option><option value="other">Other</option></select></div><div className="field"><label>External reference (optional)</label><input name="external_reference" /></div></div>{error && <p className="form-error">{error}</p>}<div className="modal-foot"><Button type="button" onClick={() => setCreating(false)}>Cancel</Button><Button variant="primary" type="submit">Create record</Button></div></form></Modal>}
   </>;
 }

@@ -20,6 +20,9 @@ from app.services.background_jobs import (
 )
 from app.services.job_handlers import HandlerOutcome, dispatch_job_handler
 from app.services.action_dispatcher import dispatch_action_execution_job
+from app.services.conversation_message_dispatcher import (
+    dispatch_conversation_message_job,
+)
 
 
 logger = logging.getLogger("aibos.worker")
@@ -35,6 +38,13 @@ async def process_claimed_job(job: BackgroundJob, *, worker_id: str) -> None:
     try:
         if job.job_type == "dispatch_action_execution":
             dispatched = await dispatch_action_execution_job(job)
+            outcome = HandlerOutcome(
+                dispatched.succeeded,
+                dispatched.failure_code,
+                dispatched.retryable,
+            )
+        elif job.job_type == "dispatch_conversation_message":
+            dispatched = await dispatch_conversation_message_job(job)
             outcome = HandlerOutcome(
                 dispatched.succeeded,
                 dispatched.failure_code,

@@ -432,6 +432,11 @@ export type OrderCreate = {
 };
 
 export type ConversationStatus = "open" | "escalated" | "resolved";
+export type ConversationHandlingState =
+  | "ai_active"
+  | "ai_paused"
+  | "human_takeover"
+  | "escalated";
 export type ConversationChannel =
   | "website"
   | "whatsapp"
@@ -453,12 +458,16 @@ export type ConversationMessage = {
   delivery_status:
     | "received"
     | "recorded"
+    | "queued"
+    | "dispatching"
     | "submitted"
     | "sent"
     | "delivered"
     | "read"
-    | "failed";
+    | "failed"
+    | "uncertain";
   action_execution_attempt_id: string | null;
+  client_request_id: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -466,18 +475,90 @@ export type Conversation = {
   id: string;
   business_id: string;
   customer_id: string | null;
+  customer_channel_identity_id: string | null;
   integration_connection_id: string | null;
   customer_display_name: string | null;
+  customer_email: string | null;
+  customer_phone: string | null;
   channel: ConversationChannel;
   external_reference: string | null;
+  external_resource_reference: string | null;
   status: ConversationStatus;
+  handling_state: ConversationHandlingState;
+  unread_count: number;
   assigned_user_id: string | null;
   last_activity_at: string;
   latest_message: string | null;
   unread: boolean;
+  can_send_externally: boolean;
+  send_unavailable_reason: string | null;
   messages: ConversationMessage[];
   created_at: string;
   updated_at: string;
+};
+
+export type SupportCaseStatus =
+  | "new"
+  | "open"
+  | "ai_handling"
+  | "waiting_for_customer"
+  | "waiting_for_business"
+  | "escalated"
+  | "resolved"
+  | "closed";
+export type SupportCasePriority = "low" | "medium" | "high" | "urgent";
+export type SupportCaseCategory =
+  | "general"
+  | "order"
+  | "delivery"
+  | "return"
+  | "refund"
+  | "product"
+  | "account"
+  | "appointment"
+  | "technical"
+  | "complaint"
+  | "payment";
+export type SupportCase = {
+  id: string;
+  business_id: string;
+  case_number: string;
+  customer_id: string | null;
+  customer_display_name: string | null;
+  customer_email: string | null;
+  customer_phone: string | null;
+  conversation_id: string;
+  integration_connection_id: string | null;
+  channel: ConversationChannel;
+  assigned_user_id: string | null;
+  assigned_ai_role: "support" | null;
+  status: SupportCaseStatus;
+  priority: SupportCasePriority;
+  category: SupportCaseCategory;
+  issue_summary: string;
+  escalation_reason: string | null;
+  resolution_summary: string | null;
+  source: string;
+  related_order_id: string | null;
+  related_order_number: string | null;
+  related_product_id: string | null;
+  related_product_name: string | null;
+  related_lead_id: string | null;
+  opened_at: string;
+  last_activity_at: string;
+  escalated_at: string | null;
+  resolved_at: string | null;
+  closed_at: string | null;
+  conversation: Conversation | null;
+  created_at: string;
+  updated_at: string;
+};
+export type SupportMetrics = {
+  open_issues: number;
+  ai_handling: number;
+  escalated: number;
+  waiting_for_customer: number;
+  resolved_today: number;
 };
 
 export type Notification = {

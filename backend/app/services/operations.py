@@ -24,7 +24,8 @@ from app.models.audit_log import AuditLog
 from app.models.business_membership import BusinessMembership
 from app.models.business import Business
 from app.models.catalog_item import CatalogItem
-from app.models.conversation import Conversation, ConversationMessage
+from app.models.conversation import Conversation, ConversationMessage, CustomerChannelIdentity
+from app.models.integration import IntegrationConnection
 from app.models.crm_lead import CRMLead
 from app.models.customer import Customer
 from app.models.notification import Notification
@@ -363,13 +364,26 @@ async def change_order_status(session: AsyncSession, *, business_id: UUID, order
     return order
 
 
-async def list_conversations(session: AsyncSession, *, business_id: UUID, page: int, page_size: int, search: str | None, status: str | None):
+async def list_conversations(session: AsyncSession, *, business_id: UUID, page: int, page_size: int, search: str | None, status: str | None, channel: str | None = None):
     statement = select(Conversation).outerjoin(Customer, and_(Customer.id == Conversation.customer_id, Customer.business_id == Conversation.business_id)).where(Conversation.business_id == business_id)
     term = _search_term(search)
     if term:
-        statement = statement.where(or_(Customer.display_name.icontains(term, autoescape=True), Conversation.external_reference.icontains(term, autoescape=True)))
+        statement = statement.where(or_(
+            Customer.display_name.icontains(term, autoescape=True),
+            Conversation.external_reference.icontains(term, autoescape=True),
+            Conversation.channel.icontains(term, autoescape=True),
+            ConversationMessage.content.icontains(term, autoescape=True),
+        )).outerjoin(
+            ConversationMessage,
+            and_(
+                ConversationMessage.business_id == Conversation.business_id,
+                ConversationMessage.conversation_id == Conversation.id,
+            ),
+        ).distinct()
     if status:
         statement = statement.where(Conversation.status == status)
+    if channel:
+        statement = statement.where(Conversation.channel == channel)
     return await _paged(session, statement.order_by(Conversation.last_activity_at.desc(), Conversation.id.desc()), page, page_size)
 
 
@@ -385,12 +399,17 @@ async def get_conversation(session: AsyncSession, *, business_id: UUID, conversa
 
 async def conversation_response(session: AsyncSession, conversation: Conversation, *, include_messages: bool = True) -> ConversationResponse:
     try:
-        customer_name = await session.scalar(select(Customer.display_name).where(Customer.business_id == conversation.business_id, Customer.id == conversation.customer_id)) if conversation.customer_id else None
-        messages = list((await session.scalars(select(ConversationMessage).where(ConversationMessage.business_id == conversation.business_id, ConversationMessage.conversation_id == conversation.id).order_by(ConversationMessage.sent_at, ConversationMessage.id))).all()) if include_messages else []
+        customer_row = (await session.execute(select(Customer.display_name, Customer.email, Customer.phone).where(Customer.business_id == conversation.business_id, Customer.id == conversation.customer_id))).one_or_none() if conversation.customer_id else None
+        identity_name = await session.scalar(select(CustomerChannelIdentity.display_name).where(CustomerChannelIdentity.business_id == conversation.business_id, CustomerChannelIdentity.id == conversation.customer_channel_identity_id)) if conversation.customer_channel_identity_id else None
+        recent = list((await session.scalars(select(ConversationMessage).where(ConversationMessage.business_id == conversation.business_id, ConversationMessage.conversation_id == conversation.id).order_by(ConversationMessage.sent_at.desc(), ConversationMessage.id.desc()).limit(100))).all()) if include_messages else []
+        messages = list(reversed(recent))
         latest = await session.scalar(select(ConversationMessage.content).where(ConversationMessage.business_id == conversation.business_id, ConversationMessage.conversation_id == conversation.id).order_by(ConversationMessage.sent_at.desc(), ConversationMessage.id.desc()).limit(1))
+        connection = await session.scalar(select(IntegrationConnection).where(IntegrationConnection.business_id == conversation.business_id, IntegrationConnection.id == conversation.integration_connection_id)) if conversation.integration_connection_id else None
     except SQLAlchemyError:
         raise OperationsPersistenceError from None
-    return ConversationResponse(id=conversation.id, business_id=conversation.business_id, customer_id=conversation.customer_id, integration_connection_id=conversation.integration_connection_id, customer_display_name=customer_name, channel=conversation.channel, external_reference=conversation.external_reference, status=conversation.status, assigned_user_id=conversation.assigned_user_id, last_activity_at=conversation.last_activity_at, latest_message=latest, unread=False, messages=[MessageResponse.model_validate(message) for message in messages], created_at=conversation.created_at, updated_at=conversation.updated_at)
+    customer_name, customer_email, customer_phone = customer_row or (None, None, None)
+    can_send, reason = _conversation_send_availability(conversation, connection)
+    return ConversationResponse(id=conversation.id, business_id=conversation.business_id, customer_id=conversation.customer_id, customer_channel_identity_id=conversation.customer_channel_identity_id, integration_connection_id=conversation.integration_connection_id, customer_display_name=customer_name or identity_name, customer_email=customer_email, customer_phone=customer_phone, channel=conversation.channel, external_reference=conversation.external_reference, external_resource_reference=conversation.external_resource_reference, status=conversation.status, handling_state=conversation.handling_state or "ai_active", unread_count=conversation.unread_count or 0, assigned_user_id=conversation.assigned_user_id, last_activity_at=conversation.last_activity_at, latest_message=latest, unread=bool(conversation.unread_count), can_send_externally=can_send, send_unavailable_reason=reason, messages=[MessageResponse.model_validate(message) for message in messages], created_at=conversation.created_at, updated_at=conversation.updated_at)
 
 
 async def conversation_responses(session: AsyncSession, conversations: list[Conversation]) -> list[ConversationResponse]:
@@ -399,24 +418,48 @@ async def conversation_responses(session: AsyncSession, conversations: list[Conv
     business_id = conversations[0].business_id
     conversation_ids = [item.id for item in conversations]
     customer_ids = {item.customer_id for item in conversations if item.customer_id}
+    identity_ids = {item.customer_channel_identity_id for item in conversations if item.customer_channel_identity_id}
+    connection_ids = {item.integration_connection_id for item in conversations if item.integration_connection_id}
     try:
-        customer_rows = (await session.execute(select(Customer.id, Customer.display_name).where(Customer.business_id == business_id, Customer.id.in_(customer_ids)))).all() if customer_ids else []
-        messages = list((await session.scalars(select(ConversationMessage).where(ConversationMessage.business_id == business_id, ConversationMessage.conversation_id.in_(conversation_ids)).order_by(ConversationMessage.sent_at.desc(), ConversationMessage.id.desc()))).all())
+        customer_rows = (await session.execute(select(Customer.id, Customer.display_name, Customer.email, Customer.phone).where(Customer.business_id == business_id, Customer.id.in_(customer_ids)))).all() if customer_ids else []
+        identity_rows = (await session.execute(select(CustomerChannelIdentity.id, CustomerChannelIdentity.display_name).where(CustomerChannelIdentity.business_id == business_id, CustomerChannelIdentity.id.in_(identity_ids)))).all() if identity_ids else []
+        connection_rows = list((await session.scalars(select(IntegrationConnection).where(IntegrationConnection.business_id == business_id, IntegrationConnection.id.in_(connection_ids)))).all()) if connection_ids else []
+        ranked = select(
+            ConversationMessage.conversation_id.label("conversation_id"),
+            ConversationMessage.content.label("content"),
+            func.row_number().over(
+                partition_by=ConversationMessage.conversation_id,
+                order_by=(ConversationMessage.sent_at.desc(), ConversationMessage.id.desc()),
+            ).label("rank"),
+        ).where(
+            ConversationMessage.business_id == business_id,
+            ConversationMessage.conversation_id.in_(conversation_ids),
+        ).subquery()
+        message_rows = (await session.execute(select(ranked.c.conversation_id, ranked.c.content).where(ranked.c.rank == 1))).all()
     except SQLAlchemyError:
         raise OperationsPersistenceError from None
-    names = {customer_id: name for customer_id, name in customer_rows}
-    latest: dict[UUID, str] = {}
-    for message in messages:
-        latest.setdefault(message.conversation_id, message.content)
-    return [ConversationResponse(
+    customers = {row[0]: (row[1], row[2], row[3]) for row in customer_rows}
+    identity_names = {identity_id: name for identity_id, name in identity_rows}
+    connections = {item.id: item for item in connection_rows}
+    latest = {conversation_id: content for conversation_id, content in message_rows}
+    result: list[ConversationResponse] = []
+    for item in conversations:
+        customer_name, customer_email, customer_phone = customers.get(item.customer_id, (None, None, None))
+        can_send, reason = _conversation_send_availability(item, connections.get(item.integration_connection_id))
+        result.append(ConversationResponse(
         id=item.id, business_id=item.business_id, customer_id=item.customer_id,
+        customer_channel_identity_id=item.customer_channel_identity_id,
         integration_connection_id=item.integration_connection_id,
-        customer_display_name=names.get(item.customer_id), channel=item.channel,
-        external_reference=item.external_reference, status=item.status,
+        customer_display_name=customer_name or identity_names.get(item.customer_channel_identity_id),
+        customer_email=customer_email, customer_phone=customer_phone, channel=item.channel,
+        external_reference=item.external_reference, external_resource_reference=item.external_resource_reference, status=item.status,
+        handling_state=item.handling_state or "ai_active", unread_count=item.unread_count or 0,
         assigned_user_id=item.assigned_user_id, last_activity_at=item.last_activity_at,
-        latest_message=latest.get(item.id), unread=False, messages=[],
+        latest_message=latest.get(item.id), unread=bool(item.unread_count),
+        can_send_externally=can_send, send_unavailable_reason=reason, messages=[],
         created_at=item.created_at, updated_at=item.updated_at,
-    ) for item in conversations]
+        ))
+    return result
 
 
 async def create_conversation(session: AsyncSession, *, business_id: UUID, actor_user_id: UUID, data: ConversationCreate) -> Conversation:
@@ -455,6 +498,127 @@ async def update_conversation(session: AsyncSession, *, business_id: UUID, conve
     return value
 
 
+async def mark_conversation_read(session: AsyncSession, *, business_id: UUID, conversation_id: UUID, actor_user_id: UUID) -> Conversation:
+    conversation = await get_conversation(session, business_id=business_id, conversation_id=conversation_id)
+    conversation.unread_count = 0
+    try:
+        await session.flush()
+    except SQLAlchemyError:
+        raise OperationsPersistenceError from None
+    return conversation
+
+
+async def control_conversation(session: AsyncSession, *, business_id: UUID, conversation_id: UUID, actor_user_id: UUID, action: str, reason: str | None = None) -> Conversation:
+    conversation = await session.scalar(
+        select(Conversation)
+        .where(
+            Conversation.id == conversation_id,
+            Conversation.business_id == business_id,
+        )
+        .with_for_update()
+    )
+    if conversation is None:
+        raise OperationsNotFoundError
+    transitions = {
+        "take_over": ("open", "human_takeover", "conversation_human_takeover"),
+        "resume_ai": ("open", "ai_active", "conversation_ai_resumed"),
+        "pause_ai": (conversation.status, "ai_paused", "conversation_ai_paused"),
+        "escalate": ("escalated", "escalated", "support_case_escalated"),
+        "resolve": ("resolved", "ai_paused", "conversation_resolved"),
+        "reopen": ("open", "human_takeover", "conversation_reopened"),
+    }
+    transition = transitions.get(action)
+    if transition is None:
+        raise OperationsValidationError
+    before = f"status={conversation.status};handling={conversation.handling_state or 'ai_active'}"
+    status, handling_state, event_type = transition
+    conversation.status = status
+    conversation.handling_state = handling_state
+    if action in {"take_over", "reopen"}:
+        conversation.assigned_user_id = actor_user_id
+    elif action == "resume_ai":
+        conversation.assigned_user_id = None
+    conversation.last_activity_at = datetime.now(timezone.utc)
+    if action == "escalate":
+        from app.services.support import upsert_escalated_case
+
+        await upsert_escalated_case(
+            session,
+            business_id=business_id,
+            conversation=conversation,
+            reason=reason or "Escalated by a business user.",
+            actor_user_id=actor_user_id,
+        )
+
+    elif action == "resolve":
+        from app.services.support import resolve_active_case_for_conversation
+
+        await resolve_active_case_for_conversation(
+            session,
+            business_id=business_id,
+            conversation=conversation,
+            resolution_summary=reason or "Resolved from the conversation workspace.",
+            actor_user_id=actor_user_id,
+        )
+
+    elif action in {"take_over", "resume_ai", "pause_ai", "reopen"}:
+        from app.services.support import sync_case_for_conversation_control
+
+        await sync_case_for_conversation_control(
+            session,
+            business_id=business_id,
+            conversation=conversation,
+            action=action,
+            actor_user_id=actor_user_id,
+        )
+    event = ConversationMessage(
+        business_id=business_id,
+        conversation_id=conversation.id,
+        direction="internal",
+        sender_type="system",
+        sender_user_id=actor_user_id,
+        content={
+            "take_over": "A team member took over this conversation.",
+            "resume_ai": "AI handling resumed for this conversation.",
+            "pause_ai": "AI handling was paused for this conversation.",
+            "escalate": "This conversation was escalated to Customer Support.",
+            "resolve": "This conversation was resolved.",
+            "reopen": "This conversation was reopened for human handling.",
+        }[action],
+        sent_at=conversation.last_activity_at,
+        external_reference=f"system:{action}:{uuid4()}",
+        delivery_status="recorded",
+    )
+    session.add(event)
+    try:
+        await session.flush()
+    except SQLAlchemyError:
+        raise OperationsPersistenceError from None
+    record_audit(session, business_id=business_id, actor_user_id=actor_user_id, event_type=event_type.replace("_", ".", 1), entity_type="conversation", entity_id=conversation.id, summary=event.content, before_value=before, after_value=f"status={status};handling={handling_state}")
+    record_automation_event(session, business_id=business_id, event_type=event_type, entity_type="conversation", entity_id=conversation.id, payload={"status": status, "handling_state": handling_state, "channel": conversation.channel})
+    return conversation
+
+
+def _conversation_send_availability(conversation: Conversation, connection: IntegrationConnection | None) -> tuple[bool, str | None]:
+    from app.core.config import settings
+    from app.integrations.action_adapters import connector_action_adapters
+
+    if conversation.channel not in {"email", "whatsapp", "facebook", "instagram"}:
+        return False, "This channel does not have an external send adapter."
+    if connection is None or connection.status != "connected" or connection.authentication_state != "authorized":
+        return False, "The channel connection is not ready for sending."
+    if not settings.external_connector_writes_enabled or settings.external_connector_write_mode != "enabled":
+        return False, "External connector writes are disabled by platform policy."
+    action_type = "send_email" if conversation.channel == "email" else "send_whatsapp_message" if conversation.channel == "whatsapp" else "send_customer_message"
+    if not connector_action_adapters.supports(connection.connector_type, action_type):
+        return False, "This provider does not have an enabled send adapter."
+    if conversation.channel in {"facebook", "instagram"} and (not conversation.customer_channel_identity_id or not conversation.external_resource_reference):
+        return False, "The verified provider identity is unavailable."
+    if conversation.channel in {"email", "whatsapp"} and not conversation.customer_id:
+        return False, "A verified customer identity is required for this channel."
+    return True, None
+
+
 async def add_message(session: AsyncSession, *, business_id: UUID, conversation_id: UUID, actor_user_id: UUID, data: MessageCreate) -> ConversationMessage:
     conversation = await get_conversation(session, business_id=business_id, conversation_id=conversation_id)
     now = datetime.now(timezone.utc)
@@ -469,6 +633,48 @@ async def add_message(session: AsyncSession, *, business_id: UUID, conversation_
     if data.direction == "inbound":
         record_automation_event(session, business_id=business_id, event_type="inbound_message_recorded", entity_type="conversation", entity_id=conversation.id, payload={"status": conversation.status, "channel": conversation.channel})
     return message
+
+
+async def send_conversation_message(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    conversation_id: UUID,
+    actor_user_id: UUID,
+    content: str,
+    client_request_id: UUID,
+) -> ConversationMessage:
+    from app.exceptions.integration import (
+        IntegrationCredentialUnavailableError,
+        IntegrationNotFoundError,
+        IntegrationPersistenceError,
+        IntegrationProviderUnavailableError,
+        IntegrationStateError,
+        IntegrationValidationError,
+    )
+    from app.services.billing import BillingError
+    from app.services.integrations import send_manual_conversation_message
+
+    try:
+        return await send_manual_conversation_message(
+            session,
+            business_id=business_id,
+            conversation_id=conversation_id,
+            actor_user_id=actor_user_id,
+            content=content,
+            client_request_id=client_request_id,
+        )
+    except IntegrationNotFoundError:
+        raise OperationsNotFoundError from None
+    except (IntegrationStateError, IntegrationValidationError):
+        raise OperationsStateError from None
+    except (
+        IntegrationCredentialUnavailableError,
+        IntegrationPersistenceError,
+        IntegrationProviderUnavailableError,
+        BillingError,
+    ):
+        raise OperationsPersistenceError from None
 
 
 async def list_notifications(session: AsyncSession, *, business_id: UUID, user_id: UUID, page: int, page_size: int, unread_only: bool):

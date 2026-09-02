@@ -65,7 +65,7 @@ from app.models.commerce import (
 )
 from app.models.chatbot import ChatbotConfig, ChatbotSession
 from app.models.customer import Customer
-from app.models.conversation import Conversation, ConversationMessage, CustomerAgentResponse
+from app.models.conversation import Conversation, ConversationMessage, CustomerAgentResponse, CustomerChannelIdentity
 from app.models.integration import (
     IntegrationConnection,
     IntegrationEntityLink,
@@ -112,6 +112,7 @@ from app.models.provider_availability_rule import ProviderAvailabilityRule
 from app.models.service_provider import ServiceProvider
 from app.models.report import BusinessReport
 from app.models.user import User
+from app.models.support_case import SupportCase
 
 
 __all__ = [
@@ -180,6 +181,7 @@ __all__ = [
     "Conversation",
     "ConversationMessage",
     "CustomerAgentResponse",
+    "CustomerChannelIdentity",
     "IntegrationConnection",
     "IntegrationEntityLink",
     "IntegrationOAuthState",
@@ -218,4 +220,5 @@ __all__ = [
     "ServiceProvider",
     "BusinessReport",
     "User",
+    "SupportCase",
 ]

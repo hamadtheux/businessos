@@ -39,6 +39,7 @@ from app.models.commerce import (
     CommerceSyncRun,
     CommerceWebhookReceipt,
 )
+from app.models.conversation import ConversationMessage
 from app.models.marketing import Campaign, SocialSchedule
 from app.models.notification import Notification
 from app.models.opportunity import Opportunity
@@ -53,6 +54,7 @@ _REFERENCE_MODELS = {
     "node_run_id": AutomationNodeRun,
     "integration_event_id": IntegrationWebhookEvent,
     "action_execution_attempt_id": ActionExecutionAttempt,
+    "conversation_message_id": ConversationMessage,
     "social_schedule_id": SocialSchedule,
     "subscription_id": BusinessSubscription,
     "competitor_discovery_run_id": CompetitorDiscoveryRun,
@@ -78,6 +80,7 @@ async def enqueue_job(
     node_run_id: UUID | None = None,
     integration_event_id: UUID | None = None,
     action_execution_attempt_id: UUID | None = None,
+    conversation_message_id: UUID | None = None,
     social_schedule_id: UUID | None = None,
     subscription_id: UUID | None = None,
     competitor_discovery_run_id: UUID | None = None,
@@ -101,6 +104,7 @@ async def enqueue_job(
         "node_run_id": node_run_id,
         "integration_event_id": integration_event_id,
         "action_execution_attempt_id": action_execution_attempt_id,
+        "conversation_message_id": conversation_message_id,
         "social_schedule_id": social_schedule_id,
         "subscription_id": subscription_id,
         "competitor_discovery_run_id": competitor_discovery_run_id,
@@ -170,6 +174,10 @@ async def enqueue_job(
         or (
             job_type == "analyze_business_opportunity"
             and job.opportunity_id != opportunity_id
+        )
+        or (
+            job_type == "dispatch_conversation_message"
+            and job.conversation_message_id != conversation_message_id
         )
     ):
         raise BackgroundJobValidationError("idempotency_key_conflict")
@@ -253,6 +261,13 @@ async def record_job_success(
     job.status = "succeeded"
     job.completed_at = datetime.now(UTC)
     job.failure_code = None
+
+    # A successful durable-send job must never leave its linked message in a
+    # nonterminal provider-boundary state. Normally the specialized dispatcher
+    # has already persisted submitted/failed/uncertain. This is a fail-closed
+    # invariant for unexpected paths or persistence races.
+    await _finalize_terminal_conversation_message_job(session, job=job)
+
     await _synchronize_linked_run(
         session,
         job=job,
@@ -262,6 +277,40 @@ async def record_job_success(
     )
     await _flush(session)
     return job
+
+
+async def _finalize_terminal_conversation_message_job(
+    session: AsyncSession,
+    *,
+    job: BackgroundJob,
+) -> None:
+    """Fail closed when a durable human-send job can no longer run.
+
+    queued means the provider boundary was never durably entered, so delivery
+    is definitely failed. dispatching means provider invocation may have
+    occurred, so the only truthful terminal state is uncertain.
+    """
+    if (
+        job.job_type != "dispatch_conversation_message"
+        or job.conversation_message_id is None
+    ):
+        return
+
+    message = await session.scalar(
+        select(ConversationMessage)
+        .where(
+            ConversationMessage.id == job.conversation_message_id,
+            ConversationMessage.business_id == job.business_id,
+        )
+        .with_for_update()
+    )
+    if message is None:
+        return
+
+    if message.delivery_status == "queued":
+        message.delivery_status = "failed"
+    elif message.delivery_status == "dispatching":
+        message.delivery_status = "uncertain"
 
 
 async def record_job_failure(
@@ -297,6 +346,7 @@ async def record_job_failure(
         job.status = "dead_letter" if exhausted else "failed"
         job.completed_at = now
         job.failure_code = "retry_exhausted" if exhausted else failure_code
+        await _finalize_terminal_conversation_message_job(session, job=job)
         if exhausted:
             _add_failure_notification(session, job)
         await _synchronize_linked_run(
@@ -329,6 +379,7 @@ async def dead_letter_exhausted_leases(
         job.status = "dead_letter"
         job.failure_code = "retry_exhausted"
         job.completed_at = timestamp
+        await _finalize_terminal_conversation_message_job(session, job=job)
         _add_failure_notification(session, job)
         await _synchronize_linked_run(
             session,
@@ -436,6 +487,12 @@ async def cancel_job(
         raise BackgroundJobStateError("only_queued_jobs_cancelable")
     job.status = "canceled"
     job.completed_at = datetime.now(UTC)
+
+    # Canceling queued human-authorized delivery means the provider boundary
+    # will never be entered. Finalize the linked queued message so the inbox
+    # cannot display a reply as permanently pending.
+    await _finalize_terminal_conversation_message_job(session, job=job)
+
     await _synchronize_linked_run(
         session,
         job=job,

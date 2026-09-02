@@ -131,7 +131,7 @@ _DEFINITIONS: Final[tuple[ConnectorDefinition, ...]] = (
     _connector(
         "facebook", "Meta Pages & Messenger", "Connect authorized Facebook Pages for engagement, Messenger, and lead retrieval.",
         "social", "meta", reads=("read_pages", "read_content_performance", "receive_messages", "retrieve_leads"),
-        future_writes=("future_publish_content",),
+        future_writes=("future_publish_content", "future_send_messages"),
         scopes=(
             "pages_show_list",
             "pages_read_engagement",

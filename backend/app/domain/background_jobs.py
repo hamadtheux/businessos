@@ -13,6 +13,7 @@ JobType = Literal[
     "process_integration_event",
     "customer_agent_response",
     "dispatch_action_execution",
+    "dispatch_conversation_message",
     "reconcile_uncertain_attempt",
     "mark_social_schedule_ready",
     "maintain_subscription",
@@ -97,6 +98,19 @@ _POLICIES = {
         False,
         False,
     ),
+    # Human-authorized sends use the ConversationMessage state as the durable
+    # provider boundary. Infrastructure failures may retry while the message is
+    # still queued; once dispatching is committed, re-entry never invokes the
+    # provider and conservatively records an uncertain outcome.
+    "dispatch_conversation_message": JobPolicy(
+        "dispatch_conversation_message",
+        "conversation_message_id",
+        100,
+        3,
+        True,
+        False,
+        True,
+    ),
     # This only changes an already-dispatching attempt to uncertain. It never
     # invokes a connector and therefore remains safe to reclaim after a crash.
     "reconcile_uncertain_attempt": JobPolicy(
@@ -155,6 +169,7 @@ JOB_REFERENCE_FIELDS: Final = (
     "node_run_id",
     "integration_event_id",
     "action_execution_attempt_id",
+    "conversation_message_id",
     "social_schedule_id",
     "subscription_id",
     "competitor_discovery_run_id",

@@ -90,6 +90,7 @@ class SendCustomerMessagePayload(ActionPayload):
     customer_ref: Reference
     message: MessageText
     conversation_ref: Reference | None = None
+    channel_resource_ref: Reference | None = None
 
 
 class PublishSocialPostPayload(ActionPayload):

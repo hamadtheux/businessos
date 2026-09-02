@@ -33,7 +33,9 @@ from app.services.billing import require_feature
 CONNECTOR_ACTION_TYPES: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType({
     "send_email": ("gmail", "microsoft_outlook"),
     "send_whatsapp_message": ("whatsapp_business",),
-    "send_customer_message": ("whatsapp_business", "gmail", "microsoft_outlook"),
+    "send_customer_message": (
+        "whatsapp_business", "gmail", "microsoft_outlook", "facebook",
+    ),
     "publish_social_post": ("facebook", "instagram"),
     "create_meta_campaign": ("meta_ads",),
     "launch_meta_campaign": ("meta_ads",),
@@ -207,38 +209,51 @@ async def _resolve_delivery_target(
     )
     if not isinstance(raw_reference, str):
         raise IntegrationStateError("delivery_target_required")
-    try:
-        customer_id = UUID(raw_reference)
-    except ValueError:
-        raise IntegrationStateError("delivery_customer_reference_invalid") from None
-    customer = await session.scalar(
-        select(Customer).where(
-            Customer.id == customer_id,
-            Customer.business_id == business_id,
-            Customer.status != "archived",
+    customer = None
+    if connector_type != "facebook":
+        try:
+            customer_id = UUID(raw_reference)
+        except ValueError:
+            raise IntegrationStateError("delivery_customer_reference_invalid") from None
+        customer = await session.scalar(
+            select(Customer).where(
+                Customer.id == customer_id,
+                Customer.business_id == business_id,
+                Customer.status != "archived",
+            )
         )
-    )
-    if customer is None or customer.business_id != business_id:
-        raise IntegrationStateError("delivery_customer_not_found")
+        if customer is None or customer.business_id != business_id:
+            raise IntegrationStateError("delivery_customer_not_found")
     conversation_ref = getattr(payload, "conversation_ref", None)
     if connector_type == "whatsapp_business" and conversation_ref is None:
         # Free-form WhatsApp sends are safe only inside a tenant-owned
         # conversation whose latest customer message proves an open service
         # window. Proactive/template and consent semantics are not modeled yet.
         raise IntegrationStateError("whatsapp_conversation_required")
+    conversation = None
     if conversation_ref is not None:
         try:
             conversation_id = UUID(conversation_ref)
         except ValueError:
             raise IntegrationStateError("conversation_reference_invalid") from None
-        conversation = await session.scalar(select(Conversation).where(
+        conditions = [
             Conversation.id == conversation_id,
             Conversation.business_id == business_id,
-            Conversation.customer_id == customer.id,
             Conversation.integration_connection_id == connection_id,
-        ))
+        ]
+        if customer is not None:
+            conditions.append(Conversation.customer_id == customer.id)
+        conversation = await session.scalar(select(Conversation).where(*conditions))
         if conversation is None:
             raise IntegrationStateError("conversation_delivery_target_invalid")
+    if connector_type == "facebook":
+        if conversation is None or not conversation.external_reference:
+            raise IntegrationStateError("delivery_target_required")
+        if getattr(payload, "channel_resource_ref", None) != conversation.external_resource_reference:
+            raise IntegrationStateError("conversation_resource_conflict")
+        return conversation.external_reference
+    if customer is None:
+        raise IntegrationStateError("delivery_customer_not_found")
     if connector_type in {"gmail", "microsoft_outlook"}:
         value = customer.email
         if not isinstance(value, str) or "@" not in value or len(value) > 320:
@@ -271,29 +286,64 @@ async def _conversation_connection_binding(
         conversation_id = UUID(reference)
     except ValueError:
         raise IntegrationStateError("conversation_reference_invalid") from None
-    conversation = await session.scalar(select(Conversation).where(
-        Conversation.id == conversation_id,
-        Conversation.business_id == business_id,
-    ))
+    # This row lock is the final synchronization gate between an AI reply
+    # and human conversation controls such as Take Over / Pause / Escalate.
+    #
+    # control_conversation() locks the same tenant-owned Conversation row.
+    # Whichever transaction acquires and commits the lock first establishes
+    # the authoritative handling state for this dispatch. The lock is released
+    # when the dispatch-preflight transaction commits, before any credential
+    # retrieval or provider network request occurs.
+    conversation = await session.scalar(
+        select(Conversation)
+        .where(
+            Conversation.id == conversation_id,
+            Conversation.business_id == business_id,
+        )
+        .with_for_update()
+    )
     if conversation is None or conversation.integration_connection_id is None:
         raise IntegrationStateError("conversation_connection_required")
+    if (getattr(conversation, "handling_state", None) or "ai_active") != "ai_active":
+        raise IntegrationStateError("conversation_ai_handling_inactive")
     raw_customer = getattr(payload, "recipient_ref", None) or getattr(payload, "customer_ref", None)
-    if conversation.customer_id is None or raw_customer != str(conversation.customer_id):
-        raise IntegrationStateError("conversation_customer_conflict")
     expected_channels = {
         "send_email": {"email"},
         "send_whatsapp_message": {"whatsapp"},
-        "send_customer_message": {"email", "whatsapp"},
+        "send_customer_message": {"email", "whatsapp", "facebook"},
     }[action_type]
     if conversation.channel not in expected_channels:
         raise IntegrationStateError("conversation_channel_conflict")
-    if conversation.channel == "whatsapp":
-        latest_inbound = await session.scalar(select(ConversationMessage.sent_at).where(
-            ConversationMessage.business_id == business_id,
-            ConversationMessage.conversation_id == conversation.id,
-            ConversationMessage.direction == "inbound",
-            ConversationMessage.sender_type == "customer",
-        ).order_by(ConversationMessage.sent_at.desc(), ConversationMessage.id.desc()).limit(1))
-        if latest_inbound is None or latest_inbound < datetime.now(UTC) - timedelta(hours=24):
-            raise IntegrationStateError("whatsapp_customer_service_window_closed")
+    if conversation.channel == "facebook":
+        if raw_customer != str(conversation.customer_channel_identity_id):
+            raise IntegrationStateError("conversation_customer_conflict")
+        if getattr(payload, "channel_resource_ref", None) != conversation.external_resource_reference:
+            raise IntegrationStateError("conversation_resource_conflict")
+    elif conversation.customer_id is None or raw_customer != str(conversation.customer_id):
+        raise IntegrationStateError("conversation_customer_conflict")
+    if conversation.channel in {"whatsapp", "facebook"}:
+        latest_inbound = await session.scalar(
+            select(ConversationMessage.sent_at)
+            .where(
+                ConversationMessage.business_id == business_id,
+                ConversationMessage.conversation_id == conversation.id,
+                ConversationMessage.direction == "inbound",
+                ConversationMessage.sender_type == "customer",
+            )
+            .order_by(
+                ConversationMessage.sent_at.desc(),
+                ConversationMessage.id.desc(),
+            )
+            .limit(1)
+        )
+        if (
+            latest_inbound is None
+            or latest_inbound < datetime.now(UTC) - timedelta(hours=24)
+        ):
+            failure_code = (
+                "whatsapp_customer_service_window_closed"
+                if conversation.channel == "whatsapp"
+                else "messenger_customer_service_window_closed"
+            )
+            raise IntegrationStateError(failure_code)
     return conversation.integration_connection_id
