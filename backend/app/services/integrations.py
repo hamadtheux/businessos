@@ -408,11 +408,10 @@ async def complete_authorization(
     try:
         identity = await adapter.get_identity(exchange.credentials)
     except Exception:
-        await _best_effort_revoke_provider_credentials(
-            adapter, exchange.credentials
-        )
-        return await _fail_authorization(
+        return await _fail_exchanged_authorization(
             session,
+            adapter=adapter,
+            provider_credentials=exchange.credentials,
             oauth_state=oauth_state,
             definition=definition,
             credentials=credentials,
@@ -426,11 +425,10 @@ async def complete_authorization(
                 await adapter.list_resources(exchange.credentials)
             )
         except Exception:
-            await _best_effort_revoke_provider_credentials(
-                adapter, exchange.credentials
-            )
-            return await _fail_authorization(
+            return await _fail_exchanged_authorization(
                 session,
+                adapter=adapter,
+                provider_credentials=exchange.credentials,
                 oauth_state=oauth_state,
                 definition=definition,
                 credentials=credentials,
@@ -453,8 +451,10 @@ async def complete_authorization(
             and not set(definition.oauth_read_scopes).issubset(set(granted))
         )
     ):
-        return await _fail_authorization(
+        return await _fail_exchanged_authorization(
             session,
+            adapter=adapter,
+            provider_credentials=exchange.credentials,
             oauth_state=oauth_state,
             definition=definition,
             credentials=credentials,
@@ -467,8 +467,10 @@ async def complete_authorization(
             identity.display_name,
         )
     except IntegrationProviderUnavailableError:
-        return await _fail_authorization(
+        return await _fail_exchanged_authorization(
             session,
+            adapter=adapter,
+            provider_credentials=exchange.credentials,
             oauth_state=oauth_state,
             definition=definition,
             credentials=credentials,
@@ -484,8 +486,10 @@ async def complete_authorization(
                 for resource in authorized_resources
             )
         ):
-            return await _fail_authorization(
+            return await _fail_exchanged_authorization(
                 session,
+                adapter=adapter,
+                provider_credentials=exchange.credentials,
                 oauth_state=oauth_state,
                 definition=definition,
                 credentials=credentials,
@@ -496,20 +500,28 @@ async def complete_authorization(
             for resource in authorized_resources:
                 _validate_resource(resource, definition)
         except IntegrationProviderUnavailableError:
-            return await _fail_authorization(
+            return await _fail_exchanged_authorization(
                 session,
+                adapter=adapter,
+                provider_credentials=exchange.credentials,
                 oauth_state=oauth_state,
                 definition=definition,
                 credentials=credentials,
                 now=now,
                 failure_code="authorized_assets_invalid",
             )
-    credential_reference = await credentials.store(
-        business_id=oauth_state.business_id,
-        connector_type=connector_type,
-        purpose="oauth_credentials",
-        material=exchange.credentials,
-    )
+    try:
+        credential_reference = await credentials.store(
+            business_id=oauth_state.business_id,
+            connector_type=connector_type,
+            purpose="oauth_credentials",
+            material=exchange.credentials,
+        )
+    except Exception:
+        await _best_effort_revoke_provider_credentials(
+            adapter, exchange.credentials
+        )
+        raise
     try:
         connection = await session.scalar(select(IntegrationConnection).where(
             IntegrationConnection.business_id == oauth_state.business_id,
@@ -545,10 +557,24 @@ async def complete_authorization(
         oauth_state.consumed_at = now
         await session.flush()
     except IntegrationStateError:
-        await _best_effort_revoke(credentials, credential_reference, oauth_state.business_id, connector_type, "oauth_credentials")
+        await _cleanup_failed_authorization_finalization(
+            adapter=adapter,
+            provider_credentials=exchange.credentials,
+            credentials=credentials,
+            credential_reference=credential_reference,
+            business_id=oauth_state.business_id,
+            connector_type=connector_type,
+        )
         raise
     except SQLAlchemyError:
-        await _best_effort_revoke(credentials, credential_reference, oauth_state.business_id, connector_type, "oauth_credentials")
+        await _cleanup_failed_authorization_finalization(
+            adapter=adapter,
+            provider_credentials=exchange.credentials,
+            credentials=credentials,
+            credential_reference=credential_reference,
+            business_id=oauth_state.business_id,
+            connector_type=connector_type,
+        )
         raise IntegrationPersistenceError("authorization_unavailable") from None
 
     await _best_effort_revoke(
@@ -628,6 +654,53 @@ async def _fail_authorization(
         connector_type=definition.connector_type,
         status="degraded",
         redirect_target=oauth_state.redirect_target,
+    )
+
+
+async def _fail_exchanged_authorization(
+    session: AsyncSession,
+    *,
+    adapter: IntegrationConnector,
+    provider_credentials: CredentialMaterial,
+    oauth_state: IntegrationOAuthState,
+    definition: ConnectorDefinition,
+    credentials: IntegrationCredentialStore,
+    now: datetime,
+    failure_code: str,
+) -> AuthorizationCallbackResponse:
+    await _best_effort_revoke_provider_credentials(
+        adapter,
+        provider_credentials,
+    )
+    return await _fail_authorization(
+        session,
+        oauth_state=oauth_state,
+        definition=definition,
+        credentials=credentials,
+        now=now,
+        failure_code=failure_code,
+    )
+
+
+async def _cleanup_failed_authorization_finalization(
+    *,
+    adapter: IntegrationConnector,
+    provider_credentials: CredentialMaterial,
+    credentials: IntegrationCredentialStore,
+    credential_reference: str,
+    business_id: UUID,
+    connector_type: str,
+) -> None:
+    await _best_effort_revoke_provider_credentials(
+        adapter,
+        provider_credentials,
+    )
+    await _best_effort_revoke(
+        credentials,
+        credential_reference,
+        business_id,
+        connector_type,
+        "oauth_credentials",
     )
 
 

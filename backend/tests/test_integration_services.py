@@ -8,11 +8,13 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
+from sqlalchemy.exc import SQLAlchemyError
+
 os.environ.setdefault("AIBOS_DATABASE_URL", "postgresql+asyncpg://database.invalid/test")
 os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 
 from app.core.config import settings  # noqa: E402
-from app.exceptions.integration import IntegrationCredentialUnavailableError, IntegrationProviderUnavailableError, IntegrationStateError, IntegrationValidationError, IntegrationWebhookVerificationError  # noqa: E402
+from app.exceptions.integration import IntegrationCredentialUnavailableError, IntegrationPersistenceError, IntegrationProviderUnavailableError, IntegrationStateError, IntegrationValidationError, IntegrationWebhookVerificationError  # noqa: E402
 from app.integrations.adapters import ConnectorAdapterRegistry  # noqa: E402
 from app.integrations.contracts import (  # noqa: E402
     AuthorizationExchange,
@@ -85,6 +87,7 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_callback_consumes_state_stores_opaque_reference_and_rejects_replay(self) -> None:
         adapter = _FakeConnector()
+        adapter.revoke_credentials = AsyncMock()
         adapters = ConnectorAdapterRegistry({"gmail": adapter})
         credential_store = InMemoryIntegrationCredentialStore()
         raw_state = "provider-returned-state"
@@ -127,6 +130,7 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
                 connector_type="gmail", state=raw_state, code="replayed-code",
                 adapters=adapters, credentials=credential_store, configuration=configuration,
             )
+        adapter.revoke_credentials.assert_not_awaited()
 
     async def test_callback_accepts_google_canonical_identity_scope_alias(self) -> None:
         class GoogleCanonicalScopeConnector(_FakeConnector):
@@ -488,6 +492,65 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
             verifier_reference,
         )
 
+    async def _complete_meta_finalization_failure(
+        self,
+        adapter,
+        credential_store,
+        *,
+        raw_state: str,
+        failure: str,
+    ) -> None:
+        verifier_reference = await credential_store.store(
+            business_id=BUSINESS_ID,
+            connector_type="facebook",
+            purpose="oauth_pkce",
+            material=CredentialMaterial(
+                values={"code_verifier": "server-verifier"}
+            ),
+        )
+        oauth_state = IntegrationOAuthState(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            connector_type="facebook",
+            user_id=USER_ID,
+            state_hash=hashlib.sha256(raw_state.encode()).hexdigest(),
+            pkce_verifier_reference=verifier_reference,
+            redirect_target="/integrations",
+            expires_at=NOW + timedelta(minutes=5),
+            consumed_at=None,
+            created_at=NOW,
+        )
+        connection = _connection(
+            connector_type="facebook",
+            status="pending",
+            authentication_state="authorization_pending",
+            health="not_checked",
+        )
+        session = (
+            _Session([oauth_state, None])
+            if failure == "state"
+            else _FailingFlushSession([oauth_state, connection])
+        )
+        configuration = settings.model_copy(
+            update={
+                "integration_oauth_callback_url": (
+                    "https://api.example.test/api/v1/integrations/oauth/callback"
+                )
+            }
+        )
+
+        with patch("app.services.integrations.datetime", wraps=datetime) as clock:
+            clock.now.return_value = NOW
+            await service.complete_authorization(
+                session,  # type: ignore[arg-type]
+                connector_type=None,
+                state=raw_state,
+                code="one-use-meta-code",
+                adapters=ConnectorAdapterRegistry({"facebook": adapter}),
+                credentials=credential_store,
+                configuration=configuration,
+            )
+
     async def _assert_meta_callback_failure(
         self,
         adapter,
@@ -510,6 +573,119 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
                 connector_type="facebook",
                 purpose="oauth_pkce",
             )
+
+    async def _assert_new_oauth_credential_removed(
+        self,
+        credential_store,
+    ) -> None:
+        reference = credential_store.oauth_credential_reference
+        self.assertIsNotNone(reference)
+        with self.assertRaises(IntegrationCredentialUnavailableError):
+            await credential_store.retrieve(
+                reference,
+                business_id=BUSINESS_ID,
+                connector_type="facebook",
+                purpose="oauth_credentials",
+            )
+
+    async def test_finalization_state_error_cleans_provider_and_local_credential(self) -> None:
+        adapter = _MetaAuthorizationConnector()
+        adapter.revoke_credentials = AsyncMock()
+        credential_store = _TrackingCredentialStore()
+
+        with self.assertRaisesRegex(
+            IntegrationStateError,
+            "authorization_state_invalid",
+        ):
+            await self._complete_meta_finalization_failure(
+                adapter,
+                credential_store,
+                raw_state="meta-finalization-state-error",
+                failure="state",
+            )
+
+        adapter.revoke_credentials.assert_awaited_once()
+        await self._assert_new_oauth_credential_removed(credential_store)
+
+    async def test_finalization_persistence_error_cleans_provider_and_local_credential(self) -> None:
+        adapter = _MetaAuthorizationConnector()
+        adapter.revoke_credentials = AsyncMock()
+        credential_store = _TrackingCredentialStore()
+
+        with self.assertRaisesRegex(
+            IntegrationPersistenceError,
+            "authorization_unavailable",
+        ):
+            await self._complete_meta_finalization_failure(
+                adapter,
+                credential_store,
+                raw_state="meta-finalization-persistence-error",
+                failure="persistence",
+            )
+
+        adapter.revoke_credentials.assert_awaited_once()
+        await self._assert_new_oauth_credential_removed(credential_store)
+
+    async def test_provider_revoke_failure_does_not_mask_finalization_error(self) -> None:
+        cases = (
+            ("state", IntegrationStateError, "authorization_state_invalid"),
+            (
+                "persistence",
+                IntegrationPersistenceError,
+                "authorization_unavailable",
+            ),
+        )
+        for failure, expected_error, message in cases:
+            with self.subTest(failure=failure):
+                adapter = _MetaAuthorizationConnector()
+                adapter.revoke_credentials = AsyncMock(
+                    side_effect=RuntimeError("private-provider-revoke-error")
+                )
+                credential_store = _TrackingCredentialStore()
+
+                with self.assertRaisesRegex(expected_error, message):
+                    await self._complete_meta_finalization_failure(
+                        adapter,
+                        credential_store,
+                        raw_state=f"meta-{failure}-provider-revoke-error",
+                        failure=failure,
+                    )
+
+                adapter.revoke_credentials.assert_awaited_once()
+                await self._assert_new_oauth_credential_removed(
+                    credential_store
+                )
+
+    async def test_local_cleanup_failure_does_not_mask_finalization_error(self) -> None:
+        cases = (
+            ("state", IntegrationStateError, "authorization_state_invalid"),
+            (
+                "persistence",
+                IntegrationPersistenceError,
+                "authorization_unavailable",
+            ),
+        )
+        for failure, expected_error, message in cases:
+            with self.subTest(failure=failure):
+                adapter = _MetaAuthorizationConnector()
+                adapter.revoke_credentials = AsyncMock()
+                credential_store = _TrackingCredentialStore(
+                    fail_oauth_cleanup=True
+                )
+
+                with self.assertRaisesRegex(expected_error, message):
+                    await self._complete_meta_finalization_failure(
+                        adapter,
+                        credential_store,
+                        raw_state=f"meta-{failure}-local-cleanup-error",
+                        failure=failure,
+                    )
+
+                adapter.revoke_credentials.assert_awaited_once()
+                self.assertEqual(
+                    credential_store.oauth_cleanup_attempts,
+                    1,
+                )
 
     async def test_meta_token_exchange_failure_marks_connection_error(self) -> None:
         class FailingMetaConnector(_FakeConnector):
@@ -570,6 +746,120 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
             adapter.revoke_credentials.await_args.args[0],
             CredentialMaterial,
         )
+
+    async def test_meta_empty_authorized_pages_marks_assets_unavailable(self) -> None:
+        adapter = _MetaAuthorizationConnector(resources=[])
+        adapter.revoke_credentials = AsyncMock()
+        await self._assert_meta_callback_failure(
+            adapter,
+            raw_state="meta-empty-assets-state",
+            failure_code="authorized_assets_unavailable",
+        )
+        adapter.revoke_credentials.assert_awaited_once()
+
+    async def test_meta_invalid_authorized_resource_is_revoked(self) -> None:
+        adapter = _MetaAuthorizationConnector(
+            resources=[
+                ExternalResource(
+                    "facebook_page",
+                    "",
+                    "Invalid Page",
+                )
+            ]
+        )
+        adapter.revoke_credentials = AsyncMock()
+
+        await self._assert_meta_callback_failure(
+            adapter,
+            raw_state="meta-invalid-assets-state",
+            failure_code="authorized_assets_invalid",
+        )
+
+        adapter.revoke_credentials.assert_awaited_once()
+
+    async def test_meta_missing_or_invalid_granted_scopes_are_revoked(self) -> None:
+        cases = (
+            ("missing", ()),
+            ("invalid", ("pages_show_list", "unexpected_scope")),
+        )
+        for label, granted_scopes in cases:
+            with self.subTest(case=label):
+                adapter = _MetaAuthorizationConnector(
+                    granted_scopes=granted_scopes
+                )
+                adapter.revoke_credentials = AsyncMock()
+
+                await self._assert_meta_callback_failure(
+                    adapter,
+                    raw_state=f"meta-{label}-scopes-state",
+                    failure_code="granted_scopes_invalid",
+                )
+
+                adapter.revoke_credentials.assert_awaited_once()
+
+    async def test_meta_invalid_provider_identity_is_revoked(self) -> None:
+        adapter = _MetaAuthorizationConnector(
+            identity=ExternalIdentity(
+                external_account_reference="",
+                display_name="Invalid Meta identity",
+            )
+        )
+        adapter.revoke_credentials = AsyncMock()
+
+        await self._assert_meta_callback_failure(
+            adapter,
+            raw_state="meta-invalid-identity-state",
+            failure_code="provider_identity_invalid",
+        )
+
+        adapter.revoke_credentials.assert_awaited_once()
+
+    async def test_meta_revoke_failures_preserve_post_exchange_failure_codes(self) -> None:
+        cases = (
+            (
+                "scopes",
+                _MetaAuthorizationConnector(granted_scopes=()),
+                "granted_scopes_invalid",
+            ),
+            (
+                "identity",
+                _MetaAuthorizationConnector(
+                    identity=ExternalIdentity("", "Invalid Meta identity")
+                ),
+                "provider_identity_invalid",
+            ),
+            (
+                "empty-assets",
+                _MetaAuthorizationConnector(resources=[]),
+                "authorized_assets_unavailable",
+            ),
+            (
+                "invalid-assets",
+                _MetaAuthorizationConnector(
+                    resources=[
+                        ExternalResource(
+                            "facebook_page",
+                            "",
+                            "Invalid Page",
+                        )
+                    ]
+                ),
+                "authorized_assets_invalid",
+            ),
+        )
+        for label, adapter, failure_code in cases:
+            with self.subTest(case=label):
+                adapter.revoke_credentials = AsyncMock(
+                    side_effect=RuntimeError("private-provider-revoke-error")
+                )
+
+                await self._assert_meta_callback_failure(
+                    adapter,
+                    raw_state=f"meta-revoke-{label}-state",
+                    failure_code=failure_code,
+                )
+
+                adapter.revoke_credentials.assert_awaited_once()
 
     async def test_meta_revoke_failure_does_not_mask_identity_failure(self) -> None:
         class FailingMetaConnector(_FakeConnector):
@@ -1501,6 +1791,11 @@ class _Session:
                 value.id = uuid4()  # type: ignore[attr-defined]
 
 
+class _FailingFlushSession(_Session):
+    async def flush(self) -> None:
+        raise SQLAlchemyError("private-database-error")
+
+
 class _ScalarCollection:
     def __init__(self, values: list[Customer]) -> None:
         self.values = values
@@ -1596,6 +1891,94 @@ class _FakeConnector:
 
     async def normalize_webhook(self, payload):
         return self.webhook_event
+
+
+class _MetaAuthorizationConnector(_FakeConnector):
+    connector_type = "facebook"
+
+    def __init__(
+        self,
+        *,
+        granted_scopes: tuple[str, ...] = (
+            "pages_show_list",
+            "pages_read_engagement",
+            "pages_manage_metadata",
+            "pages_messaging",
+            "leads_retrieval",
+            "pages_manage_ads",
+        ),
+        identity: ExternalIdentity | None = None,
+        resources: list[ExternalResource] | None = None,
+    ) -> None:
+        super().__init__()
+        self.granted_scopes = granted_scopes
+        self.identity = identity or ExternalIdentity(
+            external_account_reference="system-user-1",
+            display_name="Meta business integration",
+        )
+        self.resources = (
+            [
+                ExternalResource(
+                    "facebook_page",
+                    "page-1",
+                    "Authorized Page",
+                )
+            ]
+            if resources is None
+            else resources
+        )
+
+    async def exchange_authorization_code(self, **_kwargs):
+        return AuthorizationExchange(
+            credentials=CredentialMaterial(
+                values={
+                    "access_token": "server-only-system-user-token",
+                    "meta_token_type": "SYSTEM_USER",
+                }
+            ),
+            granted_scopes=self.granted_scopes,
+        )
+
+    async def get_identity(self, _credentials):
+        return self.identity
+
+    async def list_resources(self, _credentials):
+        return self.resources
+
+
+class _TrackingCredentialStore(InMemoryIntegrationCredentialStore):
+    def __init__(self, *, fail_oauth_cleanup: bool = False) -> None:
+        super().__init__()
+        self.fail_oauth_cleanup = fail_oauth_cleanup
+        self.oauth_credential_reference: str | None = None
+        self.oauth_cleanup_attempts = 0
+
+    async def store(self, **kwargs) -> str:
+        reference = await super().store(**kwargs)
+        if kwargs.get("purpose") == "oauth_credentials":
+            self.oauth_credential_reference = reference
+        return reference
+
+    async def revoke(
+        self,
+        reference: str,
+        *,
+        business_id: UUID,
+        connector_type: str,
+        purpose: str,
+    ) -> None:
+        if purpose == "oauth_credentials":
+            self.oauth_cleanup_attempts += 1
+            if self.fail_oauth_cleanup:
+                raise IntegrationCredentialUnavailableError(
+                    "credential_unavailable"
+                )
+        await super().revoke(
+            reference,
+            business_id=business_id,
+            connector_type=connector_type,
+            purpose=purpose,
+        )
 
 
 def _connection(

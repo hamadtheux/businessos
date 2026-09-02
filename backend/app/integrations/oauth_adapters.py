@@ -6,7 +6,7 @@ import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Mapping, Sequence
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -730,7 +730,20 @@ class ConfiguredOAuthConnector:
     async def _list_meta_resources(self, token: str) -> Sequence[ExternalResource]:
         root = self._meta_root()
         resources: list[ExternalResource] = []
-        if self.connector_type in {"facebook", "instagram"}:
+        if self.connector_type == "facebook":
+            try:
+                pages = await self._meta_expanded_accounts(
+                    token=token,
+                    fields="accounts{id,name,business{id,name},tasks}",
+                )
+            except _ProviderHttpError as exc:
+                if exc.status_code not in {400, 403}:
+                    raise
+                pages = await self._meta_expanded_accounts(
+                    token=token,
+                    fields="accounts{id,name,tasks}",
+                )
+        elif self.connector_type == "instagram":
             pages = await self._meta_paged_items(
                 f"{root}/me/accounts",
                 token=token,
@@ -742,6 +755,10 @@ class ConfiguredOAuthConnector:
                     "limit": "100",
                 },
             )
+        else:
+            pages = []
+
+        if self.connector_type in {"facebook", "instagram"}:
             businesses: dict[str, ExternalResource] = {}
             for item in pages:
                 page_id = _required_string(item, "id")
@@ -749,21 +766,22 @@ class ConfiguredOAuthConnector:
                 metadata: dict[str, str] = {}
                 parent_reference: str | None = None
                 if isinstance(business, Mapping):
-                    business_id = _required_string(business, "id")
-                    business_name = (
-                        _optional_string(business, "name") or business_id
-                    )[:160]
-                    parent_reference = business_id
-                    metadata["meta_business_id"] = business_id
-                    if self.connector_type == "facebook":
-                        businesses.setdefault(
-                            business_id,
-                            ExternalResource(
-                                "meta_business",
+                    business_id = _optional_string(business, "id")
+                    if business_id and len(business_id) <= 255:
+                        business_name = (
+                            _optional_string(business, "name") or business_id
+                        )[:160]
+                        parent_reference = business_id
+                        metadata["meta_business_id"] = business_id
+                        if self.connector_type == "facebook":
+                            businesses.setdefault(
                                 business_id,
-                                business_name,
-                            ),
-                        )
+                                ExternalResource(
+                                    "meta_business",
+                                    business_id,
+                                    business_name,
+                                ),
+                            )
                 tasks = _string_sequence(item.get("tasks"), limit=20)
                 if tasks:
                     metadata["capabilities"] = ",".join(tasks)[:255]
@@ -1018,6 +1036,91 @@ class ConfiguredOAuthConnector:
             next_url = candidate
             query = {}
         raise IntegrationProviderUnavailableError("provider_pagination_limit")
+
+    async def _meta_expanded_accounts(
+        self, *, token: str, fields: str,
+    ) -> list[Mapping[str, object]]:
+        value = await self._http.request_json(
+            "GET",
+            f"{self._meta_root()}/me",
+            params={"fields": fields, "access_token": token},
+        )
+        accounts = value.get("accounts")
+        if not isinstance(accounts, Mapping):
+            raise IntegrationProviderUnavailableError("provider_unavailable")
+        return await self._meta_expanded_account_items(
+            accounts,
+            token=token,
+        )
+
+    async def _meta_expanded_account_items(
+        self,
+        value: Mapping[str, object],
+        *,
+        token: str,
+    ) -> list[Mapping[str, object]]:
+        result: list[Mapping[str, object]] = []
+        for page_index in range(_MAX_PROVIDER_PAGES):
+            page = value.get("data")
+            if not isinstance(page, list):
+                raise IntegrationProviderUnavailableError("provider_unavailable")
+            if any(not isinstance(item, Mapping) for item in page):
+                raise IntegrationProviderUnavailableError("provider_unavailable")
+            result.extend(item for item in page if isinstance(item, Mapping))
+            if len(result) > _MAX_PROVIDER_ITEMS:
+                raise IntegrationProviderUnavailableError("provider_response_too_large")
+            paging = value.get("paging")
+            if paging is not None and not isinstance(paging, Mapping):
+                raise IntegrationProviderUnavailableError("provider_unavailable")
+            candidate = paging.get("next") if isinstance(paging, Mapping) else None
+            if not isinstance(candidate, str):
+                return result
+            if page_index == _MAX_PROVIDER_PAGES - 1:
+                break
+            next_url, query = self._meta_paging_request(candidate, token=token)
+            value = await self._http.request_json(
+                "GET",
+                next_url,
+                params=query,
+            )
+        raise IntegrationProviderUnavailableError("provider_pagination_limit")
+
+    def _meta_paging_request(
+        self, candidate: str, *, token: str,
+    ) -> tuple[str, Mapping[str, str]]:
+        if len(candidate) > 8_192:
+            raise IntegrationProviderUnavailableError("provider_unavailable")
+        try:
+            parsed = urlsplit(candidate)
+            if (
+                parsed.scheme != "https"
+                or parsed.netloc != "graph.facebook.com"
+                or parsed.fragment
+                or not parsed.path.startswith(
+                    f"/{self._configuration.meta_graph_api_version}/"
+                )
+            ):
+                raise IntegrationProviderUnavailableError(
+                    "provider_unavailable"
+                )
+            query = {
+                key: value
+                for key, value in parse_qsl(
+                    parsed.query,
+                    keep_blank_values=True,
+                    max_num_fields=50,
+                )
+                if key != "access_token"
+            }
+        except ValueError:
+            raise IntegrationProviderUnavailableError(
+                "provider_unavailable"
+            ) from None
+        query["access_token"] = token
+        next_url = urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, "", "")
+        )
+        return next_url, query
 
     def _meta_root(self) -> str:
         return f"{_META_ROOT}/{self._configuration.meta_graph_api_version}"

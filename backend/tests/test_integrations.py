@@ -34,7 +34,11 @@ from app.integrations.contracts import (  # noqa: E402
     ExternalResource,
     NormalizedIntegrationEvent,
 )
-from app.integrations.oauth_adapters import ConfiguredOAuthConnector, build_configured_oauth_adapters  # noqa: E402
+from app.integrations.oauth_adapters import (  # noqa: E402
+    ConfiguredOAuthConnector,
+    _ProviderHttpError,
+    build_configured_oauth_adapters,
+)
 from app.integrations.registry import CONNECTOR_REGISTRY, list_connector_definitions  # noqa: E402
 from app.integrations.webhooks import MetaWebhookSignatureVerifier  # noqa: E402
 from app.models.integration import (  # noqa: E402
@@ -190,6 +194,16 @@ class ConfiguredMetaLoginForBusinessTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
+    def _connector(self, http, *, connector_type: str = "facebook"):
+        return ConfiguredOAuthConnector(
+            connector_type=connector_type,
+            provider="meta",
+            client_id="meta-app-id",
+            client_secret="meta-app-secret",
+            configuration=self._configuration(),
+            http=http,
+        )
+
     async def test_authorization_url_uses_configuration_version_and_shared_callback(self) -> None:
         connector = ConfiguredOAuthConnector(
             connector_type="facebook",
@@ -340,48 +354,313 @@ class ConfiguredMetaLoginForBusinessTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-    async def test_authorized_pages_include_safe_business_and_capability_metadata(self) -> None:
+    async def test_system_user_accounts_expansion_returns_all_authorized_pages(self) -> None:
         class MetaHttp:
-            async def request_json(self, _method: str, url: str, **_kwargs):
-                if url.endswith("/me/accounts"):
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, dict[str, object]]] = []
+
+            async def request_json(self, method: str, url: str, **kwargs):
+                self.calls.append((method, url, kwargs))
+                if url.endswith("/me"):
                     return {
-                        "data": [
-                            {
-                                "id": "page-1",
-                                "name": "Nine D Brain Page",
-                                "business": {
-                                    "id": "meta-business-1",
-                                    "name": "Nine D Brain Business",
+                        "id": "system-user-1",
+                        "accounts": {
+                            "data": [
+                                {
+                                    "id": "page-1",
+                                    "name": "Nine D Brain Page",
+                                    "business": {
+                                        "id": "meta-business-1",
+                                        "name": "Nine D Brain Business",
+                                    },
+                                    "tasks": ["MESSAGING", "ANALYZE"],
                                 },
-                                "tasks": ["MESSAGING", "ANALYZE"],
-                            }
-                        ]
+                                {
+                                    "id": "page-2",
+                                    "name": "Standalone Page",
+                                    "tasks": ["LEADS_RETRIEVAL"],
+                                },
+                            ]
+                        },
                     }
                 raise AssertionError(f"Unexpected Meta URL: {url}")
 
-        connector = ConfiguredOAuthConnector(
-            connector_type="facebook",
-            provider="meta",
-            client_id="meta-app-id",
-            client_secret="meta-app-secret",
-            configuration=self._configuration(),
-            http=MetaHttp(),  # type: ignore[arg-type]
-        )
+        http = MetaHttp()
+        connector = self._connector(http)
         resources = list(
             await connector.list_resources(
-                CredentialMaterial(values={"access_token": "server-only"})
+                CredentialMaterial(
+                    values={"access_token": "server-only-system-user-token"}
+                )
             )
         )
 
         self.assertEqual(
             [resource.resource_type for resource in resources],
-            ["meta_business", "facebook_page"],
+            ["meta_business", "facebook_page", "facebook_page"],
         )
         page = resources[1]
         self.assertEqual(page.external_reference, "page-1")
         self.assertEqual(page.parent_reference, "meta-business-1")
         self.assertEqual(page.metadata["meta_business_id"], "meta-business-1")
         self.assertEqual(page.metadata["capabilities"], "MESSAGING,ANALYZE")
+        standalone_page = resources[2]
+        self.assertEqual(standalone_page.external_reference, "page-2")
+        self.assertIsNone(standalone_page.parent_reference)
+        self.assertEqual(
+            standalone_page.metadata,
+            {"capabilities": "LEADS_RETRIEVAL"},
+        )
+        self.assertEqual(len(http.calls), 1)
+        self.assertEqual(http.calls[0][0], "GET")
+        self.assertEqual(
+            http.calls[0][1],
+            "https://graph.facebook.com/v26.0/me",
+        )
+        self.assertEqual(
+            http.calls[0][2]["params"],
+            {
+                "fields": "accounts{id,name,business{id,name},tasks}",
+                "access_token": "server-only-system-user-token",
+            },
+        )
+        self.assertNotIn(
+            "instagram_business_account",
+            http.calls[0][2]["params"]["fields"],
+        )
+        self.assertNotIn("server-only-system-user-token", repr(resources))
+        self.assertNotIn("server-only-system-user-token", http.calls[0][1])
+
+    async def test_empty_system_user_accounts_returns_no_resources(self) -> None:
+        class MetaHttp:
+            async def request_json(self, _method: str, url: str, **_kwargs):
+                if url.endswith("/me"):
+                    return {"accounts": {"data": []}}
+                raise AssertionError(f"Unexpected Meta URL: {url}")
+
+        resources = await self._connector(MetaHttp()).list_resources(
+            CredentialMaterial(values={"access_token": "server-only"})
+        )
+
+        self.assertEqual(resources, [])
+
+    async def test_malformed_system_user_accounts_payload_fails_safely(self) -> None:
+        malformed_payloads = (
+            {},
+            {"accounts": []},
+            {"accounts": {}},
+            {"accounts": {"data": {}}},
+            {"accounts": {"data": ["not-a-page"]}},
+        )
+
+        for payload in malformed_payloads:
+            with self.subTest(payload=payload):
+                class MetaHttp:
+                    async def request_json(
+                        self, _method: str, url: str, **_kwargs
+                    ):
+                        if url.endswith("/me"):
+                            return payload
+                        raise AssertionError(f"Unexpected Meta URL: {url}")
+
+                with self.assertRaises(IntegrationProviderUnavailableError):
+                    await self._connector(MetaHttp()).list_resources(
+                        CredentialMaterial(
+                            values={"access_token": "server-only"}
+                        )
+                    )
+
+    async def test_system_user_accounts_nested_pagination_is_bounded_and_trusted(self) -> None:
+        class MetaHttp:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, dict[str, object]]] = []
+
+            async def request_json(self, method: str, url: str, **kwargs):
+                self.calls.append((method, url, kwargs))
+                if url.endswith("/me"):
+                    return {
+                        "accounts": {
+                            "data": [{"id": "page-1", "name": "First"}],
+                            "paging": {
+                                "next": (
+                                    "https://graph.facebook.com/v26.0/"
+                                    "system-user-1/accounts?after=cursor-1&limit=25&"
+                                    "access_token=provider-echoed-token"
+                                )
+                            },
+                        }
+                    }
+                if url.endswith("/system-user-1/accounts"):
+                    return {
+                        "data": [{"id": "page-2", "name": "Second"}]
+                    }
+                raise AssertionError(f"Unexpected Meta URL: {url}")
+
+        http = MetaHttp()
+        resources = await self._connector(http).list_resources(
+            CredentialMaterial(
+                values={"access_token": "server-only-system-user-token"}
+            )
+        )
+
+        self.assertEqual(
+            [resource.external_reference for resource in resources],
+            ["page-1", "page-2"],
+        )
+        self.assertEqual(len(http.calls), 2)
+        self.assertEqual(
+            http.calls[1][1],
+            "https://graph.facebook.com/v26.0/system-user-1/accounts",
+        )
+        self.assertEqual(
+            http.calls[1][2]["params"],
+            {
+                "after": "cursor-1",
+                "limit": "25",
+                "access_token": "server-only-system-user-token",
+            },
+        )
+        self.assertNotIn("provider-echoed-token", repr(http.calls))
+        self.assertTrue(
+            all(
+                "server-only-system-user-token" not in url
+                for _, url, _ in http.calls
+            )
+        )
+        self.assertNotIn("server-only-system-user-token", repr(resources))
+
+    async def test_system_user_accounts_rejects_untrusted_paging_url(self) -> None:
+        class MetaHttp:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            async def request_json(self, _method: str, url: str, **_kwargs):
+                self.calls.append(url)
+                return {
+                    "accounts": {
+                        "data": [{"id": "page-1"}],
+                        "paging": {
+                            "next": "https://attacker.invalid/accounts?after=x"
+                        },
+                    }
+                }
+
+        http = MetaHttp()
+        with self.assertRaises(IntegrationProviderUnavailableError):
+            await self._connector(http).list_resources(
+                CredentialMaterial(values={"access_token": "server-only"})
+            )
+
+        self.assertEqual(http.calls, ["https://graph.facebook.com/v26.0/me"])
+
+    async def test_system_user_accounts_falls_back_without_business_field(self) -> None:
+        class MetaHttp:
+            def __init__(self) -> None:
+                self.fields: list[str] = []
+
+            async def request_json(self, _method: str, url: str, **kwargs):
+                if not url.endswith("/me"):
+                    raise AssertionError(f"Unexpected Meta URL: {url}")
+                fields = kwargs["params"]["fields"]
+                self.fields.append(fields)
+                if "business{" in fields:
+                    raise _ProviderHttpError(400)
+                return {
+                    "accounts": {
+                        "data": [{"id": "page-1", "name": "Fallback Page"}]
+                    }
+                }
+
+        http = MetaHttp()
+        resources = await self._connector(http).list_resources(
+            CredentialMaterial(values={"access_token": "server-only"})
+        )
+
+        self.assertEqual(
+            http.fields,
+            [
+                "accounts{id,name,business{id,name},tasks}",
+                "accounts{id,name,tasks}",
+            ],
+        )
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0].resource_type, "facebook_page")
+        self.assertIsNone(resources[0].parent_reference)
+        self.assertIsNone(resources[0].metadata)
+
+    async def test_instagram_and_meta_ads_discovery_shapes_are_unchanged(self) -> None:
+        class InstagramHttp:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict[str, str]]] = []
+
+            async def request_json(self, _method: str, url: str, **kwargs):
+                self.calls.append((url, kwargs["params"]))
+                return {
+                    "data": [
+                        {
+                            "id": "page-1",
+                            "name": "Instagram Parent Page",
+                            "instagram_business_account": {
+                                "id": "instagram-1",
+                                "username": "business_account",
+                            },
+                        }
+                    ]
+                }
+
+        instagram_http = InstagramHttp()
+        instagram_resources = await self._connector(
+            instagram_http,
+            connector_type="instagram",
+        ).list_resources(
+            CredentialMaterial(values={"access_token": "server-only"})
+        )
+        self.assertEqual(
+            [resource.resource_type for resource in instagram_resources],
+            ["facebook_page", "instagram_account"],
+        )
+        self.assertEqual(
+            instagram_http.calls[0][0],
+            "https://graph.facebook.com/v26.0/me/accounts",
+        )
+        self.assertIn(
+            "instagram_business_account{id,username}",
+            instagram_http.calls[0][1]["fields"],
+        )
+
+        class MetaAdsHttp:
+            def __init__(self) -> None:
+                self.urls: list[str] = []
+
+            async def request_json(self, _method: str, url: str, **_kwargs):
+                self.urls.append(url)
+                if url.endswith("/me/businesses"):
+                    return {"data": []}
+                if url.endswith("/me/adaccounts"):
+                    return {"data": [{"id": "act-1", "name": "Ads"}]}
+                if url.endswith("/me/accounts"):
+                    return {"data": [{"id": "page-1", "name": "Page"}]}
+                raise AssertionError(f"Unexpected Meta URL: {url}")
+
+        meta_ads_http = MetaAdsHttp()
+        meta_ads_resources = await self._connector(
+            meta_ads_http,
+            connector_type="meta_ads",
+        ).list_resources(
+            CredentialMaterial(values={"access_token": "server-only"})
+        )
+        self.assertEqual(
+            [resource.resource_type for resource in meta_ads_resources],
+            ["ad_account", "facebook_page"],
+        )
+        self.assertEqual(
+            meta_ads_http.urls,
+            [
+                "https://graph.facebook.com/v26.0/me/businesses",
+                "https://graph.facebook.com/v26.0/me/adaccounts",
+                "https://graph.facebook.com/v26.0/me/accounts",
+            ],
+        )
 
     def test_pages_configuration_does_not_enable_other_meta_connectors(self) -> None:
         adapters = build_configured_oauth_adapters(self._configuration())
