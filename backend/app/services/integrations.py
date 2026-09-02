@@ -38,6 +38,7 @@ from app.integrations.contracts import (
     ExternalMailMessage,
     ExternalMailMessageContent,
     ExternalResource,
+    IntegrationConnector,
     NormalizedAdPerformance,
     NormalizedIntegrationEvent,
 )
@@ -394,23 +395,6 @@ async def complete_authorization(
             code_verifier=verifier,
             redirect_uri=str(configuration.integration_oauth_callback_url),
         )
-        identity = await adapter.get_identity(exchange.credentials)
-        if connector_type == "facebook":
-            authorized_resources = list(
-                await adapter.list_resources(exchange.credentials)
-            )
-    except (
-        IntegrationProviderUnavailableError,
-        IntegrationCredentialUnavailableError,
-    ):
-        return await _fail_authorization(
-            session,
-            oauth_state=oauth_state,
-            definition=definition,
-            credentials=credentials,
-            now=now,
-            failure_code="authorization_exchange_failed",
-        )
     except Exception:
         return await _fail_authorization(
             session,
@@ -420,6 +404,39 @@ async def complete_authorization(
             now=now,
             failure_code="authorization_exchange_failed",
         )
+
+    try:
+        identity = await adapter.get_identity(exchange.credentials)
+    except Exception:
+        await _best_effort_revoke_provider_credentials(
+            adapter, exchange.credentials
+        )
+        return await _fail_authorization(
+            session,
+            oauth_state=oauth_state,
+            definition=definition,
+            credentials=credentials,
+            now=now,
+            failure_code="provider_identity_fetch_failed",
+        )
+
+    if connector_type == "facebook":
+        try:
+            authorized_resources = list(
+                await adapter.list_resources(exchange.credentials)
+            )
+        except Exception:
+            await _best_effort_revoke_provider_credentials(
+                adapter, exchange.credentials
+            )
+            return await _fail_authorization(
+                session,
+                oauth_state=oauth_state,
+                definition=definition,
+                credentials=credentials,
+                now=now,
+                failure_code="authorized_assets_fetch_failed",
+            )
 
     granted = tuple(
         dict.fromkeys(
@@ -1110,10 +1127,9 @@ async def disconnect(
                 connector_type=connection.connector_type,
                 purpose="oauth_credentials",
             )
-            try:
-                await adapters.get(connection.connector_type).revoke_credentials(material)
-            except Exception:
-                pass
+            await _best_effort_revoke_provider_credentials(
+                adapters.get(connection.connector_type), material
+            )
             await credentials.revoke(
                 reference,
                 business_id=business_id,
@@ -2052,5 +2068,15 @@ async def _best_effort_revoke(
             connector_type=connector_type,
             purpose=purpose,
         )
+    except Exception:
+        pass
+
+
+async def _best_effort_revoke_provider_credentials(
+    adapter: IntegrationConnector,
+    credentials: CredentialMaterial,
+) -> None:
+    try:
+        await adapter.revoke_credentials(credentials)
     except Exception:
         pass

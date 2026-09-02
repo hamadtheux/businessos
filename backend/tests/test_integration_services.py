@@ -300,6 +300,8 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 ]
 
+        adapter = MetaConnector()
+        adapter.revoke_credentials = AsyncMock()
         credential_store = InMemoryIntegrationCredentialStore()
         raw_state = "tenant-a-meta-state"
         verifier_reference = await credential_store.store(
@@ -344,14 +346,13 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
                 connector_type=None,
                 state=raw_state,
                 code="one-use-meta-code",
-                adapters=ConnectorAdapterRegistry(
-                    {"facebook": MetaConnector()}
-                ),
+                adapters=ConnectorAdapterRegistry({"facebook": adapter}),
                 credentials=credential_store,
                 configuration=configuration,
             )
 
         self.assertEqual(result.status, "connected")
+        adapter.revoke_credentials.assert_not_awaited()
         self.assertEqual(connection.business_id, BUSINESS_ID)
         self.assertEqual(
             [item["external_reference"] for item in connection.selected_resources],
@@ -436,17 +437,8 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
                 purpose="oauth_pkce",
             )
 
-    async def test_meta_token_exchange_failure_marks_connection_error(self) -> None:
-        class FailingMetaConnector(_FakeConnector):
-            connector_type = "facebook"
-
-            async def exchange_authorization_code(self, **_kwargs):
-                raise IntegrationProviderUnavailableError(
-                    "private-meta-error"
-                )
-
+    async def _complete_meta_callback(self, adapter, *, raw_state: str):
         credential_store = InMemoryIntegrationCredentialStore()
-        raw_state = "meta-exchange-failure-state"
         verifier_reference = await credential_store.store(
             business_id=BUSINESS_ID,
             connector_type="facebook",
@@ -483,18 +475,119 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
                 connector_type=None,
                 state=raw_state,
                 code="one-use-meta-code",
-                adapters=ConnectorAdapterRegistry(
-                    {"facebook": FailingMetaConnector()}
-                ),
+                adapters=ConnectorAdapterRegistry({"facebook": adapter}),
                 credentials=credential_store,
                 configuration=configuration,
             )
 
-        self.assertEqual(result.status, "degraded")
-        self.assertEqual(
-            connection.failure_code,
-            "authorization_exchange_failed",
+        return (
+            result,
+            connection,
+            oauth_state,
+            credential_store,
+            verifier_reference,
         )
+
+    async def _assert_meta_callback_failure(
+        self,
+        adapter,
+        *,
+        raw_state: str,
+        failure_code: str,
+    ) -> None:
+        result, connection, oauth_state, credential_store, verifier_reference = (
+            await self._complete_meta_callback(adapter, raw_state=raw_state)
+        )
+
+        self.assertEqual(result.status, "degraded")
+        self.assertEqual(connection.failure_code, failure_code)
+        self.assertEqual(connection.authentication_state, "failed")
+        self.assertEqual(oauth_state.consumed_at, NOW)
+        with self.assertRaises(IntegrationCredentialUnavailableError):
+            await credential_store.retrieve(
+                verifier_reference,
+                business_id=BUSINESS_ID,
+                connector_type="facebook",
+                purpose="oauth_pkce",
+            )
+
+    async def test_meta_token_exchange_failure_marks_connection_error(self) -> None:
+        class FailingMetaConnector(_FakeConnector):
+            connector_type = "facebook"
+
+            async def exchange_authorization_code(self, **_kwargs):
+                raise IntegrationProviderUnavailableError(
+                    "private-meta-error"
+                )
+
+        adapter = FailingMetaConnector()
+        adapter.revoke_credentials = AsyncMock()
+        await self._assert_meta_callback_failure(
+            adapter,
+            raw_state="meta-exchange-failure-state",
+            failure_code="authorization_exchange_failed",
+        )
+        adapter.revoke_credentials.assert_not_awaited()
+
+    async def test_meta_identity_fetch_failure_marks_connection_error(self) -> None:
+        class FailingMetaConnector(_FakeConnector):
+            connector_type = "facebook"
+
+            async def get_identity(self, _credentials):
+                raise IntegrationCredentialUnavailableError(
+                    "private-meta-credential-error"
+                )
+
+        adapter = FailingMetaConnector()
+        adapter.revoke_credentials = AsyncMock()
+        await self._assert_meta_callback_failure(
+            adapter,
+            raw_state="meta-identity-failure-state",
+            failure_code="provider_identity_fetch_failed",
+        )
+        adapter.revoke_credentials.assert_awaited_once()
+        self.assertIsInstance(
+            adapter.revoke_credentials.await_args.args[0],
+            CredentialMaterial,
+        )
+
+    async def test_meta_asset_discovery_failure_marks_connection_error(self) -> None:
+        class FailingMetaConnector(_FakeConnector):
+            connector_type = "facebook"
+
+            async def list_resources(self, _credentials):
+                raise RuntimeError("private-meta-assets-error")
+
+        adapter = FailingMetaConnector()
+        adapter.revoke_credentials = AsyncMock()
+        await self._assert_meta_callback_failure(
+            adapter,
+            raw_state="meta-assets-failure-state",
+            failure_code="authorized_assets_fetch_failed",
+        )
+        adapter.revoke_credentials.assert_awaited_once()
+        self.assertIsInstance(
+            adapter.revoke_credentials.await_args.args[0],
+            CredentialMaterial,
+        )
+
+    async def test_meta_revoke_failure_does_not_mask_identity_failure(self) -> None:
+        class FailingMetaConnector(_FakeConnector):
+            connector_type = "facebook"
+
+            async def get_identity(self, _credentials):
+                raise RuntimeError("private-meta-identity-error")
+
+        adapter = FailingMetaConnector()
+        adapter.revoke_credentials = AsyncMock(
+            side_effect=RuntimeError("private-meta-revoke-error")
+        )
+        await self._assert_meta_callback_failure(
+            adapter,
+            raw_state="meta-revoke-failure-state",
+            failure_code="provider_identity_fetch_failed",
+        )
+        adapter.revoke_credentials.assert_awaited_once()
 
 
 class IntegrationLifecycleServiceTests(unittest.IsolatedAsyncioTestCase):
