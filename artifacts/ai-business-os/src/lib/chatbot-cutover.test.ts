@@ -71,6 +71,16 @@ test("chatbot screen is API-backed, tenant-keyed, and scheduling uses central po
 
 test("widget loader isolates host CSS and bootstraps from the actual host origin", async () => {
   const source = await readFile(new URL("../widget/loader.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /^\s*import\b/m);
+  assert.doesNotMatch(source, /\bimport\s*\(/);
+  assert.equal(source.includes("WIDGET_API_BASE_URL"), false);
+  assert.equal(source.includes("WIDGET_APP_URL"), false);
+  assert.match(source, /const scriptUrl = new URL\(script\.src, document\.baseURI\)/);
+  assert.match(source, /const apiBase = scriptUrl\.origin\.replace\(\/\\\/\+\$\/, ""\)/);
+  assert.match(source, /const widgetAppUrl = new URL\("widget\.html", scriptUrl\)\.toString\(\)/);
+  assert.match(source, /\/api\/v1\/public\/widgets\/\$\{encodeURIComponent\(widgetId\)\}\/config/);
+  assert.match(source, /\^\[A-Za-z0-9_-\]\{40,96\}\$/);
+  assert.match(source, /document\.querySelector\(`\[data-aibos-widget-host=/);
   assert.match(source, /attachShadow\(\{ mode: "closed" \}\)/);
   assert.match(source, /credentials: "omit"/);
   assert.match(source, /iframe\.sandbox\.add\("allow-scripts", "allow-forms", "allow-same-origin"\)/);
@@ -78,7 +88,7 @@ test("widget loader isolates host CSS and bootstraps from the actual host origin
   assert.match(source, /event\.origin !== frameOrigin/);
   assert.match(source, /button\.focus\(\)/);
   assert.match(source, /frame\.hidden = true/);
-  for (const forbidden of ["businessId", "apiKey", "access_token", "refresh_token", "localStorage", "innerHTML = config"] ) {
+  for (const forbidden of ["businessId", "apiKey", "access_token", "refresh_token", "localStorage", "innerHTML = config", "localhost", "onrender.com", "ninedbrain-api", "ninedbrain-web"] ) {
     assert.equal(source.includes(forbidden), false, forbidden);
   }
 });
@@ -94,10 +104,15 @@ test("widget renders all visitor and AI content as React text, never arbitrary H
   assert.match(source, /Availability comes directly/);
   assert.match(source, /handoffRequested/);
   assert.match(source, /Waiting for human assistance/);
-  assert.match(source, /WIDGET_API_BASE_URL/);
-  assert.match(source, /trustedApiOrigin/);
-  assert.match(source, /apiUrl\.origin !== trustedApiOrigin/);
-  assert.equal(source.includes("apiUrl.origin !== window.location.origin"), false);
+  assert.equal(source.includes("WIDGET_API_BASE_URL"), false);
+  assert.match(source, /event\.source !== window\.parent/);
+  assert.match(source, /value\.hostOrigin !== event\.origin/);
+  assert.match(source, /\^\[A-Za-z0-9_-\]\{40,96\}\$/);
+  assert.match(source, /value\.sessionToken\.length < 48/);
+  assert.match(source, /value\.config\.widget_id !== value\.widgetId/);
+  assert.match(source, /\^https\?:\$/);
+  assert.match(source, /apiUrl\.origin !== window\.location\.origin/);
+  assert.doesNotMatch(source, /localhost|onrender\.com|ninedbrain-api|ninedbrain-web/);
 });
 
 test("public widget API uses only opaque widget/session identity and dedicated routes", async () => {

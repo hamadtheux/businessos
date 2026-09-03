@@ -13,6 +13,7 @@ class FakeElement {
   async = false;
   removed = false;
   src = "";
+  type = "";
   readonly tagName: string;
   readonly attributes = new Map<string, string>();
   readonly listeners = new Map<string, Listener[]>();
@@ -132,6 +133,8 @@ test("repeated public mounts share one loader and final cleanup removes widget a
     PUBLIC_CHATBOT_WIDGET_ID,
   );
   assert.equal(scripts[0].async, true);
+  assert.equal(scripts[0].type, "");
+  assert.equal(scripts[0].attributes.has("type"), false);
 
   const host = fakeDocument.appendWidgetHost();
   cleanupFirst();

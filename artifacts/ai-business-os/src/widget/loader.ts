@@ -1,5 +1,3 @@
-import { WIDGET_API_BASE_URL, WIDGET_APP_URL } from "./config.ts";
-
 type LoaderConfig = {
   widget_id: string;
   display_name: string;
@@ -19,8 +17,8 @@ type LoaderSession = { session_token: string; expires_at: string; locale: string
   if (!script || !/^[A-Za-z0-9_-]{40,96}$/.test(widgetId) || document.querySelector(`[data-aibos-widget-host="${CSS.escape(widgetId)}"]`)) return;
 
   const scriptUrl = new URL(script.src, document.baseURI);
-  const apiBase = (WIDGET_API_BASE_URL || scriptUrl.origin).replace(/\/+$/, "");
-  const widgetAppUrl = WIDGET_APP_URL || new URL("widget.html", scriptUrl).toString();
+  const apiBase = scriptUrl.origin.replace(/\/+$/, "");
+  const widgetAppUrl = new URL("widget.html", scriptUrl).toString();
   let config: LoaderConfig | null = null;
   let session: LoaderSession | null = null;
   let frame: HTMLIFrameElement | null = null;
