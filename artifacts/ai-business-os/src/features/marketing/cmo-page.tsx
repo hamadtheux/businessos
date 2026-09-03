@@ -24,6 +24,8 @@ export function CmoPage() {
   const [showContentGenerator, setShowContentGenerator] = useState(false);
   const [showPlanGenerator, setShowPlanGenerator] = useState(false);
   const [editingPlan, setEditingPlan] = useState(false);
+  const [editingContent, setEditingContent] = useState<MarketingContent | null>(null);
+  const [historyContent, setHistoryContent] = useState<MarketingContent | null>(null);
   const [schedule, setSchedule] = useState<MarketingContent | null>(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -35,6 +37,23 @@ export function CmoPage() {
   const analytics = useQuery({ queryKey: ["marketing", activeBusinessId, "analytics", period.start, period.end], queryFn: ({ signal }) => marketingApi.analytics(activeBusinessId, period.start, period.end, signal), enabled: Boolean(activeBusinessId) });
   const calendar = useQuery({ queryKey: ["marketing", activeBusinessId, "calendar", "cmo"], queryFn: ({ signal }) => marketingApi.calendar.list(activeBusinessId, new Date().toISOString(), calendarEnd, {}, signal), enabled: Boolean(activeBusinessId) });
   const campaigns = useQuery({ queryKey: ["marketing", activeBusinessId, "campaigns", "cmo"], queryFn: ({ signal }) => marketingApi.campaigns.list(activeBusinessId, { pageSize: 10 }, signal), enabled: Boolean(activeBusinessId) });
+
+  const versions = useQuery({
+    queryKey: [
+      "marketing",
+      activeBusinessId,
+      "content-versions",
+      historyContent?.root_content_id ?? historyContent?.id ?? "none",
+    ],
+    queryFn: ({ signal }) =>
+      marketingApi.content.versions(
+        activeBusinessId,
+        historyContent!.id,
+        signal,
+      ),
+    enabled: Boolean(activeBusinessId && historyContent),
+  });
+
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["marketing", activeBusinessId] });
 
   const generateContent = useMutation({
@@ -51,6 +70,50 @@ export function CmoPage() {
     onSuccess: (item) => { setShowContentGenerator(false); setNotice(`“${item.title}” is ready for internal review.`); setError(""); void refresh(); },
     onError: (reason) => setError(humanizeApiError(reason, "AI content generation could not be completed.")),
   });
+  const editContent = useMutation({
+    mutationFn: (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+
+      if (!editingContent) {
+        throw new Error("Choose content to edit.");
+      }
+
+      const form = new FormData(event.currentTarget);
+      const title = String(form.get("title") || "").trim();
+      const body = String(form.get("body") || "").trim();
+      const cta = String(form.get("cta") || "").trim();
+
+      if (!title || !body) {
+        throw new Error("Title and content are required.");
+      }
+
+      return marketingApi.content.edit(
+        activeBusinessId,
+        editingContent.id,
+        {
+          title,
+          body,
+          cta: cta || null,
+        },
+      );
+    },
+    onSuccess: (item) => {
+      setEditingContent(null);
+      setNotice(
+        `Version ${item.version} was saved as a manual revision. Previous versions remain unchanged.`,
+      );
+      setError("");
+      void refresh();
+    },
+    onError: (reason) =>
+      setError(
+        humanizeApiError(
+          reason,
+          "The content revision could not be saved.",
+        ),
+      ),
+  });
+
   const regenerate = useMutation({
     mutationFn: (item: MarketingContent) => marketingApi.content.generate(activeBusinessId, { prompt: `Regenerate this approved marketing direction as a distinct, fact-grounded variant: ${item.body}`, channel: item.channel, content_type: item.content_type, campaign_id: item.campaign_id, title: item.title, language: item.language, parent_content_id: item.id }),
     onSuccess: (item) => { setNotice(`Version ${item.version} was created; prior versions remain in history.`); setError(""); void refresh(); },
@@ -144,6 +207,14 @@ export function CmoPage() {
           onRegenerate={(item) => regenerate.mutate(item)}
           onApprove={(item) => approve.mutate(item)}
           onSchedule={(item) => setSchedule(item)}
+          onEdit={(item) => {
+            setError("");
+            setEditingContent(item);
+          }}
+          onHistory={(item) => {
+            setError("");
+            setHistoryContent(item);
+          }}
         />
         <Card><SectionTitle title="Content calendar" action={<Badge>{calendar.data?.length ?? 0} upcoming</Badge>} />{calendar.isError ? <div className="empty"><AlertCircle /><h3>Calendar could not load</h3><p>{humanizeApiError(calendar.error, "Retry the internal calendar.")}</p><Button onClick={() => void calendar.refetch()}>Retry calendar</Button></div> : calendar.isLoading ? <div className="empty"><RefreshCw className="spin" /><p>Loading calendar…</p></div> : <>{calendar.data?.slice(0, 8).map((item) => { const contentItem = content.data?.items.find((value) => value.id === item.content_id); return <div className="list-row" key={item.id}><div style={{ width: 86, color: "#938c83", fontSize: 10 }}>{new Date(item.scheduled_for).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}</div><div className="row-main"><div className="row-title">{contentItem?.title || `${item.channel} content`}</div><div className="row-copy">{new Date(item.scheduled_for).toLocaleTimeString()} · {item.timezone}</div></div><Badge tone="success">{item.status.replaceAll("_", " ")}</Badge></div>; })}{!calendar.data?.length && <div className="empty"><Calendar /><h3>No content scheduled</h3><p>Approved content can be added to the internal calendar without a publishing provider.</p></div>}</>}</Card></div>
     </>}
@@ -493,6 +564,289 @@ export function CmoPage() {
         </form>
       </Modal>
     )}
+    {editingContent && (
+      <Modal
+        wide
+        title="Edit content"
+        description={`Saving creates version ${editingContent.version + 1}. The current version remains unchanged in history.`}
+        onClose={() => {
+          setEditingContent(null);
+          setError("");
+        }}
+      >
+        <form onSubmit={(event) => editContent.mutate(event)}>
+          <div
+            className="ai-banner"
+            style={{ marginBottom: 18 }}
+          >
+            <Check />
+            This is a manual revision. Existing Business Brain provenance and
+            creative context remain attached to the new version.
+          </div>
+
+          <div className="form-grid">
+            <div className="field full">
+              <label htmlFor="cmo-edit-title">Title</label>
+              <input
+                id="cmo-edit-title"
+                name="title"
+                required
+                maxLength={180}
+                defaultValue={editingContent.title}
+              />
+            </div>
+
+            <div className="field full">
+              <label htmlFor="cmo-edit-body">Content</label>
+              <textarea
+                id="cmo-edit-body"
+                name="body"
+                required
+                maxLength={20000}
+                defaultValue={editingContent.body}
+                style={{
+                  minHeight: 220,
+                  padding: 14,
+                  fontSize: 12,
+                  lineHeight: 1.65,
+                  background: "#ffffff",
+                }}
+              />
+            </div>
+
+            <div className="field full">
+              <label htmlFor="cmo-edit-cta">
+                Call to action
+                <span
+                  style={{
+                    marginLeft: 5,
+                    color: "#98a2b3",
+                    fontWeight: 500,
+                  }}
+                >
+                  optional
+                </span>
+              </label>
+              <input
+                id="cmo-edit-cta"
+                name="cta"
+                maxLength={300}
+                defaultValue={editingContent.cta || ""}
+                placeholder="Example: Explore the collection"
+              />
+            </div>
+          </div>
+
+          {error && (
+            <p className="form-error" style={{ marginTop: 14 }}>
+              {error}
+            </p>
+          )}
+
+          <div className="modal-foot">
+            <Button
+              type="button"
+              onClick={() => {
+                setEditingContent(null);
+                setError("");
+              }}
+            >
+              Cancel
+            </Button>
+
+            <Button
+              variant="primary"
+              type="submit"
+              disabled={editContent.isPending}
+            >
+              {editContent.isPending ? (
+                <>
+                  <RefreshCw className="spin" />
+                  Saving revision…
+                </>
+              ) : (
+                <>
+                  <Check />
+                  Save new version
+                </>
+              )}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+    )}
+
+    {historyContent && (
+      <Modal
+        wide
+        title="Version history"
+        description="Every revision is preserved. AI-generated and human-edited versions remain clearly identified."
+        onClose={() => {
+          setHistoryContent(null);
+          setError("");
+        }}
+      >
+        {versions.isLoading ? (
+          <div className="empty">
+            <RefreshCw className="spin" />
+            <p>Loading content history…</p>
+          </div>
+        ) : versions.isError ? (
+          <div className="empty">
+            <AlertCircle />
+            <h3>Version history could not load</h3>
+            <p>
+              {humanizeApiError(
+                versions.error,
+                "Retry loading this content history.",
+              )}
+            </p>
+            <Button onClick={() => void versions.refetch()}>
+              <RefreshCw />
+              Retry history
+            </Button>
+          </div>
+        ) : (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 12,
+            }}
+          >
+            {versions.data?.map((version) => (
+              <div
+                key={version.id}
+                style={{
+                  padding: 16,
+                  border: "1px solid #e4e7ec",
+                  borderRadius: 14,
+                  background:
+                    version.id === historyContent.id
+                      ? "#f6f9ff"
+                      : "#ffffff",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    justifyContent: "space-between",
+                    gap: 12,
+                    marginBottom: 12,
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    <div className="eyebrow">
+                      Version {version.version}
+                    </div>
+                    <strong
+                      style={{
+                        display: "block",
+                        color: "#101828",
+                        fontSize: 13,
+                        lineHeight: 1.4,
+                      }}
+                    >
+                      {version.title}
+                    </strong>
+                  </div>
+
+                  <div
+                    className="chip-list"
+                    style={{ justifyContent: "flex-end" }}
+                  >
+                    {version.id === historyContent.id && (
+                      <Badge tone="info">Selected</Badge>
+                    )}
+
+                    <Badge tone={version.ai_generated ? "info" : "neutral"}>
+                      {version.ai_generated
+                        ? "AI generated"
+                        : "Manual revision"}
+                    </Badge>
+
+                    <Badge>
+                      {version.status.replaceAll("_", " ")}
+                    </Badge>
+                  </div>
+                </div>
+
+                <p
+                  style={{
+                    color: "#475467",
+                    fontSize: 11,
+                    lineHeight: 1.65,
+                    whiteSpace: "pre-wrap",
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {version.body}
+                </p>
+
+                {version.cta && (
+                  <div
+                    className="subtle"
+                    style={{ marginTop: 10, fontSize: 10 }}
+                  >
+                    CTA · {version.cta}
+                  </div>
+                )}
+
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 10,
+                    flexWrap: "wrap",
+                    marginTop: 14,
+                    paddingTop: 12,
+                    borderTop: "1px solid #eaecf0",
+                  }}
+                >
+                  <div className="subtle" style={{ fontSize: 9 }}>
+                    {new Date(version.created_at).toLocaleString()}
+                  </div>
+
+                  <Button
+                    variant="secondary"
+                    className="btn-sm"
+                    onClick={() => {
+                      setHistoryContent(null);
+                      setError("");
+                      setEditingContent(version);
+                    }}
+                  >
+                    Edit from this version
+                  </Button>
+                </div>
+              </div>
+            ))}
+
+            {!versions.data?.length && (
+              <div className="empty">
+                <AlertCircle />
+                <h3>No versions available</h3>
+                <p>This content does not have a recorded version history yet.</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="modal-foot">
+          <Button
+            onClick={() => {
+              setHistoryContent(null);
+              setError("");
+            }}
+          >
+            Close
+          </Button>
+        </div>
+      </Modal>
+    )}
+
     {showPlanGenerator && <Modal title="Generate AI CMO strategy" description="This saves usable conclusions only—never hidden reasoning or external actions." onClose={() => setShowPlanGenerator(false)}><form onSubmit={(event) => generatePlan.mutate(event)}><div className="form-grid"><div className="field"><label>Plan title</label><input name="title" maxLength={180} /></div><div className="field"><label>Budget guidance</label><input name="budget" type="number" min="0" max="1000000000" step="0.01" /></div><div className="field full"><label>Marketing goal</label><textarea name="goal" required maxLength={4000} /></div><div className="field full"><label>Target audience</label><textarea name="audience" required maxLength={2000} placeholder="Use generic administrative/customer segmentation only" /></div><div className="field"><label>Period start</label><input name="period_start" type="date" /></div><div className="field"><label>Period end</label><input name="period_end" type="date" /></div><div className="field full"><label>Channels</label><div className="checkbox-row">{channels.map((channel) => <label key={channel}><input type="checkbox" name="channels" value={channel} defaultChecked={["instagram", "email"].includes(channel)} /> {channel.replaceAll("_", " ")}</label>)}</div></div></div><div className="modal-foot"><Button type="button" onClick={() => setShowPlanGenerator(false)}>Cancel</Button><Button variant="primary" type="submit" disabled={generatePlan.isPending}><Sparkles /> {generatePlan.isPending ? "Building strategy…" : "Generate strategy"}</Button></div></form></Modal>}
     {editingPlan && plans.data?.items[0] && <Modal wide title="Review marketing plan" description="Edit the usable AI conclusions before activating the strategy." onClose={() => setEditingPlan(false)}><form onSubmit={(event) => updatePlan.mutate(event)}><div className="form-grid"><div className="field full"><label>Title</label><input name="title" required defaultValue={plans.data.items[0].title} /></div><div className="field full"><label>Objective</label><textarea name="objective" required maxLength={1000} defaultValue={plans.data.items[0].objective} /></div><div className="field full"><label>Target audience</label><textarea name="target_audience" required maxLength={2000} defaultValue={plans.data.items[0].target_audience} /></div><div className="field full"><label>Positioning</label><textarea name="positioning" required maxLength={3000} defaultValue={plans.data.items[0].positioning} /></div><div className="field full"><label>Key message</label><textarea name="key_message" required maxLength={3000} defaultValue={plans.data.items[0].key_message} /></div><div className="field full"><label>Offer</label><textarea name="offer" maxLength={2000} defaultValue={plans.data.items[0].offer || ""} /></div><div className="field full"><label>Content strategy</label><textarea name="content_strategy" maxLength={5000} defaultValue={plans.data.items[0].content_strategy || ""} /></div><div className="field full"><label>Measurement goals (one per line)</label><textarea name="measurement_goals" defaultValue={plans.data.items[0].measurement_goals.join("\n")} /></div></div><div className="modal-foot"><Button type="button" onClick={() => setEditingPlan(false)}>Cancel</Button><Button variant="primary" type="submit" disabled={updatePlan.isPending}>{updatePlan.isPending ? "Saving…" : "Save reviewed plan"}</Button></div></form></Modal>}
     {schedule && <Modal title="Schedule content" description="Creates an internal calendar item; no social platform is contacted." onClose={() => setSchedule(null)}><form onSubmit={(event) => createSchedule.mutate(event)}><div className="field"><label>Date and time</label><input name="scheduled_for" type="datetime-local" required /></div><div className="modal-foot"><Button type="button" onClick={() => setSchedule(null)}>Cancel</Button><Button variant="primary" type="submit" disabled={createSchedule.isPending}><Calendar /> Schedule internally</Button></div></form></Modal>}
