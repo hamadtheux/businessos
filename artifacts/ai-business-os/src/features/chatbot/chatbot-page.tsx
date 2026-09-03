@@ -278,7 +278,29 @@ export function ChatbotPage() {
               </div>
               <div className="hosted-actions">
                 {hostedUrl && <Button onClick={() => void navigator.clipboard.writeText(hostedUrl)}><Clipboard /> Copy link</Button>}
-                {installed && hostedUrl ? <a className="btn btn-primary" href={hostedUrl} target="_blank" rel="noreferrer"><ExternalLink /> Open hosted assistant</a> : <Button variant="primary" disabled={installHosted.isPending || installed} onClick={() => installHosted.mutate()}><Sparkles />{installHosted.isPending ? "Launching…" : installed ? "Hosted assistant ready" : "Launch hosted assistant"}</Button>}
+                {installed && hostedUrl ? (
+                  <>
+                    <Button
+                      disabled={installHosted.isPending}
+                      onClick={() => installHosted.mutate()}
+                    >
+                      <RefreshCw className={installHosted.isPending ? "spin" : undefined} />
+                      {installHosted.isPending ? "Refreshing…" : "Refresh hosted link"}
+                    </Button>
+                    <a className="btn btn-primary" href={hostedUrl} target="_blank" rel="noreferrer">
+                      <ExternalLink /> Open hosted assistant
+                    </a>
+                  </>
+                ) : (
+                  <Button
+                    variant="primary"
+                    disabled={installHosted.isPending}
+                    onClick={() => installHosted.mutate()}
+                  >
+                    <Sparkles />
+                    {installHosted.isPending ? "Launching…" : "Launch hosted assistant"}
+                  </Button>
+                )}
               </div>
             </div>;
           })}
