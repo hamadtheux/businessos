@@ -346,7 +346,10 @@ async def list_deployment_targets(
         if target_type == "hosted":
             state = deployment.state if deployment else "available"
             instructions = ["Enable the hosted assistant, then share the link or QR code."]
-            hosted_url = deployment.public_path if deployment else None
+            # Hosted URLs are platform-owned and must always be derived from
+            # the current runtime configuration. Never trust a previously
+            # persisted origin because production domains can change.
+            hosted_url = _hosted_url(config.widget_public_id) if deployment else None
         elif target_type == "manual_embed":
             state = "needs_manual_step"
             instructions = ["Open Advanced, copy the embed code, and add it to the website once."]
