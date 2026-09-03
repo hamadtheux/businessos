@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from datetime import UTC, date, datetime
@@ -11,13 +12,13 @@ from uuid import uuid4
 os.environ.setdefault("AIBOS_DATABASE_URL", "postgresql+asyncpg://database.invalid/test")
 os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 
-from app.exceptions.marketing import MarketingStateError, MarketingValidationError  # noqa: E402
+from app.exceptions.marketing import MarketingAIError, MarketingStateError, MarketingValidationError  # noqa: E402
 from app.models.audit_log import AuditLog  # noqa: E402
 from app.models.business import Business  # noqa: E402
 from app.models.catalog_item import CatalogItem  # noqa: E402
 from app.models.marketing import Campaign, CampaignChannelPlan, Competitor, CompetitorObservation, MarketingContent, MarketingPlan, MarketingTrend, SocialSchedule  # noqa: E402
 from app.models.opportunity import Opportunity  # noqa: E402
-from app.schemas.marketing import CampaignCreate, CampaignGenerateRequest, ChannelPlanCreate, ContentCreate, ContentVersionCreate, CreativeBriefCreate, PerformanceCreate, PlanGenerateRequest, ScheduleCreate, TrendOpportunityRequest  # noqa: E402
+from app.schemas.marketing import CampaignCreate, CampaignGenerateRequest, ChannelPlanCreate, ContentCreate, ContentGenerateRequest, ContentVersionCreate, CreativeBriefCreate, PerformanceCreate, PlanGenerateRequest, ScheduleCreate, TrendOpportunityRequest  # noqa: E402
 from app.services.marketing import (  # noqa: E402
     _allocate_budget,
     _page,
@@ -33,6 +34,7 @@ from app.services.marketing import (  # noqa: E402
     create_schedule,
     derive_metrics,
     generate_campaign,
+    generate_content,
     generate_plan,
     learn_from_performance,
     marketing_analytics,
@@ -196,6 +198,252 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(len(plan.measurement_goals), 1)
         self.assertLessEqual(len(plan.measurement_goals[0]), 160)
+
+    async def test_ai_content_generation_persists_structured_grounded_metadata(self) -> None:
+        execution = SimpleNamespace(
+            context_revision="a" * 64,
+            business_brain_source_count=3,
+            memory_source_count=2,
+            output=SimpleNamespace(
+                summary=json.dumps({
+                    "title": "Generated launch title",
+                    "body": "A grounded Instagram post based on trusted business context.",
+                    "cta": "Explore the collection",
+                    "creative_brief": "Use the saved brand palette with a clean product-led composition.",
+                    "recommended_channel": "instagram",
+                    "generation_reasoning": "Lead with the product benefit while preserving the established brand tone.",
+                    "evidence_source_ids": [],
+                }),
+                recommendations=[],
+                proposed_actions=[],
+            ),
+        )
+        session = _ScalarSession([])
+
+        with patch(
+            "app.services.marketing._execute_cmo",
+            new=AsyncMock(return_value=execution),
+        ) as runtime:
+            content = await generate_content(
+                session,
+                business_id=BUSINESS_ID,
+                actor_user_id=USER_ID,
+                data=ContentGenerateRequest(
+                    prompt="Promote our new collection",
+                    channel="instagram",
+                    content_type="social_post",
+                    title="Owner launch title",
+                    language="en",
+                ),
+                provider=SimpleNamespace(),
+            )
+
+        self.assertTrue(content.ai_generated)
+        self.assertEqual(content.version, 1)
+        self.assertEqual(content.title, "Owner launch title")
+        self.assertEqual(
+            content.body,
+            "A grounded Instagram post based on trusted business context.",
+        )
+        self.assertEqual(content.cta, "Explore the collection")
+        self.assertEqual(
+            content.creative_brief,
+            "Use the saved brand palette with a clean product-led composition.",
+        )
+        self.assertEqual(
+            content.generation_reasoning,
+            "Lead with the product benefit while preserving the established brand tone.",
+        )
+        self.assertEqual(content.recommended_for, "instagram social post")
+
+        self.assertEqual(len(content.source_evidence), 1)
+        evidence = content.source_evidence[0]
+        self.assertEqual(evidence["classification"], "trusted_context_assembly")
+        self.assertEqual(
+            evidence["source_type"],
+            "business_brain_and_permitted_memory",
+        )
+        self.assertEqual(evidence["source_id"], "a" * 64)
+        self.assertEqual(evidence["provenance_role"], "provided_to_model")
+        self.assertIn("3 Business Brain", evidence["summary"])
+        self.assertIn("2 permitted memory", evidence["summary"])
+
+        task = runtime.await_args.args[2]
+        self.assertIn("trusted Business Brain and permitted memory", task)
+        self.assertIn("recommended_channel must be exactly instagram", task)
+        self.assertIn(
+            "Do not send, schedule, approve, or publish anything",
+            task,
+        )
+
+        self.assertFalse(
+            any(type(item).__name__ == "AIAction" for item in session.added)
+        )
+        self.assertFalse(
+            any(isinstance(item, SocialSchedule) for item in session.added)
+        )
+
+    async def test_ai_content_generation_rejects_wrong_generated_channel(self) -> None:
+        execution = SimpleNamespace(
+            context_revision="b" * 64,
+            business_brain_source_count=2,
+            memory_source_count=1,
+            output=SimpleNamespace(
+                summary=json.dumps({
+                    "title": "Generated title",
+                    "body": "Grounded copy.",
+                    "cta": None,
+                    "creative_brief": "Use the brand identity.",
+                    "recommended_channel": "facebook",
+                    "generation_reasoning": "A short user-visible rationale.",
+                    "evidence_source_ids": [],
+                }),
+                recommendations=[],
+                proposed_actions=[],
+            ),
+        )
+        session = _ScalarSession([])
+
+        with patch(
+            "app.services.marketing._execute_cmo",
+            new=AsyncMock(return_value=execution),
+        ):
+            with self.assertRaises(MarketingAIError):
+                await generate_content(
+                    session,
+                    business_id=BUSINESS_ID,
+                    actor_user_id=USER_ID,
+                    data=ContentGenerateRequest(
+                        prompt="Create an Instagram post",
+                        channel="instagram",
+                        content_type="social_post",
+                    ),
+                    provider=SimpleNamespace(),
+                )
+
+        self.assertFalse(
+            any(isinstance(item, MarketingContent) for item in session.added)
+        )
+
+    async def test_ai_content_generation_rejects_malformed_structured_output(self) -> None:
+        execution = SimpleNamespace(
+            context_revision="c" * 64,
+            business_brain_source_count=1,
+            memory_source_count=0,
+            output=SimpleNamespace(
+                summary="This is not structured JSON.",
+                recommendations=[],
+                proposed_actions=[],
+            ),
+        )
+        session = _ScalarSession([])
+
+        with patch(
+            "app.services.marketing._execute_cmo",
+            new=AsyncMock(return_value=execution),
+        ):
+            with self.assertRaises(MarketingAIError):
+                await generate_content(
+                    session,
+                    business_id=BUSINESS_ID,
+                    actor_user_id=USER_ID,
+                    data=ContentGenerateRequest(
+                        prompt="Create a post",
+                        channel="instagram",
+                        content_type="social_post",
+                    ),
+                    provider=SimpleNamespace(),
+                )
+
+        self.assertFalse(
+            any(isinstance(item, MarketingContent) for item in session.added)
+        )
+
+    async def test_ai_content_generation_rejects_untrusted_evidence_ids(self) -> None:
+        execution = SimpleNamespace(
+            context_revision="d" * 64,
+            business_brain_source_count=2,
+            memory_source_count=0,
+            output=SimpleNamespace(
+                summary=json.dumps({
+                    "title": "Generated title",
+                    "body": "Grounded copy.",
+                    "cta": None,
+                    "creative_brief": "Use the brand identity.",
+                    "recommended_channel": "instagram",
+                    "generation_reasoning": "A short user-visible rationale.",
+                    "evidence_source_ids": ["model-invented-source"],
+                }),
+                recommendations=[],
+                proposed_actions=[],
+            ),
+        )
+        session = _ScalarSession([])
+
+        with patch(
+            "app.services.marketing._execute_cmo",
+            new=AsyncMock(return_value=execution),
+        ):
+            with self.assertRaises(MarketingAIError):
+                await generate_content(
+                    session,
+                    business_id=BUSINESS_ID,
+                    actor_user_id=USER_ID,
+                    data=ContentGenerateRequest(
+                        prompt="Create a post",
+                        channel="instagram",
+                        content_type="social_post",
+                    ),
+                    provider=SimpleNamespace(),
+                )
+
+        self.assertFalse(
+            any(isinstance(item, MarketingContent) for item in session.added)
+        )
+
+    async def test_ai_content_generation_rejects_model_proposed_actions(self) -> None:
+        execution = SimpleNamespace(
+            context_revision="e" * 64,
+            business_brain_source_count=2,
+            memory_source_count=0,
+            output=SimpleNamespace(
+                summary=json.dumps({
+                    "title": "Generated title",
+                    "body": "Grounded copy.",
+                    "cta": None,
+                    "creative_brief": "Use the brand identity.",
+                    "recommended_channel": "instagram",
+                    "generation_reasoning": "A short user-visible rationale.",
+                    "evidence_source_ids": [],
+                }),
+                recommendations=[],
+                proposed_actions=[
+                    SimpleNamespace(action_type="publish_social_post"),
+                ],
+            ),
+        )
+        session = _ScalarSession([])
+
+        with patch(
+            "app.services.marketing._execute_cmo",
+            new=AsyncMock(return_value=execution),
+        ):
+            with self.assertRaises(MarketingAIError):
+                await generate_content(
+                    session,
+                    business_id=BUSINESS_ID,
+                    actor_user_id=USER_ID,
+                    data=ContentGenerateRequest(
+                        prompt="Create a post",
+                        channel="instagram",
+                        content_type="social_post",
+                    ),
+                    provider=SimpleNamespace(),
+                )
+
+        self.assertFalse(
+            any(isinstance(item, MarketingContent) for item in session.added)
+        )
 
     async def test_cmo_generation_uses_existing_runtime_with_trusted_context_flags(self) -> None:
         output = SimpleNamespace(summary="Conclusion", recommendations=[], proposed_actions=[SimpleNamespace(action_type="launch_meta_campaign")])

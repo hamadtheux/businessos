@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from pydantic import ValidationError
 from sqlalchemy import Select, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -66,6 +67,7 @@ from app.schemas.marketing import (
     PerformanceCreate,
     PlanGenerateRequest,
     ScheduleCreate,
+    ScheduledContentProposal,
     TopContent,
     TrendCreate,
     TrendOpportunityRequest,
@@ -987,19 +989,121 @@ async def change_content_status(session: AsyncSession, *, business_id: UUID, con
     return value
 
 
-async def generate_content(session: AsyncSession, *, business_id: UUID, actor_user_id: UUID, data: ContentGenerateRequest, provider: AIAgentProvider) -> MarketingContent:
+async def generate_content(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    actor_user_id: UUID,
+    data: ContentGenerateRequest,
+    provider: AIAgentProvider,
+) -> MarketingContent:
     campaign_context = ""
-    if data.campaign_id:
-        campaign = await get_campaign(session, business_id=business_id, campaign_id=data.campaign_id)
-        campaign_context = f" Campaign objective: {campaign.objective}. Offer: {campaign.offer or 'none provided'}."
-    task = (
-        f"Prepare one {data.content_type} draft for {data.channel} in language {data.language}. {data.prompt}.{campaign_context} "
-        "Use only trusted catalog and brand facts. Return final copy in the summary and optional CTA/headline variants as recommendations. Do not send or publish it."
+    recommended_for = (
+        f"{data.channel.replace('_', ' ')} "
+        f"{data.content_type.replace('_', ' ')}"
     )
-    output = await _run_cmo(session, business_id, task, provider)
-    title = data.title or (output.recommendations[0] if output.recommendations else data.prompt)[:180]
-    cta = output.recommendations[-1][:300] if output.recommendations else None
-    return await create_content(session, business_id=business_id, actor_user_id=actor_user_id, parent_content_id=data.parent_content_id, ai_generated=True, data=ContentCreate(campaign_id=data.campaign_id, channel=data.channel, content_type=data.content_type, title=title, body=output.summary, cta=cta, language=data.language))
+
+    if data.campaign_id:
+        campaign = await get_campaign(
+            session,
+            business_id=business_id,
+            campaign_id=data.campaign_id,
+        )
+        campaign_context = (
+            "\nCampaign context:"
+            f"\n- Name: {campaign.name}"
+            f"\n- Objective: {campaign.objective}"
+            f"\n- Offer: {campaign.offer or 'none provided'}"
+        )
+        recommended_for = f"{campaign.name} · {data.channel.replace('_', ' ')}"
+
+    task = (
+        f"Prepare one review-ready {data.content_type} draft for "
+        f"{data.channel} in language {data.language}.\n"
+        f"Owner request: {data.prompt.strip()}"
+        f"{campaign_context}\n\n"
+        "Use only trusted Business Brain and permitted memory context. "
+        "Do not invent products, prices, offers, claims, testimonials, customer facts, "
+        "business facts, or capabilities that are not supported by the provided context. "
+        "Adapt the copy naturally to the requested channel and content type. "
+        "The creative brief should describe a polished on-brand visual direction using "
+        "known brand identity and product/service context without pretending an image "
+        "has already been generated. "
+        "generation_reasoning must be a short user-visible rationale explaining the "
+        "marketing direction; never provide hidden chain-of-thought or private reasoning. "
+        "Return recommendations as an empty list and put exactly one JSON object in "
+        "summary with these named fields: title, body, cta, creative_brief, "
+        "recommended_channel, generation_reasoning, evidence_source_ids. "
+        "Set evidence_source_ids to an empty list because authoritative context provenance "
+        "is attached by the server. "
+        f"recommended_channel must be exactly {data.channel}. "
+        "Do not include workflow status fields. Do not send, schedule, approve, or publish anything."
+    )
+
+    execution_result = await _execute_cmo(
+        session,
+        business_id,
+        task,
+        provider,
+    )
+
+    try:
+        proposal = ScheduledContentProposal.model_validate_json(
+            execution_result.output.summary
+        )
+    except ValidationError:
+        raise MarketingAIError from None
+
+    if (
+        execution_result.output.recommendations
+        or execution_result.output.proposed_actions
+        or proposal.recommended_channel != data.channel
+        or proposal.evidence_source_ids
+    ):
+        raise MarketingAIError
+
+    title = (
+        data.title.strip()
+        if data.title is not None and data.title.strip()
+        else proposal.title
+    )
+
+    context_evidence = {
+        "classification": "trusted_context_assembly",
+        "source_type": "business_brain_and_permitted_memory",
+        "source_id": execution_result.context_revision,
+        "summary": (
+            f"Runtime assembled {execution_result.business_brain_source_count} "
+            f"Business Brain and {execution_result.memory_source_count} "
+            "permitted memory sources."
+        ),
+        "provenance_role": "provided_to_model",
+    }
+
+    content = await create_content(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        parent_content_id=data.parent_content_id,
+        ai_generated=True,
+        data=ContentCreate(
+            campaign_id=data.campaign_id,
+            channel=data.channel,
+            content_type=data.content_type,
+            title=title,
+            body=proposal.body,
+            cta=proposal.cta,
+            language=data.language,
+        ),
+    )
+
+    content.creative_brief = proposal.creative_brief
+    content.generation_reasoning = proposal.generation_reasoning
+    content.recommended_for = recommended_for[:500]
+    content.source_evidence = [context_evidence]
+    await _flush(session)
+
+    return content
 
 
 async def create_creative_brief(session: AsyncSession, *, business_id: UUID, actor_user_id: UUID, data: CreativeBriefCreate, provider: AIAgentProvider) -> CreativeAsset:
