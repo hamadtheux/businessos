@@ -238,3 +238,13 @@ export function humanizeOnboardingSaveError(error: unknown) {
   }
   return humanizeApiError(error, fallback);
 }
+
+export function isOnboardingWebsiteValidationError(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status !== 422) return false;
+
+  const detail = error.data?.detail;
+  return (
+    Array.isArray(detail) &&
+    detail.some((issue) => issue.loc.at(-1) === "website_url")
+  );
+}

@@ -643,19 +643,31 @@ const HERO_V6_CSS = `
 }
 
 .hero6-brain-logo {
-  width: 44px;
-  height: 44px;
+  width: 48px;
+  height: 48px;
 
-  margin: 0 auto;
+  margin: 0 auto 10px;
 
   display: grid;
   place-items: center;
 }
 
+.hero6-brain-logo .hero6-brain-product-logo {
+  width: 48px;
+  height: 48px;
+}
+
+.hero6-brain-product-logo img {
+  width: 100%;
+  height: 100%;
+
+  object-fit: contain;
+}
+
 .hero6-brain-box > strong {
   display: block;
 
-  margin-top: 7px;
+  margin-top: 0;
 
   color: #344054;
 
@@ -1561,7 +1573,7 @@ function HeroVisual() {
 
             <div className="hero6-brain-box">
               <div className="hero6-brain-logo">
-                <ProductLogo size="lg" />
+                <ProductLogo className="hero6-brain-product-logo" size="lg" />
               </div>
 
               <strong>Business Brain</strong>

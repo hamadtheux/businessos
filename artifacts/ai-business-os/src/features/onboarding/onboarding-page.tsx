@@ -41,10 +41,15 @@ import {
   CatalogPersistenceAfterBusinessCreationError,
   createOnboardingBusinessId,
   humanizeOnboardingSaveError,
+  isOnboardingWebsiteValidationError,
   onboardingSetupSteps,
   persistOnboardingCatalog,
   saveOnboardingWorkspace,
 } from "./onboarding-save";
+import {
+  normalizeWebsiteInput,
+  WEBSITE_INPUT_ERROR,
+} from "./onboarding-website";
 import { ProductCatalogStep } from "./product-catalog-step";
 
 const onboardingChannels = [
@@ -83,7 +88,9 @@ export function OnboardingPage() {
   const [catalogSaveFailed, setCatalogSaveFailed] = useState(false);
   const [businessId, setBusinessId] = useState(createOnboardingBusinessId);
   const saveInFlight = useRef(false);
+  const websiteInputRef = useRef<HTMLInputElement>(null);
   const [notice, setNotice] = useState("");
+  const [websiteError, setWebsiteError] = useState("");
   const [draftReady, setDraftReady] = useState(false);
   const [catalog, setCatalog] = useState<CatalogDraft>(() =>
     createInitialCatalogDraft(),
@@ -245,6 +252,14 @@ export function OnboardingPage() {
         setSetupError("");
         setSetupState("success");
       } catch (error) {
+        if (isOnboardingWebsiteValidationError(error)) {
+          setWebsiteError(WEBSITE_INPUT_ERROR);
+          setSetupError("");
+          setSetupState("idle");
+          setStep(0);
+          window.setTimeout(() => websiteInputRef.current?.focus(), 0);
+          return;
+        }
         const catalogWasSaved =
           error instanceof CatalogPersistenceAfterBusinessCreationError;
         const businessWasSaved =
@@ -278,6 +293,13 @@ export function OnboardingPage() {
     value: (typeof form)[K],
   ) => {
     setForm((current) => ({ ...current, [key]: value }));
+  };
+
+  const updateWebsite = (value: string) => {
+    update("website", value);
+    if (websiteError && !normalizeWebsiteInput(value).error) {
+      setWebsiteError("");
+    }
   };
 
   const toggleChannel = (
@@ -314,6 +336,18 @@ export function OnboardingPage() {
   };
 
   const next = () => {
+    if (step === 0) {
+      const website = normalizeWebsiteInput(form.website);
+      if (website.error) {
+        setWebsiteError(website.error);
+        websiteInputRef.current?.focus();
+        return;
+      }
+      setWebsiteError("");
+      if (website.value !== form.website) {
+        update("website", website.value);
+      }
+    }
     if (!canContinue) {
       setNotice(
         step === 0
@@ -540,14 +574,29 @@ export function OnboardingPage() {
                     ))}
                   </select>
                 </div>
-                <div className="field">
-                  <label>Website</label>
+                <div className="field onboarding-website-field">
+                  <label htmlFor="onboarding-website">Website</label>
                   <input
+                    id="onboarding-website"
+                    ref={websiteInputRef}
                     value={form.website}
-                    onChange={(event) => update("website", event.target.value)}
+                    onChange={(event) => updateWebsite(event.target.value)}
+                    aria-invalid={Boolean(websiteError)}
+                    aria-describedby={
+                      websiteError ? "onboarding-website-error" : undefined
+                    }
                     placeholder="yourbusiness.com"
                     data-testid="input-onboarding-website"
                   />
+                  {websiteError && (
+                    <span
+                      id="onboarding-website-error"
+                      className="field-error"
+                      role="alert"
+                    >
+                      {websiteError}
+                    </span>
+                  )}
                 </div>
                 <div className="field">
                   <label>Location</label>

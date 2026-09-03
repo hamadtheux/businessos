@@ -2656,6 +2656,13 @@ td strong {
 .onboarding-form-gap {
   margin-top: 16px;
 }
+.onboarding-website-field input[aria-invalid="true"] {
+  border-color: #ce7770;
+  background: #fffafa;
+}
+.onboarding-website-field .field-error {
+  line-height: 1.4;
+}
 .onboarding-list-head {
   display: flex;
   justify-content: space-between;
