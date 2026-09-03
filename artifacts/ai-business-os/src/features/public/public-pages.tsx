@@ -2,6 +2,7 @@ import { useEffect, type CSSProperties, type ReactNode } from "react";
 import { Link } from "wouter";
 import { ProductLogo } from "@/components/product-brand";
 import { PRODUCT_NAME } from "@/config/brand";
+import { mountPublicLandingChatbot } from "./public-chatbot";
 import { MarketingHomePage } from "./public-home";
 
 const SUPPORT_EMAIL = "hamadtheux@gmail.com";
@@ -373,6 +374,8 @@ function LegalSection({
 }
 
 export function PublicHomePage() {
+  useEffect(() => mountPublicLandingChatbot(), []);
+
   return <MarketingHomePage />;
 }
 
