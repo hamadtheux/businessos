@@ -59,6 +59,7 @@ from app.schemas.marketing import (
     ContentGenerateRequest,
     ContentVersionCreate,
     CreativeBriefCreate,
+    CreativeStrategyProposal,
     LearningResponse,
     MarketingAnalyticsResponse,
     MarketingPlanCreate,
@@ -1149,27 +1150,186 @@ async def generate_content(
     return content
 
 
-async def create_creative_brief(session: AsyncSession, *, business_id: UUID, actor_user_id: UUID, data: CreativeBriefCreate, provider: AIAgentProvider) -> CreativeAsset:
-    campaign = await get_campaign(session, business_id=business_id, campaign_id=data.campaign_id) if data.campaign_id else None
-    content = await get_content(session, business_id=business_id, content_id=data.content_id) if data.content_id else None
+async def create_creative_brief(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    actor_user_id: UUID,
+    data: CreativeBriefCreate,
+    provider: AIAgentProvider,
+) -> CreativeAsset:
+    campaign = (
+        await get_campaign(
+            session,
+            business_id=business_id,
+            campaign_id=data.campaign_id,
+        )
+        if data.campaign_id
+        else None
+    )
+    content = (
+        await get_content(
+            session,
+            business_id=business_id,
+            content_id=data.content_id,
+        )
+        if data.content_id
+        else None
+    )
+
     if campaign and content and content.campaign_id != campaign.id:
         raise MarketingValidationError
-    task = (
-        "Prepare a structured creative brief using trusted branding, brand voice, offer and catalog context. "
-        f"Asset: {data.asset_type}. Instructions: {data.instructions}. Include visual direction, headline, supporting copy, CTA, product focus, aspect ratio and prohibited claims. "
-        "Do not generate an image or claim one was generated."
+
+    campaign_context = ""
+    if campaign is not None:
+        campaign_context = (
+            "\n\nAuthoritative campaign context:"
+            f"\n- Name: {campaign.name}"
+            f"\n- Objective: {campaign.objective}"
+            f"\n- Offer: {campaign.offer or 'none provided'}"
+        )
+
+    content_context = ""
+    expected_channel: str | None = None
+
+    if content is not None:
+        expected_channel = content.channel
+        content_context = (
+            "\n\nAuthoritative content context:"
+            f"\n- Channel: {content.channel}"
+            f"\n- Content type: {content.content_type}"
+            f"\n- Title: {content.title}"
+            f"\n- Body: {content.body}"
+            f"\n- CTA: {content.cta or 'none provided'}"
+            f"\n- Existing creative brief: "
+            f"{content.creative_brief or 'none provided'}"
+        )
+
+    requested_ratio = (
+        data.aspect_ratio.strip()
+        if data.aspect_ratio is not None and data.aspect_ratio.strip()
+        else "not specified"
     )
-    output = await _run_cmo(session, business_id, task, provider)
+
+    task = (
+        "Act as the senior Creative Intelligence team for this business: "
+        "marketing strategist, brand strategist, PR reviewer, copywriter, and "
+        "creative director. The business owner may provide a very short, vague, "
+        "or non-technical request. Do not require expert prompting from them. "
+        "Convert their intent into a strong professional creative strategy using "
+        "only trusted Business Brain and permitted memory context.\n\n"
+        f"Owner request: {data.instructions.strip()}\n"
+        f"Requested asset type: {data.asset_type}\n"
+        f"Requested aspect ratio: {requested_ratio}"
+        f"{campaign_context}"
+        f"{content_context}\n\n"
+
+        "GROUNDING RULES:\n"
+        "- Owner instructions express desired intent, not authoritative business facts.\n"
+        "- Use only products, services, prices, offers, benefits, brand details, "
+        "business facts, claims, and capabilities supported by trusted context.\n"
+        "- Never invent testimonials, awards, certifications, statistics, customer "
+        "facts, inventory, discounts, urgency, guarantees, medical outcomes, property "
+        "inventory, or performance claims.\n"
+        "- If the owner gives weak instructions, make professional creative decisions "
+        "from available context rather than asking them to become a prompt engineer.\n"
+        "- If some detail is unavailable, use a tasteful generic creative treatment "
+        "instead of fabricating a fact.\n\n"
+
+        "MARKETING + PR STANDARD:\n"
+        "- Determine the strongest defensible audience, marketing angle, hook, "
+        "headline, supporting message and CTA.\n"
+        "- Protect brand reputation and avoid manipulative, deceptive, unsafe, or "
+        "unsupported wording.\n"
+        "- Adapt the strategy to the requested asset and known channel.\n"
+        "- Make the creative direction specific enough that an expert graphic "
+        "designer could execute it without guessing.\n"
+        "- The visual concept must reserve useful negative space for deterministic "
+        "logo, headline, supporting copy and CTA composition.\n"
+        "- Do not tell an image model to redraw the logo or render final typography.\n"
+        "- Do not claim that an image has already been generated.\n\n"
+
+        "OUTPUT CONTRACT:\n"
+        "Return recommendations as an empty list. Do not propose actions. "
+        "Put exactly one JSON object in summary using these exact fields:\n"
+        "marketing_goal, target_audience, audience_insight, campaign_angle, hook, "
+        "headline, supporting_message, cta, visual_concept, composition_direction, "
+        "subject_focus, mood, lighting, negative_space, brand_treatment, "
+        "recommended_channel, pr_guardrails, prohibited_claims, evidence_source_ids.\n"
+        "pr_guardrails and prohibited_claims must be short user-visible lists. "
+        "evidence_source_ids must be an empty list because authoritative provenance "
+        "is owned by the server. Never include hidden reasoning or chain-of-thought."
+    )
+
+    execution = await _execute_cmo(
+        session,
+        business_id,
+        task,
+        provider,
+    )
+
+    try:
+        strategy = CreativeStrategyProposal.model_validate_json(
+            execution.output.summary
+        )
+    except ValidationError:
+        raise MarketingAIError from None
+
+    if (
+        execution.output.recommendations
+        or execution.output.proposed_actions
+        or strategy.evidence_source_ids
+    ):
+        raise MarketingAIError
+
+    if (
+        expected_channel is not None
+        and strategy.recommended_channel != expected_channel
+    ):
+        raise MarketingAIError
+
+    # Keep the existing CreativeAsset contract and database model intact.
+    # visual_direction now contains canonical structured strategy JSON rather
+    # than unvalidated provider prose. A later generation step can parse this
+    # exact strategy without asking the model to reinterpret the owner's goal.
+    visual_direction = strategy.model_dump_json(
+        exclude={"evidence_source_ids"},
+    )
+
+    if len(visual_direction) > 5000:
+        raise MarketingAIError
+
     value = CreativeAsset(
-        business_id=business_id, campaign_id=data.campaign_id, content_id=data.content_id,
-        asset_type=data.asset_type, source_type="ai_brief", instructions=data.instructions,
-        visual_direction=(output.summary + "\n" + "\n".join(output.recommendations))[:5000],
-        generation_status="brief_ready", storage_reference=None,
-        width=data.width, height=data.height, aspect_ratio=data.aspect_ratio, alt_text=data.alt_text,
+        business_id=business_id,
+        campaign_id=data.campaign_id,
+        content_id=data.content_id,
+        asset_type=data.asset_type,
+        source_type="ai_brief",
+        instructions=data.instructions,
+        visual_direction=visual_direction,
+        generation_status="brief_ready",
+        storage_reference=None,
+        width=data.width,
+        height=data.height,
+        aspect_ratio=data.aspect_ratio,
+        alt_text=data.alt_text,
     )
     session.add(value)
     await _flush(session)
-    record_audit(session, business_id=business_id, actor_user_id=actor_user_id, event_type="marketing.creative_brief_created", entity_type="marketing_creative_asset", entity_id=value.id, summary="Created an internal creative brief; no image provider was called.")
+
+    record_audit(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        event_type="marketing.creative_brief_created",
+        entity_type="marketing_creative_asset",
+        entity_id=value.id,
+        summary=(
+            "Created a grounded structured Creative Intelligence strategy; "
+            "no image provider was called."
+        ),
+    )
+
     return value
 
 

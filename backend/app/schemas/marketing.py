@@ -390,6 +390,42 @@ class CampaignPreflightResponse(MarketingSchema):
     issues: list[CampaignPreflightIssue] = Field(default_factory=list)
 
 
+class CreativeStrategyProposal(MarketingSchema):
+    """
+    Reviewable creative-director output produced from trusted business context.
+
+    This is not private chain-of-thought. It contains only durable marketing
+    conclusions that are safe and useful for the business owner to inspect.
+    """
+
+    marketing_goal: str = Field(min_length=1, max_length=300)
+    target_audience: str = Field(min_length=1, max_length=500)
+    audience_insight: str = Field(min_length=1, max_length=500)
+
+    campaign_angle: str = Field(min_length=1, max_length=500)
+    hook: str = Field(min_length=1, max_length=280)
+    headline: str = Field(min_length=1, max_length=180)
+    supporting_message: str = Field(min_length=1, max_length=600)
+    cta: str | None = Field(default=None, max_length=300)
+
+    visual_concept: str = Field(min_length=1, max_length=900)
+    composition_direction: str = Field(min_length=1, max_length=700)
+    subject_focus: str = Field(min_length=1, max_length=500)
+    mood: str = Field(min_length=1, max_length=240)
+    lighting: str = Field(min_length=1, max_length=240)
+    negative_space: str = Field(min_length=1, max_length=300)
+    brand_treatment: str = Field(min_length=1, max_length=700)
+
+    recommended_channel: str = Field(min_length=1, max_length=32)
+
+    pr_guardrails: list[str] = Field(default_factory=list, max_length=8)
+    prohibited_claims: list[str] = Field(default_factory=list, max_length=8)
+
+    # The model must never invent provenance. The server owns authoritative
+    # source identity and validates that this remains empty.
+    evidence_source_ids: list[str] = Field(default_factory=list, max_length=20)
+
+
 class CreativeBriefCreate(MarketingSchema):
     campaign_id: UUID | None = None
     content_id: UUID | None = None
