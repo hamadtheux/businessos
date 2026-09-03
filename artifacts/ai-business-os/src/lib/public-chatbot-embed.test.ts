@@ -101,7 +101,7 @@ test("public landing embed uses the exact production loader and opaque widget ID
   );
   assert.equal(
     PUBLIC_CHATBOT_WIDGET_ID,
-    "7FjvNAaibDpoFqAVxJW5gVss6yWIUIm5eK3CXlsLbAo",
+    "-m9auDA_XqXcj7943GayIrDyoVLpLq0lXO1gPsC-Tfk",
   );
   assert.doesNotMatch(embed, /localhost|127\.0\.0\.1/);
   for (const forbidden of ["businessId", "tenantId", "apiKey", "authToken"]) {

@@ -1,7 +1,7 @@
 export const PUBLIC_CHATBOT_LOADER_URL =
   "https://9dbrain.com/widget-loader.js";
 export const PUBLIC_CHATBOT_WIDGET_ID =
-  "7FjvNAaibDpoFqAVxJW5gVss6yWIUIm5eK3CXlsLbAo";
+  "-m9auDA_XqXcj7943GayIrDyoVLpLq0lXO1gPsC-Tfk";
 
 const loaderSelector =
   `script[src="${PUBLIC_CHATBOT_LOADER_URL}"][data-widget-id="${PUBLIC_CHATBOT_WIDGET_ID}"]`;
