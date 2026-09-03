@@ -158,7 +158,7 @@ export function ChatbotPage() {
   const installHosted = useMutation({
     mutationFn: () => chatbotApi.installHosted(activeBusinessId),
     onSuccess: (target) => {
-      setStatus("Hosted AI assistant installed and verified on the platform-owned chat page.");
+      setStatus("Hosted AI assistant link refreshed and verified.");
       void queryClient.invalidateQueries({ queryKey: ["chatbot", activeBusinessId] });
       const hostedUrl = safeHttpUrl(target.hosted_url);
       if (hostedUrl) void navigator.clipboard.writeText(hostedUrl);
