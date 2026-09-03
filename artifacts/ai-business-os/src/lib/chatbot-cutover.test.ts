@@ -79,6 +79,7 @@ test("widget loader isolates host CSS and bootstraps from the actual host origin
   assert.match(source, /const apiBase = scriptUrl\.origin\.replace\(\/\\\/\+\$\/, ""\)/);
   assert.match(source, /const widgetAppUrl = new URL\("widget\.html", scriptUrl\)\.toString\(\)/);
   assert.match(source, /\/api\/v1\/public\/widgets\/\$\{encodeURIComponent\(widgetId\)\}\/config/);
+  assert.match(source, /referrerPolicy: "origin"/);
   assert.match(source, /\^\[A-Za-z0-9_-\]\{40,96\}\$/);
   assert.match(source, /document\.querySelector\(`\[data-aibos-widget-host=/);
   assert.match(source, /attachShadow\(\{ mode: "closed" \}\)/);

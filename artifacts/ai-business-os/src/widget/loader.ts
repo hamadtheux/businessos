@@ -42,7 +42,7 @@ type LoaderSession = { session_token: string; expires_at: string; locale: string
   document.body.append(host);
 
   const bootstrap = async () => {
-    const response = await fetch(`${apiBase}/api/v1/public/widgets/${encodeURIComponent(widgetId)}/config`, { credentials: "omit", mode: "cors" });
+    const response = await fetch(`${apiBase}/api/v1/public/widgets/${encodeURIComponent(widgetId)}/config`, { credentials: "omit", mode: "cors", referrerPolicy: "origin" });
     if (!response.ok) throw new Error("Widget unavailable");
     config = await response.json() as LoaderConfig;
     wrap.classList.toggle("left", config.position === "bottom_left");
