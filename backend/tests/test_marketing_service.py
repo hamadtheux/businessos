@@ -98,13 +98,78 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_content_edit_creates_new_version_without_overwrite(self) -> None:
         root_id = uuid4()
-        parent = MarketingContent(id=root_id, business_id=BUSINESS_ID, campaign_id=None, channel="instagram", content_type="social_post", title="Original", body="Original body", cta=None, language="en", status="approved", ai_generated=False, version=1, parent_content_id=None, root_content_id=root_id, created_by_user_id=USER_ID, created_at=NOW, updated_at=NOW)
+        parent = MarketingContent(
+            id=root_id,
+            business_id=BUSINESS_ID,
+            campaign_id=None,
+            channel="instagram",
+            content_type="social_post",
+            title="Original",
+            body="Original body",
+            cta="Shop now",
+            language="en",
+            status="approved",
+            ai_generated=True,
+            version=1,
+            parent_content_id=None,
+            root_content_id=root_id,
+            created_by_user_id=USER_ID,
+            creative_brief="Use the saved blue and gold brand direction.",
+            generation_reasoning="Lead with the strongest supported product benefit.",
+            recommended_for="Instagram product launch",
+            source_evidence=[
+                {
+                    "classification": "trusted_context_assembly",
+                    "source_type": "business_brain_and_permitted_memory",
+                    "source_id": "a" * 64,
+                    "summary": "Runtime assembled trusted business context.",
+                    "provenance_role": "provided_to_model",
+                }
+            ],
+            proposal_key="original-proposal",
+            created_at=NOW,
+            updated_at=NOW,
+        )
         session = _ScalarSession([parent, 1])
-        child = await create_content_version(session, business_id=BUSINESS_ID, content_id=parent.id, actor_user_id=USER_ID, data=ContentVersionCreate(title="Edited", body="Edited body"))
+
+        child = await create_content_version(
+            session,
+            business_id=BUSINESS_ID,
+            content_id=parent.id,
+            actor_user_id=USER_ID,
+            data=ContentVersionCreate(
+                title="Edited",
+                body="Edited body",
+                cta="Explore now",
+            ),
+        )
+
+        # Prior version remains immutable.
+        self.assertEqual(parent.title, "Original")
         self.assertEqual(parent.body, "Original body")
+        self.assertEqual(parent.cta, "Shop now")
+
+        # Manual edit becomes a distinct version in the same lineage.
+        self.assertEqual(child.title, "Edited")
+        self.assertEqual(child.body, "Edited body")
+        self.assertEqual(child.cta, "Explore now")
         self.assertEqual(child.version, 2)
         self.assertEqual(child.parent_content_id, parent.id)
         self.assertEqual(child.root_content_id, parent.root_content_id)
+        self.assertFalse(child.ai_generated)
+
+        # Trusted CMO context survives the edit.
+        self.assertEqual(child.creative_brief, parent.creative_brief)
+        self.assertEqual(
+            child.generation_reasoning,
+            parent.generation_reasoning,
+        )
+        self.assertEqual(child.recommended_for, parent.recommended_for)
+        self.assertEqual(child.source_evidence, parent.source_evidence)
+        self.assertIsNot(child.source_evidence, parent.source_evidence)
+
+        # Idempotency identity must never be inherited by a new version.
+        self.assertIsNone(child.proposal_key)
 
     async def test_content_version_cannot_change_campaign_or_channel_identity(self) -> None:
         root_id = uuid4()

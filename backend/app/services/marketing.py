@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
@@ -971,9 +972,51 @@ async def create_content(session: AsyncSession, *, business_id: UUID, actor_user
     return value
 
 
-async def create_content_version(session: AsyncSession, *, business_id: UUID, content_id: UUID, actor_user_id: UUID, data: ContentVersionCreate) -> MarketingContent:
-    parent = await get_content(session, business_id=business_id, content_id=content_id)
-    return await create_content(session, business_id=business_id, actor_user_id=actor_user_id, parent_content_id=parent.id, parent_content=parent, data=ContentCreate(campaign_id=parent.campaign_id, channel=parent.channel, content_type=parent.content_type, title=data.title, body=data.body, cta=data.cta, language=parent.language), ai_generated=False)
+async def create_content_version(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    content_id: UUID,
+    actor_user_id: UUID,
+    data: ContentVersionCreate,
+) -> MarketingContent:
+    parent = await get_content(
+        session,
+        business_id=business_id,
+        content_id=content_id,
+    )
+
+    version = await create_content(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        parent_content_id=parent.id,
+        parent_content=parent,
+        data=ContentCreate(
+            campaign_id=parent.campaign_id,
+            channel=parent.channel,
+            content_type=parent.content_type,
+            title=data.title,
+            body=data.body,
+            cta=data.cta,
+            language=parent.language,
+        ),
+        ai_generated=False,
+    )
+
+    # Manual edits create a new immutable content version, but the trusted
+    # marketing context attached to the source version remains part of its
+    # lineage. The new version is still explicitly marked ai_generated=False.
+    #
+    # proposal_key is intentionally NOT copied because it is an idempotency
+    # identity and must remain unique to the proposal that originally created it.
+    version.creative_brief = parent.creative_brief
+    version.generation_reasoning = parent.generation_reasoning
+    version.recommended_for = parent.recommended_for
+    version.source_evidence = deepcopy(parent.source_evidence or [])
+
+    await _flush(session)
+    return version
 
 
 async def change_content_status(session: AsyncSession, *, business_id: UUID, content_id: UUID, actor_user_id: UUID, status: str) -> MarketingContent:
