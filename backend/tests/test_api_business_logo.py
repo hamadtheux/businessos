@@ -569,6 +569,21 @@ class _FakeStorage(ObjectStorage):
             raise self.put_error
         self.objects[object_key] = (content, content_type)
 
+    async def get(
+        self,
+        object_key: str,
+        *,
+        max_bytes: int,
+    ) -> bytes:
+        self.events.append(f"get:{object_key}")
+        value = self.objects.get(object_key)
+        if value is None:
+            raise StorageOperationError("private read detail")
+        content, _content_type = value
+        if len(content) > max_bytes:
+            raise StorageOperationError("private read detail")
+        return content
+
     async def delete(self, object_key: str) -> None:
         self.events.append(f"delete:{object_key}")
         if object_key in self.delete_error_keys:

@@ -43,6 +43,31 @@ class LocalObjectStorage(ObjectStorage):
         except OSError:
             raise StorageOperationError("Unable to store object") from None
 
+    async def get(
+        self,
+        object_key: str,
+        *,
+        max_bytes: int,
+    ) -> bytes:
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+
+        path = self._resolve(object_key)
+
+        def read_bounded() -> bytes:
+            try:
+                with path.open("rb") as file_handle:
+                    content = file_handle.read(max_bytes + 1)
+            except OSError:
+                raise StorageOperationError("Unable to read object") from None
+
+            if len(content) > max_bytes:
+                raise StorageOperationError("Stored object exceeds read limit")
+
+            return content
+
+        return await asyncio.to_thread(read_bounded)
+
     async def delete(self, object_key: str) -> None:
         path = self._resolve(object_key)
         try:

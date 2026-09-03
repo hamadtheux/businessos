@@ -14,6 +14,8 @@ from app.storage.base import (
 class S3Client(Protocol):
     def put_object(self, **kwargs: object) -> object: ...
 
+    def get_object(self, **kwargs: object) -> object: ...
+
     def delete_object(self, **kwargs: object) -> object: ...
 
 
@@ -57,6 +59,65 @@ class S3ObjectStorage(ObjectStorage):
             )
         except Exception:
             raise StorageOperationError("Unable to store object") from None
+
+    async def get(
+        self,
+        object_key: str,
+        *,
+        max_bytes: int,
+    ) -> bytes:
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+
+        key = validate_storage_key(object_key).as_posix()
+
+        def read_bounded() -> bytes:
+            body = None
+            try:
+                response = self.client.get_object(
+                    Bucket=self.bucket,
+                    Key=key,
+                )
+
+                if not isinstance(response, dict):
+                    raise StorageOperationError("Unable to read object")
+
+                content_length = response.get("ContentLength")
+                if (
+                    isinstance(content_length, int)
+                    and content_length > max_bytes
+                ):
+                    raise StorageOperationError(
+                        "Stored object exceeds read limit"
+                    )
+
+                body = response.get("Body")
+                if body is None or not hasattr(body, "read"):
+                    raise StorageOperationError("Unable to read object")
+
+                content = body.read(max_bytes + 1)
+
+                if not isinstance(content, bytes):
+                    raise StorageOperationError("Unable to read object")
+
+                if len(content) > max_bytes:
+                    raise StorageOperationError(
+                        "Stored object exceeds read limit"
+                    )
+
+                return content
+            except StorageOperationError:
+                raise
+            except Exception:
+                raise StorageOperationError("Unable to read object") from None
+            finally:
+                if body is not None and hasattr(body, "close"):
+                    try:
+                        body.close()
+                    except Exception:
+                        pass
+
+        return await asyncio.to_thread(read_bounded)
 
     async def delete(self, object_key: str) -> None:
         key = validate_storage_key(object_key).as_posix()

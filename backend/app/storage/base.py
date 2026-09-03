@@ -25,6 +25,20 @@ class ObjectStorage(ABC):
         """Persist bytes under a server-generated object key."""
 
     @abstractmethod
+    async def get(
+        self,
+        object_key: str,
+        *,
+        max_bytes: int,
+    ) -> bytes:
+        """
+        Read trusted object bytes with an explicit memory bound.
+
+        Callers must choose a limit appropriate to the asset type. Implementations
+        must fail closed rather than return content larger than max_bytes.
+        """
+
+    @abstractmethod
     async def delete(self, object_key: str) -> None:
         """Delete a stored object idempotently."""
 
