@@ -19,6 +19,11 @@ from app.models.catalog_item import CatalogItem  # noqa: E402
 from app.models.marketing import Campaign, CampaignChannelPlan, Competitor, CompetitorObservation, CreativeAsset, MarketingContent, MarketingPlan, MarketingTrend, SocialSchedule  # noqa: E402
 from app.models.opportunity import Opportunity  # noqa: E402
 from app.schemas.marketing import CampaignCreate, CampaignGenerateRequest, ChannelPlanCreate, ContentCreate, ContentGenerateRequest, ContentVersionCreate, CreativeBriefCreate, PerformanceCreate, PlanGenerateRequest, ScheduleCreate, TrendOpportunityRequest  # noqa: E402
+from app.services.creative_provider import (
+    CreativeGenerationResult,
+    CreativeProviderGenerationError,
+    CreativeProviderNotConfiguredError,
+)  # noqa: E402
 from app.services.marketing import (  # noqa: E402
     _allocate_budget,
     _page,
@@ -35,6 +40,7 @@ from app.services.marketing import (  # noqa: E402
     derive_metrics,
     generate_campaign,
     generate_content,
+    generate_creative_asset,
     generate_plan,
     learn_from_performance,
     marketing_analytics,
@@ -502,6 +508,251 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     provider=SimpleNamespace(),
                 )
+
+    async def test_creative_generation_persists_ready_only_after_provider_success(self) -> None:
+        strategy = {
+            "marketing_goal": "Increase qualified product interest.",
+            "target_audience": "Relevant customers.",
+            "audience_insight": "Lead with a clear supported benefit.",
+            "campaign_angle": "Premium product-first launch.",
+            "hook": "Discover the product.",
+            "headline": "Exact headline must not enter raw image generation.",
+            "supporting_message": "Exact supporting copy.",
+            "cta": "Explore now",
+            "visual_concept": "Editorial product scene with a strong hero subject.",
+            "composition_direction": "Hero subject left with clean open space right.",
+            "subject_focus": "The supported catalog product.",
+            "mood": "Premium and contemporary.",
+            "lighting": "Soft directional studio lighting.",
+            "negative_space": "Generous clear area for later typography.",
+            "brand_treatment": "Use saved palette cues without drawing the logo.",
+            "recommended_channel": "instagram",
+            "pr_guardrails": ["Use only supported claims."],
+            "prohibited_claims": ["No invented discounts."],
+        }
+
+        asset = CreativeAsset(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            campaign_id=None,
+            content_id=None,
+            asset_type="social_square",
+            source_type="ai_brief",
+            instructions="make a post",
+            visual_direction=json.dumps(strategy),
+            generation_status="brief_ready",
+            storage_reference=None,
+            width=1080,
+            height=1080,
+            aspect_ratio="1:1",
+            alt_text=None,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+        result = CreativeGenerationResult(
+            storage_reference="https://media.example.com/generated.png",
+            width=1024,
+            height=1024,
+            provider_request_id="req_123",
+        )
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(return_value=result),
+        )
+
+        generated = await generate_creative_asset(
+            _ScalarSession([asset]),
+            business_id=BUSINESS_ID,
+            creative_asset_id=asset.id,
+            actor_user_id=USER_ID,
+            provider=provider,
+        )
+
+        self.assertEqual(generated.generation_status, "ready")
+        self.assertEqual(generated.source_type, "future_provider")
+        self.assertEqual(
+            generated.storage_reference,
+            "https://media.example.com/generated.png",
+        )
+        self.assertEqual(generated.width, 1024)
+        self.assertEqual(generated.height, 1024)
+
+        request = provider.generate_draft.await_args.args[0]
+        self.assertEqual(request.business_id, BUSINESS_ID)
+        self.assertEqual(request.creative_asset_id, asset.id)
+        self.assertIn("Editorial product scene", request.instructions)
+        self.assertIn("Premium product-first launch", request.instructions)
+
+        # Exact customer-facing typography is deliberately withheld from the
+        # raw image model and will be placed by the deterministic compositor.
+        self.assertNotIn(strategy["headline"], request.instructions)
+        self.assertNotIn(strategy["supporting_message"], request.instructions)
+        self.assertNotIn(strategy["cta"], request.instructions)
+
+    async def test_creative_generation_persists_provider_required_when_unconfigured(self) -> None:
+        strategy = {
+            "marketing_goal": "Promote the business.",
+            "target_audience": "Relevant customers.",
+            "audience_insight": "Keep the direction trustworthy.",
+            "campaign_angle": "Brand-led awareness.",
+            "hook": "Discover more.",
+            "headline": "Discover more",
+            "supporting_message": "Grounded supporting copy.",
+            "cta": None,
+            "visual_concept": "Clean commercial brand scene.",
+            "composition_direction": "Balanced subject with open copy space.",
+            "subject_focus": "Supported business offering.",
+            "mood": "Professional.",
+            "lighting": "Soft natural light.",
+            "negative_space": "Open right-side area.",
+            "brand_treatment": "Use saved brand palette cues.",
+            "recommended_channel": "channel_agnostic",
+            "pr_guardrails": [],
+            "prohibited_claims": [],
+        }
+
+        asset = CreativeAsset(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            campaign_id=None,
+            content_id=None,
+            asset_type="social_square",
+            source_type="ai_brief",
+            instructions="promote business",
+            visual_direction=json.dumps(strategy),
+            generation_status="brief_ready",
+            storage_reference=None,
+            width=None,
+            height=None,
+            aspect_ratio="1:1",
+            alt_text=None,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+        provider = SimpleNamespace(
+            provider_name="unconfigured",
+            generate_draft=AsyncMock(
+                side_effect=CreativeProviderNotConfiguredError(
+                    "not configured"
+                )
+            ),
+        )
+
+        generated = await generate_creative_asset(
+            _ScalarSession([asset]),
+            business_id=BUSINESS_ID,
+            creative_asset_id=asset.id,
+            actor_user_id=USER_ID,
+            provider=provider,
+        )
+
+        self.assertEqual(generated.generation_status, "provider_required")
+        self.assertIsNone(generated.storage_reference)
+        self.assertEqual(generated.source_type, "ai_brief")
+
+    async def test_creative_generation_persists_failed_provider_result(self) -> None:
+        strategy = {
+            "marketing_goal": "Promote the business.",
+            "target_audience": "Relevant customers.",
+            "audience_insight": "Use defensible messaging.",
+            "campaign_angle": "Product-first awareness.",
+            "hook": "Explore.",
+            "headline": "Explore",
+            "supporting_message": "Supported copy.",
+            "cta": "Learn more",
+            "visual_concept": "Premium minimal product environment.",
+            "composition_direction": "Hero subject with strong negative space.",
+            "subject_focus": "Supported product.",
+            "mood": "Premium.",
+            "lighting": "Controlled soft light.",
+            "negative_space": "Clear typography zone.",
+            "brand_treatment": "Use saved palette cues only.",
+            "recommended_channel": "instagram",
+            "pr_guardrails": [],
+            "prohibited_claims": [],
+        }
+
+        asset = CreativeAsset(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            campaign_id=None,
+            content_id=None,
+            asset_type="social_square",
+            source_type="ai_brief",
+            instructions="create visual",
+            visual_direction=json.dumps(strategy),
+            generation_status="brief_ready",
+            storage_reference=None,
+            width=1024,
+            height=1024,
+            aspect_ratio="1:1",
+            alt_text=None,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                side_effect=CreativeProviderGenerationError(
+                    "provider failure"
+                )
+            ),
+        )
+
+        generated = await generate_creative_asset(
+            _ScalarSession([asset]),
+            business_id=BUSINESS_ID,
+            creative_asset_id=asset.id,
+            actor_user_id=USER_ID,
+            provider=provider,
+        )
+
+        self.assertEqual(generated.generation_status, "failed")
+        self.assertIsNone(generated.storage_reference)
+        self.assertEqual(generated.source_type, "ai_brief")
+
+    async def test_ready_creative_cannot_be_overwritten_by_generation_retry(self) -> None:
+        asset = CreativeAsset(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            campaign_id=None,
+            content_id=None,
+            asset_type="social_square",
+            source_type="future_provider",
+            instructions="already generated",
+            visual_direction="{}",
+            generation_status="ready",
+            storage_reference="https://media.example.com/existing.png",
+            width=1024,
+            height=1024,
+            aspect_ratio="1:1",
+            alt_text=None,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(),
+        )
+
+        with self.assertRaises(MarketingStateError):
+            await generate_creative_asset(
+                _ScalarSession([asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=provider,
+            )
+
+        provider.generate_draft.assert_not_awaited()
+        self.assertEqual(
+            asset.storage_reference,
+            "https://media.example.com/existing.png",
+        )
 
     async def test_plan_generation_uses_cmo_runtime_result_and_persists_only_conclusions(self) -> None:
         business = Business(id=BUSINESS_ID, name="Acme", slug="acme", business_type="retail", status="active", timezone="UTC", currency="USD", locale="en", created_at=NOW, updated_at=NOW)

@@ -9,6 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies.ai_agent import AIAgentProviderDependency
+from app.api.dependencies.creative import CreativeGenerationProviderDependency
 from app.api.dependencies.business import BusinessAccessDependency, require_business_role
 from app.api.response_materialization import materialize_response_before_commit
 from app.db.session import get_db_session
@@ -334,6 +335,36 @@ async def read_creative_assets(access: BusinessAccessDependency, response: Respo
 async def create_creative_brief(data: CreativeBriefCreate, access: BusinessAccessDependency, response: Response, session: SessionDependency, provider: AIAgentProviderDependency):
     await _guard(session, access.business.id, "marketing_cmo", ai=True)
     return await _mutate(response, session, service.create_creative_brief(session, business_id=access.business.id, actor_user_id=access.user.id, data=data, provider=provider))
+
+
+@router.post(
+    "/creative-assets/{creative_asset_id}/generate",
+    response_model=CreativeAssetResponse,
+)
+async def generate_creative_asset(
+    creative_asset_id: UUID,
+    access: BusinessAccessDependency,
+    response: Response,
+    session: SessionDependency,
+    provider: CreativeGenerationProviderDependency,
+):
+    await _guard(
+        session,
+        access.business.id,
+        "marketing_cmo",
+        ai=True,
+    )
+    return await _mutate(
+        response,
+        session,
+        service.generate_creative_asset(
+            session,
+            business_id=access.business.id,
+            creative_asset_id=creative_asset_id,
+            actor_user_id=access.user.id,
+            provider=provider,
+        ),
+    )
 
 
 @router.get("/calendar", response_model=list[ScheduleResponse])

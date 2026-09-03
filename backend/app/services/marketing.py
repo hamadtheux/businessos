@@ -19,6 +19,12 @@ from app.domain.business_industries import get_business_industry, is_healthcare_
 from app.domain.audience_safety import contains_sensitive_targeting
 from app.exceptions.ai_agent import AIAgentError
 from app.exceptions.marketing import MarketingAIError, MarketingNotFoundError, MarketingPersistenceError, MarketingStateError, MarketingValidationError
+from app.services.creative_provider import (
+    CreativeGenerationProvider,
+    CreativeGenerationRequest,
+    CreativeProviderError,
+    CreativeProviderNotConfiguredError,
+)
 from app.models.business import Business
 from app.models.catalog_item import CatalogItem
 from app.models.automation_intelligence import AudienceHypothesis, MarketingAutomationRun
@@ -1327,6 +1333,157 @@ async def create_creative_brief(
         summary=(
             "Created a grounded structured Creative Intelligence strategy; "
             "no image provider was called."
+        ),
+    )
+
+    return value
+
+
+def _creative_visual_generation_instructions(
+    strategy: CreativeStrategyProposal,
+) -> str:
+    """
+    Produce only the visual-layer instructions for the image model.
+
+    Exact headline, supporting copy, CTA and logo are deliberately omitted.
+    They belong to the deterministic graphic-design composition stage.
+    """
+    return (
+        f"Campaign angle: {strategy.campaign_angle}\n"
+        f"Visual concept: {strategy.visual_concept}\n"
+        f"Composition direction: {strategy.composition_direction}\n"
+        f"Subject focus: {strategy.subject_focus}\n"
+        f"Mood: {strategy.mood}\n"
+        f"Lighting: {strategy.lighting}\n"
+        f"Negative space: {strategy.negative_space}\n"
+        f"Brand treatment: {strategy.brand_treatment}"
+    )
+
+
+async def generate_creative_asset(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    creative_asset_id: UUID,
+    actor_user_id: UUID,
+    provider: CreativeGenerationProvider,
+) -> CreativeAsset:
+    """
+    Turn an approved internal Creative Intelligence brief into a stored raw
+    visual layer.
+
+    Provider failures are persisted as truthful asset states and returned
+    normally. They are intentionally not raised as MarketingAIError because
+    the API mutation helper rolls exceptions back.
+
+    No social provider is contacted and nothing is published.
+    """
+    value = await _get(
+        session,
+        CreativeAsset,
+        business_id,
+        creative_asset_id,
+    )
+
+    if value.generation_status in {"ready", "archived"}:
+        raise MarketingStateError
+
+    if value.generation_status not in {
+        "brief_ready",
+        "provider_required",
+        "failed",
+    }:
+        raise MarketingStateError
+
+    if value.source_type not in {"ai_brief", "future_provider"}:
+        raise MarketingStateError
+
+    if not value.visual_direction:
+        raise MarketingValidationError
+
+    try:
+        strategy = CreativeStrategyProposal.model_validate_json(
+            value.visual_direction
+        )
+    except ValidationError:
+        # Legacy/unstructured briefs remain preserved but are not silently
+        # trusted for provider generation. A new grounded strategy is required.
+        raise MarketingValidationError from None
+
+    instructions = _creative_visual_generation_instructions(strategy)
+
+    try:
+        result = await provider.generate_draft(
+            CreativeGenerationRequest(
+                business_id=business_id,
+                creative_asset_id=value.id,
+                instructions=instructions,
+                width=value.width,
+                height=value.height,
+                aspect_ratio=value.aspect_ratio,
+            )
+        )
+    except CreativeProviderNotConfiguredError:
+        value.generation_status = "provider_required"
+        value.storage_reference = None
+
+        await _flush(session)
+
+        record_audit(
+            session,
+            business_id=business_id,
+            actor_user_id=actor_user_id,
+            event_type="marketing.creative_generation_provider_required",
+            entity_type="marketing_creative_asset",
+            entity_id=value.id,
+            summary=(
+                "Creative visual generation requires a configured image provider; "
+                "no image was created and nothing was published."
+            ),
+        )
+        return value
+    except ValueError:
+        # Invalid requested dimensions/ratio are request-state problems, not an
+        # external provider outage.
+        raise MarketingValidationError from None
+    except CreativeProviderError:
+        value.generation_status = "failed"
+        value.storage_reference = None
+
+        await _flush(session)
+
+        record_audit(
+            session,
+            business_id=business_id,
+            actor_user_id=actor_user_id,
+            event_type="marketing.creative_generation_failed",
+            entity_type="marketing_creative_asset",
+            entity_id=value.id,
+            summary=(
+                "Creative visual generation failed safely; no usable image was "
+                "attached and nothing was published."
+            ),
+        )
+        return value
+
+    value.source_type = "future_provider"
+    value.generation_status = "ready"
+    value.storage_reference = result.storage_reference
+    value.width = result.width
+    value.height = result.height
+
+    await _flush(session)
+
+    record_audit(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        event_type="marketing.creative_generated",
+        entity_type="marketing_creative_asset",
+        entity_id=value.id,
+        summary=(
+            f"Generated and stored a validated {result.width}x{result.height} "
+            "internal creative visual; nothing was published externally."
         ),
     )
 

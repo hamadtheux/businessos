@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from openai import AsyncOpenAI, OpenAIError
 from PIL import Image, UnidentifiedImageError
 
+from app.core.config import Settings
 from app.storage.base import ObjectStorage, StorageError
 
 
@@ -415,4 +416,35 @@ def _creative_storage_key(
     return (
         f"businesses/{business_id}/marketing/creatives/"
         f"{creative_asset_id}/{uuid4().hex}.png"
+    )
+
+
+def create_creative_generation_provider(
+    config: Settings,
+    storage: ObjectStorage,
+) -> CreativeGenerationProvider:
+    """
+    Build the production image provider from backend-only configuration.
+
+    Unlike the text-agent dependency, absence of an API key intentionally
+    returns an explicit unavailable provider. This lets the marketing service
+    persist generation_status='provider_required' rather than losing that
+    truthful state to an HTTP transaction rollback.
+    """
+    api_key = config.openai_api_key_value
+
+    if api_key is None or not api_key.strip():
+        return UnavailableCreativeGenerationProvider()
+
+    client = AsyncOpenAI(
+        api_key=api_key,
+        timeout=config.openai_timeout_seconds,
+        max_retries=config.openai_max_retries,
+    )
+
+    return OpenAICreativeGenerationProvider(
+        client=client,
+        storage=storage,
+        model=config.openai_image_model,
+        quality=config.openai_image_quality,
     )

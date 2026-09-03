@@ -157,6 +157,17 @@ class Settings(BaseSettings):
         le=5,
     )
 
+
+    # Creative / image generation remains independently configurable from the
+    # text-agent model. The API key is still the same backend-only secret.
+    openai_image_model: str = Field(
+        default="gpt-image-2",
+        min_length=1,
+        max_length=128,
+    )
+
+    openai_image_quality: Literal["low", "medium", "high", "auto"] = "medium"
+
     # External integrations
     #
     # Provider tokens are never stored in application database columns. The
