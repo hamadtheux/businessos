@@ -25,12 +25,12 @@
 @keyframes app-bootstrap-stage {
   0%,
   29% {
-    color: #176b31;
+    color: #0D56D9;
     opacity: 1;
   }
   33%,
   100% {
-    color: #68786e;
+    color: #667085;
     opacity: 0.52;
   }
 }
@@ -60,11 +60,11 @@
   display: grid;
   place-items: center;
   padding: clamp(24px, 5vw, 56px);
-  color: #1a2e21;
+  color: #101828;
   background:
-    radial-gradient(circle at 50% 44%, rgba(127, 202, 72, 0.09), transparent 23rem),
-    radial-gradient(circle at 50% 115%, rgba(29, 134, 58, 0.055), transparent 32rem),
-    #f8f8f4;
+    radial-gradient(circle at 50% 44%, rgba(242, 182, 34, 0.09), transparent 23rem),
+    radial-gradient(circle at 50% 115%, rgba(18, 104, 243, 0.055), transparent 32rem),
+    #f8fafc;
 }
 
 .app-bootstrap-screen::before {
@@ -76,7 +76,7 @@
   width: min(72vw, 620px);
   aspect-ratio: 1;
   border-radius: 50%;
-  border: 1px solid rgba(29, 134, 58, 0.035);
+  border: 1px solid rgba(18, 104, 243, 0.035);
   transform: translate(-50%, -50%);
   pointer-events: none;
 }
@@ -101,7 +101,7 @@
   position: absolute;
   inset: 44px;
   border-radius: 50%;
-  background: rgba(127, 202, 72, 0.2);
+  background: rgba(242, 182, 34, 0.2);
   filter: blur(17px);
   animation: app-bootstrap-breathe 3.8s ease-in-out infinite;
 }
@@ -122,16 +122,16 @@
 }
 
 .app-bootstrap-guide {
-  stroke: rgba(29, 134, 58, 0.105);
+  stroke: rgba(18, 104, 243, 0.105);
   stroke-width: 1;
 }
 
 .app-bootstrap-guide.guide-middle {
-  stroke: rgba(29, 134, 58, 0.085);
+  stroke: rgba(18, 104, 243, 0.085);
 }
 
 .app-bootstrap-guide.guide-inner {
-  stroke: rgba(29, 134, 58, 0.075);
+  stroke: rgba(18, 104, 243, 0.075);
 }
 
 .app-bootstrap-orbit {
@@ -141,7 +141,7 @@
 }
 
 .app-bootstrap-orbit > circle:first-child {
-  stroke: #1d863a;
+  stroke: #1268F3;
   stroke-width: 1.35;
 }
 
@@ -159,7 +159,7 @@
 }
 
 .app-bootstrap-orbit.orbit-middle > circle:first-child {
-  stroke: #47b345;
+  stroke: #4B8DFF;
   stroke-dasharray: 20 31 8 41;
   stroke-opacity: 0.52;
 }
@@ -169,14 +169,14 @@
 }
 
 .app-bootstrap-orbit.orbit-inner > circle:first-child {
-  stroke: #7fca48;
+  stroke: #F2B622;
   stroke-dasharray: 8 48 24 20;
   stroke-opacity: 0.58;
 }
 
 .app-bootstrap-node {
-  fill: #7fca48;
-  filter: drop-shadow(0 0 4px rgba(127, 202, 72, 0.78));
+  fill: #F2B622;
+  filter: drop-shadow(0 0 4px rgba(242, 182, 34, 0.78));
 }
 
 .app-bootstrap-logo-core {
@@ -187,11 +187,11 @@
   height: 94px;
   display: grid;
   place-items: center;
-  border: 1px solid rgba(29, 134, 58, 0.11);
+  border: 1px solid rgba(18, 104, 243, 0.11);
   border-radius: 50%;
-  background: rgba(255, 255, 252, 0.92);
+  background: rgba(255, 255, 255, 0.94);
   box-shadow:
-    0 18px 44px rgba(17, 81, 39, 0.105),
+    0 18px 44px rgba(9, 42, 104, 0.105),
     inset 0 1px 0 rgba(255, 255, 255, 0.94);
   transform: translate(-50%, -50%);
 }
@@ -242,7 +242,7 @@
 
 .app-bootstrap-content h1 {
   margin: 0;
-  color: #192b20;
+  color: #101828;
   font-size: clamp(26px, 3.2vw, 30px);
   font-weight: 600;
   line-height: 1.18;
@@ -252,7 +252,7 @@
 .app-bootstrap-description {
   max-width: 440px;
   margin: 10px 0 0;
-  color: #56675d;
+  color: #475467;
   font-size: 14px;
   font-weight: 500;
   line-height: 1.65;
@@ -261,7 +261,7 @@
 
 .app-bootstrap-tertiary {
   margin: 5px 0 0;
-  color: #7a8980;
+  color: #667085;
   font-size: 12.5px;
   line-height: 1.55;
 }
@@ -280,7 +280,7 @@
   align-items: center;
   justify-content: center;
   gap: 7px;
-  color: #68786e;
+  color: #667085;
   font-size: 12px;
   font-weight: 600;
   line-height: 1.35;
@@ -313,7 +313,7 @@
   margin-top: 12px;
   overflow: hidden;
   border-radius: 999px;
-  background: rgba(29, 134, 58, 0.09);
+  background: rgba(18, 104, 243, 0.09);
 }
 
 .app-bootstrap-progress span {
@@ -321,8 +321,8 @@
   width: 29%;
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, transparent, #7fca48 44%, #1d863a 70%, transparent);
-  box-shadow: 0 0 10px rgba(127, 202, 72, 0.44);
+  background: linear-gradient(90deg, transparent, #1268F3 34%, #0747C9 52%, #F2B622 72%, transparent);
+  box-shadow: 0 0 10px rgba(18, 104, 243, 0.38);
   will-change: transform;
   animation: app-bootstrap-scan 3.5s ease-in-out infinite;
 }
@@ -389,7 +389,7 @@
   }
 
   .app-bootstrap-stage:first-child {
-    color: #176b31;
+    color: #0D56D9;
     opacity: 1;
   }
 

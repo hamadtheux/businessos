@@ -1,5 +1,8 @@
 import type { BrandIdentity } from "@/types/business";
-import { PRODUCT_BRAND_COLORS } from "../config/brand.ts";
+import {
+  PRODUCT_BRAND_COLORS,
+  PRODUCT_BRAND_GRADIENT,
+} from "../config/brand.ts";
 
 type Rgb = { r: number; g: number; b: number };
 type Hsl = { h: number; s: number; l: number };
@@ -35,6 +38,7 @@ export type BrandThemeTokens = {
   focusRing: string;
   selectionBackground: string;
   selectionForeground: string;
+  brandGradient: string;
 };
 
 export const BRAND_PRESETS = [
@@ -80,7 +84,7 @@ export const DEFAULT_BRAND_IDENTITIES = {
   green: {
     primaryColor: PRODUCT_BRAND_COLORS.primary,
     secondaryColor: PRODUCT_BRAND_COLORS[900],
-    accentColor: PRODUCT_BRAND_COLORS.focus,
+    accentColor: PRODUCT_BRAND_COLORS.gold,
   },
   navy: {
     primaryColor: "#1E3A8A",
@@ -137,7 +141,7 @@ export function contrastRatio(first: string, second: string) {
 
 export function safeForeground(background: string) {
   const light = "#FFFFFF";
-  const dark = "#101914";
+  const dark = PRODUCT_BRAND_COLORS.text;
   return contrastRatio(background, light) >= contrastRatio(background, dark)
     ? light
     : dark;
@@ -285,12 +289,19 @@ export function resolveBrandIdentity(
   theme: "green" | "navy" = "green",
 ) {
   const fallback = getDefaultBrandIdentity(theme);
+  const useFallbackPalette = !hasCustomBrandColors(identity);
   const primary =
     normalizeHex(identity?.primaryColor ?? "") ?? fallback.primaryColor;
   const secondary =
-    normalizeHex(identity?.secondaryColor ?? "") ?? deriveSecondary(primary);
+    normalizeHex(identity?.secondaryColor ?? "") ??
+    (useFallbackPalette && fallback.secondaryColor
+      ? fallback.secondaryColor
+      : deriveSecondary(primary));
   const accent =
-    normalizeHex(identity?.accentColor ?? "") ?? deriveAccent(primary);
+    normalizeHex(identity?.accentColor ?? "") ??
+    (useFallbackPalette && fallback.accentColor
+      ? fallback.accentColor
+      : deriveAccent(primary));
   return { primary, secondary, accent };
 }
 
@@ -299,7 +310,7 @@ export function deriveBrandTheme(
   theme: "green" | "navy" = "green",
 ): BrandThemeTokens {
   const { primary, secondary, accent } = resolveBrandIdentity(identity, theme);
-  const isProductDefault = primary === PRODUCT_BRAND_COLORS.primary;
+  const isProductDefault = !hasCustomBrandColors(identity) && theme === "green";
   const primaryHsl = rgbToHsl(hexToRgb(primary));
   const sidebarBackground = isProductDefault
     ? PRODUCT_BRAND_COLORS[950]
@@ -308,12 +319,17 @@ export function deriveBrandTheme(
         s: Math.min(0.44, primaryHsl.s),
         l: 0.12,
       });
-  const sidebarActiveBackground = mixHex("#FFFFFF", primary, 0.28);
-  const primaryBorder =
-    contrastRatio(primary, "#FFFFFF") < 1.25
-      ? "#D3DCD6"
+  const sidebarActiveBackground = isProductDefault
+    ? PRODUCT_BRAND_COLORS[100]
+    : mixHex("#FFFFFF", primary, 0.28);
+  const primaryBorder = isProductDefault
+    ? PRODUCT_BRAND_COLORS[300]
+    : contrastRatio(primary, "#FFFFFF") < 1.25
+      ? "#CBD5E1"
       : mixHex("#FFFFFF", primary, 0.36);
-  const primarySoft = mixHex("#FFFFFF", primary, 0.11);
+  const primarySoft = isProductDefault
+    ? PRODUCT_BRAND_COLORS[100]
+    : mixHex("#FFFFFF", primary, 0.11);
   const primaryInk =
     contrastRatio(primary, primarySoft) >= 4.5
       ? primary
@@ -322,10 +338,10 @@ export function deriveBrandTheme(
     ? PRODUCT_BRAND_COLORS.focus
     : contrastRatio(primary, "#FFFFFF") >= 3
       ? primary
-      : "#54685D";
+      : PRODUCT_BRAND_COLORS.mutedText;
   const selectionBackground =
     contrastRatio(primary, "#FFFFFF") < 1.25
-      ? "#D7E0DA"
+      ? "#DBEAFE"
       : mixHex("#FFFFFF", primary, 0.22);
 
   return {
@@ -341,13 +357,17 @@ export function deriveBrandTheme(
     brandOnPrimary: safeForeground(primary),
     brandPrimaryInk: primaryInk,
     brandSecondary: secondary,
-    brandSecondarySoft: mixHex("#FFFFFF", secondary, 0.11),
+    brandSecondarySoft: isProductDefault
+      ? PRODUCT_BRAND_COLORS[100]
+      : mixHex("#FFFFFF", secondary, 0.11),
     brandOnSecondary: safeForeground(secondary),
     brandAccent: accent,
-    brandAccentSoft: mixHex("#FFFFFF", accent, 0.12),
+    brandAccentSoft: isProductDefault
+      ? PRODUCT_BRAND_COLORS.goldSoft
+      : mixHex("#FFFFFF", accent, 0.12),
     brandOnAccent: safeForeground(accent),
     sidebarBackground,
-    sidebarForeground: "#F7FBF8",
+    sidebarForeground: "#F8FAFC",
     sidebarMutedForeground: mixHex(sidebarBackground, "#FFFFFF", 0.62),
     sidebarActiveBackground,
     sidebarActiveForeground: safeForeground(sidebarActiveBackground),
@@ -355,6 +375,9 @@ export function deriveBrandTheme(
     focusRing,
     selectionBackground,
     selectionForeground: safeForeground(selectionBackground),
+    brandGradient: isProductDefault
+      ? PRODUCT_BRAND_GRADIENT
+      : `linear-gradient(135deg, ${primary} 0%, ${interactionColor(primary, 0.12)} 42%, ${accent} 72%, ${secondary} 100%)`,
   };
 }
 
@@ -383,5 +406,6 @@ export function brandThemeStyle(tokens: BrandThemeTokens) {
     "--brand-focus-ring": tokens.focusRing,
     "--brand-selection-bg": tokens.selectionBackground,
     "--brand-selection-fg": tokens.selectionForeground,
+    "--brand-gradient": tokens.brandGradient,
   } as React.CSSProperties;
 }

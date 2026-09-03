@@ -173,13 +173,13 @@ function FeatureBullet({ children }: { children: ReactNode }) {
 
 const HERO_V6_CSS = `
 .hero6 {
-  --h6-green: #1d863a;
-  --h6-green-dark: #125d29;
-  --h6-lime: #7fca48;
-  --h6-ink: #102017;
-  --h6-copy: #5f6e64;
-  --h6-muted: #89958d;
-  --h6-line: rgba(20, 50, 29, 0.09);
+  --h6-primary: #1268f3;
+  --h6-primary-strong: #0747c9;
+  --h6-premium: #f2b622;
+  --h6-ink: #101828;
+  --h6-copy: #667085;
+  --h6-muted: #98a2b3;
+  --h6-line: rgba(9, 42, 104, 0.1);
 
   position: relative;
   width: 100%;
@@ -188,20 +188,20 @@ const HERO_V6_CSS = `
   overflow: hidden;
   isolation: isolate;
 
-  border: 1px solid rgba(18, 52, 28, 0.08);
+  border: 1px solid rgba(9, 42, 104, 0.08);
   border-radius: 36px;
 
   background:
     radial-gradient(
       circle at 50% 24%,
-      rgba(127, 202, 72, 0.12),
+      rgba(242, 182, 34, 0.12),
       transparent 31%
     ),
-    linear-gradient(145deg, #ffffff, #f9fcf9 55%, #f4f8f5);
+    linear-gradient(145deg, #ffffff, #f8fafc 55%, #f4f7fc);
 
   box-shadow:
-    0 42px 110px rgba(16, 43, 24, 0.08),
-    0 8px 28px rgba(16, 43, 24, 0.025),
+    0 42px 110px rgba(9, 42, 104, 0.08),
+    0 8px 28px rgba(9, 42, 104, 0.025),
     inset 0 1px #ffffff;
 }
 
@@ -214,8 +214,8 @@ const HERO_V6_CSS = `
   opacity: 0.42;
 
   background-image:
-    linear-gradient(rgba(22, 65, 34, 0.026) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(22, 65, 34, 0.026) 1px, transparent 1px);
+    linear-gradient(rgba(9, 42, 104, 0.026) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(9, 42, 104, 0.026) 1px, transparent 1px);
 
   background-size: 52px 52px;
 
@@ -240,7 +240,7 @@ const HERO_V6_CSS = `
 
   border-radius: 50%;
 
-  background: rgba(127, 202, 72, 0.12);
+  background: rgba(242, 182, 34, 0.12);
 
   filter: blur(95px);
   pointer-events: none;
@@ -277,7 +277,7 @@ const HERO_V6_CSS = `
   width: 15px;
   height: 15px;
 
-  color: var(--h6-green);
+  color: var(--h6-primary);
 }
 
 .hero6-top-label strong {
@@ -292,7 +292,7 @@ const HERO_V6_CSS = `
   align-items: center;
   gap: 8px;
 
-  color: #708078;
+  color: #667085;
 
   font-size: 10px;
   font-weight: 600;
@@ -302,7 +302,7 @@ const HERO_V6_CSS = `
 }
 
 .hero6-top-journey strong {
-  color: var(--h6-green);
+  color: var(--h6-primary);
   font-weight: 600;
 }
 
@@ -310,7 +310,7 @@ const HERO_V6_CSS = `
   width: 12px;
   height: 12px;
 
-  color: #a2ada6;
+  color: #98a2b3;
 }
 
 
@@ -352,7 +352,7 @@ const HERO_V6_CSS = `
   background: rgba(255, 255, 255, 0.83);
 
   box-shadow:
-    0 18px 46px rgba(15, 43, 24, 0.045),
+    0 18px 46px rgba(9, 42, 104, 0.045),
     inset 0 1px #ffffff;
 
   backdrop-filter: blur(16px);
@@ -369,9 +369,9 @@ const HERO_V6_CSS = `
 
   border-radius: 999px;
 
-  background: rgba(29, 134, 58, 0.07);
+  background: rgba(18, 104, 243, 0.07);
 
-  color: var(--h6-green);
+  color: var(--h6-primary);
 
   font-size: 9px;
   font-weight: 600;
@@ -422,12 +422,12 @@ const HERO_V6_CSS = `
   align-items: center;
   gap: 6px;
 
-  border: 1px solid rgba(19, 59, 31, 0.07);
+  border: 1px solid rgba(9, 42, 104, 0.07);
   border-radius: 9px;
 
-  background: #f7faf7;
+  background: #f8fafc;
 
-  color: #55675c;
+  color: #475467;
 
   font-size: 9px;
   font-weight: 500;
@@ -437,7 +437,7 @@ const HERO_V6_CSS = `
   width: 12px;
   height: 12px;
 
-  color: var(--h6-green);
+  color: var(--h6-primary);
 }
 
 .hero6-business-map {
@@ -461,11 +461,11 @@ const HERO_V6_CSS = `
 
   gap: 10px;
 
-  border: 1px solid rgba(19, 59, 31, 0.065);
+  border: 1px solid rgba(9, 42, 104, 0.065);
   border-radius: 13px;
 
   background:
-    linear-gradient(145deg, #ffffff, #f9fbf9);
+    linear-gradient(145deg, #ffffff, #f8fafc);
 }
 
 .hero6-business-icon {
@@ -477,9 +477,9 @@ const HERO_V6_CSS = `
 
   border-radius: 10px;
 
-  background: rgba(29, 134, 58, 0.07);
+  background: rgba(18, 104, 243, 0.07);
 
-  color: var(--h6-green);
+  color: var(--h6-primary);
 }
 
 .hero6-business-icon svg {
@@ -490,7 +490,7 @@ const HERO_V6_CSS = `
 .hero6-business-item strong {
   display: block;
 
-  color: #304239;
+  color: #344054;
 
   font-size: 10px;
   font-weight: 600;
@@ -501,7 +501,7 @@ const HERO_V6_CSS = `
 
   margin-top: 3px;
 
-  color: #87938b;
+  color: #7f899b;
 
   font-size: 8px;
   line-height: 1.4;
@@ -529,9 +529,9 @@ const HERO_V6_CSS = `
   background:
     linear-gradient(
       90deg,
-      rgba(29, 134, 58, 0.08),
-      rgba(29, 134, 58, 0.38),
-      rgba(29, 134, 58, 0.08)
+      rgba(18, 104, 243, 0.08),
+      rgba(18, 104, 243, 0.38),
+      rgba(18, 104, 243, 0.08)
     );
 }
 
@@ -550,11 +550,11 @@ const HERO_V6_CSS = `
 
   border-radius: 50%;
 
-  background: var(--h6-green);
+  background: var(--h6-primary);
 
   box-shadow:
-    0 0 0 5px rgba(29, 134, 58, 0.07),
-    0 0 18px rgba(29, 134, 58, 0.32);
+    0 0 0 5px rgba(18, 104, 243, 0.07),
+    0 0 18px rgba(18, 104, 243, 0.32);
 
   animation: hero6Packet 2.8s ease-in-out infinite;
 }
@@ -568,14 +568,14 @@ const HERO_V6_CSS = `
   display: grid;
   place-items: center;
 
-  border: 1px solid rgba(29, 134, 58, 0.11);
+  border: 1px solid rgba(18, 104, 243, 0.11);
   border-radius: 50%;
 
   background: #ffffff;
 
-  color: var(--h6-green);
+  color: var(--h6-primary);
 
-  box-shadow: 0 8px 20px rgba(16, 43, 24, 0.06);
+  box-shadow: 0 8px 20px rgba(9, 42, 104, 0.06);
 }
 
 .hero6-bridge-icon svg {
@@ -591,15 +591,15 @@ const HERO_V6_CSS = `
 .hero6-stage-brain {
   overflow: hidden;
 
-  border-color: rgba(29, 134, 58, 0.13);
+  border-color: rgba(18, 104, 243, 0.13);
 
   background:
     radial-gradient(
       circle at 50% 10%,
-      rgba(127, 202, 72, 0.12),
+      rgba(242, 182, 34, 0.12),
       transparent 35%
     ),
-    linear-gradient(145deg, #fbfefb, #f1f8f3);
+    linear-gradient(145deg, #f8fafc, #eaf2ff);
 }
 
 .hero6-stage-brain::before {
@@ -615,7 +615,7 @@ const HERO_V6_CSS = `
 
   transform: translate(-50%, -50%);
 
-  border: 1px dashed rgba(29, 134, 58, 0.09);
+  border: 1px dashed rgba(18, 104, 243, 0.09);
   border-radius: 50%;
 
   animation: hero6Rotate 36s linear infinite;
@@ -631,13 +631,13 @@ const HERO_V6_CSS = `
 
   padding: 17px;
 
-  border: 1px solid rgba(29, 134, 58, 0.12);
+  border: 1px solid rgba(18, 104, 243, 0.12);
   border-radius: 18px;
 
   background: rgba(255, 255, 255, 0.85);
 
   box-shadow:
-    0 17px 40px rgba(29, 134, 58, 0.07);
+    0 17px 40px rgba(18, 104, 243, 0.07);
 
   text-align: center;
 }
@@ -657,7 +657,7 @@ const HERO_V6_CSS = `
 
   margin-top: 7px;
 
-  color: #193823;
+  color: #344054;
 
   font-size: 15px;
   font-weight: 600;
@@ -668,7 +668,7 @@ const HERO_V6_CSS = `
 
   max-width: 280px;
 
-  color: #68776d;
+  color: #667085;
 
   font-size: 9px;
   line-height: 1.5;
@@ -688,9 +688,9 @@ const HERO_V6_CSS = `
 
   border-radius: 999px;
 
-  background: rgba(29, 134, 58, 0.06);
+  background: rgba(18, 104, 243, 0.06);
 
-  color: #5f7b66;
+  color: #667085;
 
   font-size: 7px;
   font-weight: 500;
@@ -706,7 +706,7 @@ const HERO_V6_CSS = `
   align-items: center;
   gap: 7px;
 
-  color: #5f7466;
+  color: #667085;
 
   font-size: 9px;
   font-weight: 600;
@@ -719,7 +719,7 @@ const HERO_V6_CSS = `
   width: 13px;
   height: 13px;
 
-  color: var(--h6-green);
+  color: var(--h6-primary);
 }
 
 .hero6-agents {
@@ -743,7 +743,7 @@ const HERO_V6_CSS = `
   align-items: center;
   gap: 8px;
 
-  border: 1px solid rgba(29, 134, 58, 0.08);
+  border: 1px solid rgba(18, 104, 243, 0.08);
   border-radius: 11px;
 
   background: rgba(255, 255, 255, 0.78);
@@ -759,15 +759,15 @@ const HERO_V6_CSS = `
 
   border-radius: 8px;
 
-  background: rgba(29, 134, 58, 0.07);
+  background: rgba(18, 104, 243, 0.07);
 
-  color: var(--h6-green);
+  color: var(--h6-primary);
 }
 
 .hero6-agent strong {
   display: block;
 
-  color: #36483d;
+  color: #475467;
 
   font-size: 9px;
   font-weight: 600;
@@ -778,7 +778,7 @@ const HERO_V6_CSS = `
 
   margin-top: 2px;
 
-  color: #8a968e;
+  color: #98a2b3;
 
   font-size: 7px;
 }
@@ -799,12 +799,12 @@ const HERO_V6_CSS = `
 
   gap: 7px;
 
-  border: 1px solid rgba(29, 134, 58, 0.09);
+  border: 1px solid rgba(18, 104, 243, 0.09);
   border-radius: 10px;
 
-  background: rgba(29, 134, 58, 0.045);
+  background: rgba(18, 104, 243, 0.045);
 
-  color: #607568;
+  color: #667085;
 
   font-size: 8px;
   font-weight: 500;
@@ -814,7 +814,7 @@ const HERO_V6_CSS = `
   width: 12px;
   height: 12px;
 
-  color: var(--h6-green);
+  color: var(--h6-primary);
 }
 
 
@@ -843,7 +843,7 @@ const HERO_V6_CSS = `
 
   gap: 10px;
 
-  border: 1px solid rgba(18, 52, 28, 0.07);
+  border: 1px solid rgba(9, 42, 104, 0.07);
   border-radius: 13px;
 
   background: #ffffff;
@@ -857,9 +857,9 @@ const HERO_V6_CSS = `
 .hero6-work:hover {
   transform: translateX(3px);
 
-  border-color: rgba(29, 134, 58, 0.16);
+  border-color: rgba(18, 104, 243, 0.16);
 
-  box-shadow: 0 11px 28px rgba(17, 44, 25, 0.05);
+  box-shadow: 0 11px 28px rgba(9, 42, 104, 0.05);
 }
 
 .hero6-work-icon {
@@ -871,9 +871,9 @@ const HERO_V6_CSS = `
 
   border-radius: 10px;
 
-  background: rgba(29, 134, 58, 0.07);
+  background: rgba(18, 104, 243, 0.07);
 
-  color: var(--h6-green);
+  color: var(--h6-primary);
 }
 
 .hero6-work-icon svg {
@@ -884,7 +884,7 @@ const HERO_V6_CSS = `
 .hero6-work strong {
   display: block;
 
-  color: #304239;
+  color: #344054;
 
   font-size: 10px;
   font-weight: 600;
@@ -895,7 +895,7 @@ const HERO_V6_CSS = `
 
   margin-top: 3px;
 
-  color: #86928a;
+  color: #7f899b;
 
   font-size: 8px;
   line-height: 1.4;
@@ -905,7 +905,7 @@ const HERO_V6_CSS = `
   width: 13px;
   height: 13px;
 
-  color: #a2ada5;
+  color: #98a2b3;
 }
 
 
@@ -933,13 +933,13 @@ const HERO_V6_CSS = `
 
   padding: 13px 14px;
 
-  border: 1px solid rgba(18, 52, 28, 0.08);
+  border: 1px solid rgba(9, 42, 104, 0.08);
   border-radius: 15px;
 
   background: rgba(255, 255, 255, 0.9);
 
   box-shadow:
-    0 13px 34px rgba(16, 43, 24, 0.05);
+    0 13px 34px rgba(9, 42, 104, 0.05);
 
   backdrop-filter: blur(14px);
 
@@ -955,7 +955,7 @@ const HERO_V6_CSS = `
 }
 
 .hero6-example > small {
-  color: #8c9890;
+  color: #98a2b3;
 
   font-size: 8px;
   font-weight: 500;
@@ -966,7 +966,7 @@ const HERO_V6_CSS = `
 
   margin-top: 4px;
 
-  color: #2c4034;
+  color: #344054;
 
   font-size: 10px;
   font-weight: 600;
@@ -990,7 +990,7 @@ const HERO_V6_CSS = `
   align-items: center;
   gap: 5px;
 
-  color: #5d7064;
+  color: #667085;
 
   font-size: 8px;
   font-weight: 500;
@@ -999,7 +999,7 @@ const HERO_V6_CSS = `
 }
 
 .hero6-example-flow span:last-child {
-  color: var(--h6-green-dark);
+  color: var(--h6-primary-strong);
   font-weight: 600;
 }
 
@@ -1009,11 +1009,11 @@ const HERO_V6_CSS = `
   width: 11px;
   height: 11px;
 
-  color: var(--h6-green);
+  color: var(--h6-primary);
 }
 
 .hero6-example-flow > svg {
-  color: #a0aaa4;
+  color: #98a2b3;
 }
 
 
@@ -1033,13 +1033,13 @@ const HERO_V6_CSS = `
 
   overflow: hidden;
 
-  border: 1px solid rgba(18, 52, 28, 0.075);
+  border: 1px solid rgba(9, 42, 104, 0.075);
   border-radius: 13px;
 
   background: rgba(250, 252, 250, 0.94);
 
   box-shadow:
-    0 9px 24px rgba(16, 43, 24, 0.035);
+    0 9px 24px rgba(9, 42, 104, 0.035);
 }
 
 .hero6-feature-rail::before,
@@ -1060,13 +1060,13 @@ const HERO_V6_CSS = `
 .hero6-feature-rail::before {
   left: 0;
 
-  background: linear-gradient(90deg, #fbfcfb, transparent);
+  background: linear-gradient(90deg, #f8fafc, transparent);
 }
 
 .hero6-feature-rail::after {
   right: 0;
 
-  background: linear-gradient(-90deg, #fbfcfb, transparent);
+  background: linear-gradient(-90deg, #f8fafc, transparent);
 }
 
 .hero6-feature-track {
@@ -1089,9 +1089,9 @@ const HERO_V6_CSS = `
 
   gap: 7px;
 
-  border-right: 1px solid rgba(18, 52, 28, 0.055);
+  border-right: 1px solid rgba(9, 42, 104, 0.055);
 
-  color: #627168;
+  color: #667085;
 
   font-size: 9px;
   font-weight: 500;
@@ -1105,9 +1105,9 @@ const HERO_V6_CSS = `
 
   border-radius: 50%;
 
-  background: var(--h6-green);
+  background: var(--h6-primary);
 
-  box-shadow: 0 0 0 4px rgba(29, 134, 58, 0.055);
+  box-shadow: 0 0 0 4px rgba(18, 104, 243, 0.055);
 }
 
 
@@ -1242,9 +1242,9 @@ const HERO_V6_CSS = `
     background:
       linear-gradient(
         180deg,
-        rgba(29, 134, 58, 0.08),
-        rgba(29, 134, 58, 0.38),
-        rgba(29, 134, 58, 0.08)
+        rgba(18, 104, 243, 0.08),
+        rgba(18, 104, 243, 0.38),
+        rgba(18, 104, 243, 0.08)
       );
   }
 
@@ -2164,8 +2164,8 @@ function IntelligenceVisual() {
           <svg viewBox="0 0 640 270">
             <defs>
               <linearGradient id="brainChartArea" x1="0" x2="0" y1="0" y2="1">
-                <stop offset="0%" stopColor="#1D863A" stopOpacity="0.22" />
-                <stop offset="100%" stopColor="#1D863A" stopOpacity="0" />
+                <stop offset="0%" stopColor="#1268F3" stopOpacity="0.22" />
+                <stop offset="100%" stopColor="#1268F3" stopOpacity="0" />
               </linearGradient>
             </defs>
 

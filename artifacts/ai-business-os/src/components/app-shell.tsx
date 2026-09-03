@@ -244,7 +244,6 @@ export function AppShell({ children }: { children: ReactNode }) {
   );
   const brandTheme = deriveBrandTheme(
     hasCustomWorkspaceTheme ? activeBusiness?.brandIdentity : undefined,
-    "green",
   );
   const workspaceProfile = getIndustryWorkspaceProfile(activeBusiness?.industry);
   const terminology = workspaceProfile.terminology;

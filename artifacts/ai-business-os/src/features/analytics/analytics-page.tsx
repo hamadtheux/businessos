@@ -33,7 +33,7 @@ export function AnalyticsPage() {
   const currency = activeBusiness?.currency || "USD";
   const money = (value: string) => new Intl.NumberFormat(undefined, { style: "currency", currency, notation: "compact" }).format(Number(value));
   const sources = analytics ? Object.entries(analytics.lead_source_counts).map(([name, value]) => ({ name, value })) : [];
-  const colors = ["#15803d", "#f97316", "#9bc9a6", "#d3a476", "#94a3b8"];
+  const colors = ["#1268F3", "#F2B622", "#4B8DFF", "#D89300", "#94A3B8"];
   const workspaceProfile = getIndustryWorkspaceProfile(activeBusiness?.industry);
   const terminology = workspaceProfile.terminology;
   const showCommerceAnalytics =
@@ -124,18 +124,18 @@ export function AnalyticsPage() {
                 <AreaChart data={analytics.revenue_series}>
                   <defs>
                     <linearGradient id="revenueFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#15803d" stopOpacity={0.24} />
-                      <stop offset="95%" stopColor="#15803d" stopOpacity={0} />
+                      <stop offset="5%" stopColor="#1268F3" stopOpacity={0.24} />
+                      <stop offset="95%" stopColor="#1268F3" stopOpacity={0} />
                     </linearGradient>
                   </defs>
-                  <CartesianGrid vertical={false} stroke="#e8eee8" />
+                  <CartesianGrid vertical={false} stroke="#E2E8F0" />
                   <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={10} />
                   <YAxis tickLine={false} axisLine={false} fontSize={10} />
                   <Tooltip />
                   <Area
                     type="monotone"
                     dataKey="revenue"
-                    stroke="#15803d"
+                    stroke="#1268F3"
                     strokeWidth={2.4}
                     fill="url(#revenueFill)"
                   />
@@ -201,11 +201,11 @@ export function AnalyticsPage() {
             <div className="rechart-wrap small">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={analytics.revenue_series}>
-                  <CartesianGrid vertical={false} stroke="#e8eee8" />
+                  <CartesianGrid vertical={false} stroke="#E2E8F0" />
                   <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={10} />
                   <YAxis tickLine={false} axisLine={false} fontSize={10} />
                   <Tooltip />
-                  <Bar dataKey="orders" fill="#73ad80" radius={[5, 5, 0, 0]} />
+                  <Bar dataKey="orders" fill="#4B8DFF" radius={[5, 5, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -243,7 +243,7 @@ export function AnalyticsPage() {
       {marketing.isError ? <><PageHeader eyebrow="Marketing performance" title="Campaign intelligence" subtitle="Operational analytics above remain available." /><Card><div className="empty"><AlertCircle /><h3>Marketing performance could not load</h3><p>{humanizeApiError(marketing.error, "Stored operational analytics are unaffected.")}</p><Button onClick={() => void marketing.refetch()}>Retry marketing data</Button></div></Card></> : marketing.isLoading || !marketing.data ? <Card><div className="empty"><RefreshCw className="spin" /><p>Loading marketing performance…</p></div></Card> : <>
       <PageHeader eyebrow="Marketing performance" title="Campaign intelligence" subtitle="Descriptive manual/imported records with server-derived CTR, CPC, CPL, CPA, and ROAS. Attribution classes may differ and are not causal proof." />
       <div className="grid analytics-kpi-grid"><Metric title="Marketing spend" value={money(marketing.data.spend)} icon={<Target />} tone="orange" /><Metric title="Recorded revenue" value={money(marketing.data.revenue)} icon={<TrendingUp />} tone="green" /><Metric title="Recorded ROAS" value={`${Number(marketing.data.roas).toFixed(2)}x`} icon={<BarChart3 />} tone="brown" /><Metric title="Recorded conversions" value={String(marketing.data.conversions)} icon={<Sparkles />} tone="rose" /><Metric title="Impressions" value={marketing.data.impressions.toLocaleString()} icon={<Users />} tone="green" /><Metric title="CTR" value={`${Number(marketing.data.ctr).toFixed(2)}%`} icon={<BarChart3 />} tone="orange" /><Metric title="CPC" value={money(marketing.data.cpc)} icon={<Target />} tone="brown" /><Metric title="Leads" value={String(marketing.data.leads)} icon={<Users />} tone="rose" /></div>
-      <div className="grid analytics-main-grid"><Card className="chart-box"><SectionTitle title="Marketing spend and revenue" /><div className="rechart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={marketing.data.trends}><CartesianGrid vertical={false} stroke="#e8eee8" /><XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={10} /><YAxis tickLine={false} axisLine={false} fontSize={10} /><Tooltip /><Area type="monotone" dataKey="revenue" stroke="#15803d" fill="#dcefe0" /><Area type="monotone" dataKey="spend" stroke="#f97316" fill="#fde8d6" /></AreaChart></ResponsiveContainer></div>{!marketing.data.trends.length && <div className="empty compact-empty"><BarChart3 /><p>No marketing performance in this period.</p></div>}</Card><Card><SectionTitle title="Channel comparison" />{marketing.data.channels.map((item) => <div className="list-row" key={item.label}><div className="row-main"><strong>{item.label}</strong><div className="row-copy">{item.clicks} clicks · {item.conversions} conversions</div></div><Badge tone={Number(item.roas) >= 1 ? "success" : "neutral"}>{Number(item.roas).toFixed(2)}x ROAS</Badge></div>)}{!marketing.data.channels.length && <div className="empty compact-empty"><Target /><p>No channel records yet.</p></div>}</Card></div>
+      <div className="grid analytics-main-grid"><Card className="chart-box"><SectionTitle title="Marketing spend and revenue" /><div className="rechart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={marketing.data.trends}><CartesianGrid vertical={false} stroke="#E2E8F0" /><XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={10} /><YAxis tickLine={false} axisLine={false} fontSize={10} /><Tooltip /><Area type="monotone" dataKey="revenue" stroke="#1268F3" fill="#EAF2FF" /><Area type="monotone" dataKey="spend" stroke="#F2B622" fill="#FFF6D8" /></AreaChart></ResponsiveContainer></div>{!marketing.data.trends.length && <div className="empty compact-empty"><BarChart3 /><p>No marketing performance in this period.</p></div>}</Card><Card><SectionTitle title="Channel comparison" />{marketing.data.channels.map((item) => <div className="list-row" key={item.label}><div className="row-main"><strong>{item.label}</strong><div className="row-copy">{item.clicks} clicks · {item.conversions} conversions</div></div><Badge tone={Number(item.roas) >= 1 ? "success" : "neutral"}>{Number(item.roas).toFixed(2)}x ROAS</Badge></div>)}{!marketing.data.channels.length && <div className="empty compact-empty"><Target /><p>No channel records yet.</p></div>}</Card></div>
       <div className="grid analytics-secondary-grid"><Card><SectionTitle title="Campaign comparison" />{marketing.data.campaigns.map((item) => <div className="stat-row" key={item.label}><span>{item.label}</span><strong>{money(item.revenue)} · {Number(item.roas).toFixed(2)}x</strong></div>)}{!marketing.data.campaigns.length && <p className="subtle">No campaign performance records.</p>}</Card><Card><SectionTitle title="Top content" />{marketing.data.top_content.map((item) => <div className="stat-row" key={item.content_id}><span>{item.title}</span><strong>{item.conversions} conversions</strong></div>)}{!marketing.data.top_content.length && <p className="subtle">No content-attributed performance records.</p>}</Card><Card><SectionTitle title="Cost efficiency" /><div className="stat-row"><span>Cost per lead</span><strong>{money(marketing.data.cpl)}</strong></div><div className="stat-row"><span>Cost per acquisition</span><strong>{money(marketing.data.cpa)}</strong></div><div className="stat-row"><span>Recorded reach</span><strong>{marketing.data.reach.toLocaleString()}</strong></div></Card></div>
       </>}
       <GrowthLearningPanel campaigns={campaigns.data} />
