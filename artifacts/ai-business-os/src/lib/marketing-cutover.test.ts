@@ -185,6 +185,128 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
   }
 });
 
+test("AI CMO creation flows use the accessible responsive workspace drawer", async () => {
+  const [page, social, productUi, sheet, styles] = await Promise.all([
+    readFile(new URL("../features/marketing/cmo-page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../features/marketing/marketing-pages.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/product-ui.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/ui/sheet.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../index.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(page, /Generate strategy/);
+  assert.match(page, /Generate content/);
+  assert.match(page, /button-generate-strategy/);
+  assert.match(page, /button-generate-content/);
+  assert.match(page, /actionClassName="cmo-header-actions"/);
+
+  const strategyOpen = page.indexOf("open={showPlanGenerator}");
+  const strategyStart = page.lastIndexOf("<WorkspaceDrawer", strategyOpen);
+  const strategyEnd = page.indexOf("{editingPlan", strategyStart);
+  const strategy = page.slice(strategyStart, strategyEnd);
+  assert.match(strategy, /<WorkspaceDrawer/);
+  assert.doesNotMatch(strategy, /<Modal/);
+  assert.match(strategy, /open=\{showPlanGenerator\}/);
+  assert.match(strategy, /title="Create marketing strategy"/);
+  assert.match(strategy, /testId="cmo-strategy-workspace-drawer"/);
+  assert.match(strategy, /closeDisabled=\{generatePlan\.isPending\}/);
+
+  for (const field of [
+    "title",
+    "budget",
+    "goal",
+    "audience",
+    "period_start",
+    "period_end",
+    "channels",
+  ]) {
+    assert.match(strategy, new RegExp(`name="${field}"`), field);
+  }
+  for (const channel of [
+    "instagram",
+    "facebook",
+    "linkedin",
+    "tiktok",
+    "email",
+    "whatsapp",
+    "website",
+    "meta",
+    "google_ads",
+  ]) {
+    assert.match(page, new RegExp(`"${channel}"`), channel);
+  }
+  assert.match(page, /marketingApi\.plans\.generate\(activeBusinessId/);
+  assert.match(page, /goal: String\(form\.get\("goal"\)\)/);
+  assert.match(page, /target_audience: String\(form\.get\("audience"\)\)/);
+
+  const contentOpen = page.indexOf("open={showContentGenerator}");
+  const contentStart = page.lastIndexOf("<WorkspaceDrawer", contentOpen);
+  const contentEnd = page.indexOf("{editingContent", contentStart);
+  const contentDrawer = page.slice(contentStart, contentEnd);
+  assert.match(contentDrawer, /<WorkspaceDrawer/);
+  assert.doesNotMatch(contentDrawer, /<Modal/);
+  assert.match(contentDrawer, /open=\{showContentGenerator\}/);
+  assert.match(contentDrawer, /testId="cmo-content-workspace-drawer"/);
+  assert.match(page, /generateCampaignChannelDrafts/);
+  assert.doesNotMatch(page, /\{showPlanGenerator && \(\s*<WorkspaceDrawer/);
+  assert.doesNotMatch(page, /\{showContentGenerator && \(\s*<WorkspaceDrawer/);
+
+  assert.match(productUi, /open: boolean/);
+  assert.match(productUi, /<Sheet open=\{open\} modal/);
+  assert.match(productUi, /role="dialog"/);
+  assert.match(productUi, /aria-modal="true"/);
+  assert.match(productUi, /<SheetTitle/);
+  assert.match(productUi, /onEscapeKeyDown/);
+  assert.match(productUi, /onPointerDownOutside/);
+  assert.match(productUi, /closeClassName="workspace-drawer-close"/);
+  assert.match(productUi, /closeTestId="button-close-workspace-drawer"/);
+  assert.match(sheet, /aria-label=\{closeLabel\}/);
+  assert.match(sheet, /closeTestId\?: string/);
+  assert.match(sheet, /data-testid=\{closeTestId\}/);
+  assert.doesNotMatch(sheet, /data-testid="button-close-workspace-drawer"/);
+
+  const drawerStyles = styles.slice(
+    styles.indexOf("/* Focused creation workspaces"),
+    styles.indexOf(".conversation-layout", styles.indexOf("/* Focused creation workspaces")),
+  );
+  assert.match(styles, /width: clamp\(560px, 40vw, 680px\)/);
+  assert.match(styles, /height: 100dvh/);
+  assert.match(styles, /\.workspace-drawer-body[\s\S]*overflow-y: auto/);
+  assert.match(styles, /\.workspace-drawer-footer[\s\S]*position: sticky/);
+  assert.match(styles, /@media \(max-width: 680px\)[\s\S]*width: 100vw/);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
+  assert.match(styles, /\.cmo-channel-option:has\(input:checked\)/);
+  assert.match(styles, /\.workspace-drawer-panel\[data-state="closed"\][\s\S]*workspaceDrawerOut/);
+  assert.match(styles, /\.workspace-drawer-backdrop\[data-state="closed"\][\s\S]*workspaceBackdropOut/);
+  assert.match(drawerStyles, /\.workspace-drawer-description[\s\S]*font-size: 13px/);
+  assert.match(drawerStyles, /\.cmo-form-section-heading h3[\s\S]*font-size: 14px/);
+  assert.match(drawerStyles, /\.workspace-drawer-panel \.field label[\s\S]*font-size: 12px/);
+  assert.match(drawerStyles, /\.workspace-drawer-panel \.field input,[\s\S]*font-size: 14px/);
+  assert.match(drawerStyles, /\.cmo-channel-option[\s\S]*font-size: 12px/);
+  assert.match(drawerStyles, /\.cmo-assurance-item p[\s\S]*font-size: 11px/);
+  assert.doesNotMatch(drawerStyles, /font-size: 8px/);
+  assert.match(
+    drawerStyles,
+    /@media \(max-width: 680px\)[\s\S]*\.workspace-drawer-panel \.field input,[\s\S]*font-size: 16px/,
+  );
+
+  assert.match(
+    page,
+    /const openStrategyDrawer = \(\) => \{\s*setError\(""\);\s*setShowPlanGenerator\(true\);/,
+  );
+  assert.match(
+    page,
+    /const openContentDrawer = \(\) => \{\s*setError\(""\);\s*setShowContentGenerator\(true\);/,
+  );
+  assert.match(page, /onClick=\{openStrategyDrawer\}/);
+  assert.match(page, /onClick=\{openContentDrawer\}/);
+
+  assert.match(social, /button-advanced-create-draft/);
+  assert.match(social, /cmo-compact-action/);
+  assert.match(social, /Create draft/);
+  assert.match(social, /Advanced/);
+});
+
 test("completed marketing screens contain no workspace or localStorage dependency", async () => {
   const files = [
     "../features/marketing/cmo-page.tsx", "../features/marketing/marketing-pages.tsx",

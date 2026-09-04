@@ -2,7 +2,7 @@ import { useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, BarChart3, Calendar, Check, Globe2, RefreshCw, Sparkles, Target, TrendingUp, Wand2, X } from "lucide-react";
 import { useBusiness } from "@/business-context";
-import { Badge, Button, Card, Modal, PageHeader, SectionTitle } from "@/components/product-ui";
+import { Badge, Button, Card, Modal, PageHeader, SectionTitle, WorkspaceDrawer } from "@/components/product-ui";
 import { CmoContentStudioCard } from "@/features/marketing/cmo-content-studio";
 import { CmoDepartmentNav } from "@/features/marketing/marketing-pages";
 import {
@@ -29,6 +29,22 @@ function Kpi({ title, value, foot, icon, tone }: { title: string; value: string;
 const channels: MarketingChannel[] = ["instagram", "facebook", "linkedin", "tiktok", "email", "whatsapp", "website", "meta", "google_ads"];
 const contentTypes: MarketingContentType[] = ["social_post", "ad_copy", "email_draft", "whatsapp_draft", "blog_draft", "landing_page_copy", "headline", "cta", "content_package"];
 const primaryPlatforms: MarketingChannel[] = ["instagram", "facebook", "linkedin", "tiktok"];
+const channelLabels: Record<MarketingChannel, string> = {
+  meta: "Meta",
+  google_ads: "Google Ads",
+  instagram: "Instagram",
+  facebook: "Facebook",
+  linkedin: "LinkedIn",
+  tiktok: "TikTok",
+  email: "Email",
+  whatsapp: "WhatsApp",
+  website: "Website",
+  other: "Other",
+};
+
+function channelLabel(channel: MarketingChannel) {
+  return channelLabels[channel];
+}
 
 export function CmoPage() {
   const { activeBusinessId, activeBusiness } = useBusiness();
@@ -264,16 +280,51 @@ export function CmoPage() {
   const hasPartialFailure =
     plans.isError || content.isError || analytics.isError ||
     calendar.isError || campaigns.isError || creativeAssets.isError;
+  const openStrategyDrawer = () => {
+    setError("");
+    setShowPlanGenerator(true);
+  };
+  const openContentDrawer = () => {
+    setError("");
+    setShowContentGenerator(true);
+  };
 
   return <>
-    <PageHeader eyebrow="AI CMO" title="AI Marketing Manager" subtitle="Grounded strategy, durable content, and internal campaign planning—never silent external execution." action={<div className="toolbar"><Button onClick={() => setShowPlanGenerator(true)}><Target /> Generate strategy</Button><Button variant="primary" onClick={() => setShowContentGenerator(true)} data-testid="button-generate-content"><Wand2 /> Generate content</Button></div>} />
+    <PageHeader
+      eyebrow="AI CMO"
+      title="AI Marketing Manager"
+      subtitle="Grounded strategy, durable content, and internal campaign planning—never silent external execution."
+      actionClassName="cmo-header-actions"
+      action={
+        <>
+          <Button
+            variant="secondary"
+            className="cmo-header-action"
+            onClick={openStrategyDrawer}
+            data-testid="button-generate-strategy"
+          >
+            <Target />
+            Generate strategy
+          </Button>
+          <Button
+            variant="primary"
+            className="cmo-header-action"
+            onClick={openContentDrawer}
+            data-testid="button-generate-content"
+          >
+            <Wand2 />
+            Generate content
+          </Button>
+        </>
+      }
+    />
     <CmoDepartmentNav active={activeTab} />
     {notice && <div className="ai-banner"><Check /> {notice}<button className="close-btn" onClick={() => setNotice("")}><X /></button></div>}
     {error && <div className="ai-banner"><AlertCircle /> {error}<button className="close-btn" onClick={() => setError("")}><X /></button></div>}
     {hasPartialFailure && <div className="ai-banner"><AlertCircle />Some marketing sections could not refresh. Available internal planning data remains usable.<Button className="btn-sm" onClick={() => void refresh()}>Retry failed sections</Button></div>}
     {initialLoading ? <Card><div className="empty"><RefreshCw className="spin" /><p>Assembling the marketing workspace…</p></div></Card> : <>
       {analytics.isError ? <Card><div className="empty"><BarChart3 /><h3>Recorded performance could not load</h3><p>{humanizeApiError(analytics.error, "Retry the performance section. Internal plans and content are still available.")}</p><Button onClick={() => void analytics.refetch()}>Retry performance</Button></div></Card> : <div className="grid kpi-grid"><Kpi title="Reach" value={(metrics?.reach ?? 0).toLocaleString()} foot="Recorded in selected period" icon={<Globe2 />} tone="green" /><Kpi title="Click-through rate" value={`${Number(metrics?.ctr ?? 0).toFixed(2)}%`} foot={`${metrics?.clicks ?? 0} recorded clicks`} icon={<TrendingUp />} tone="orange" /><Kpi title="Leads" value={String(metrics?.leads ?? 0)} foot="Attributed records only" icon={<Target />} tone="brown" /><Kpi title="Revenue / ROAS" value={`${money(metrics?.revenue ?? "0")} · ${Number(metrics?.roas ?? 0).toFixed(2)}x`} foot={`${money(metrics?.spend ?? "0")} recorded spend`} icon={<BarChart3 />} tone="rose" /></div>}
-      <div className="grid split-grid"><Card><SectionTitle title="Current strategy" action={<Badge tone={plans.data?.items[0]?.status === "active" ? "success" : "warning"}>{plans.data?.items[0]?.status || "No plan"}</Badge>} />{plans.isError ? <div className="empty"><AlertCircle /><h3>Strategy could not load</h3><p>{humanizeApiError(plans.error, "Retry this section.")}</p><Button onClick={() => void plans.refetch()}>Retry strategy</Button></div> : plans.isLoading ? <div className="empty"><RefreshCw className="spin" /><p>Loading strategy…</p></div> : plans.data?.items[0] ? <><div className="eyebrow">{plans.data.items[0].generated_by === "ai" ? "AI CMO conclusion" : "User strategy"}</div><h2>{plans.data.items[0].title}</h2><p className="detail-copy">{plans.data.items[0].positioning}</p><div className="recommendation-strip"><Sparkles /><div><div className="eyebrow">Key message</div><p>{plans.data.items[0].key_message}</p></div></div><div className="chip-list">{plans.data.items[0].channels.map((channel) => <Badge tone="info" key={channel}>{channel}</Badge>)}</div><div className="toolbar" style={{ marginTop: 14 }}><Button className="btn-sm" onClick={() => setEditingPlan(true)}>Review & edit</Button>{plans.data.items[0].status === "ready" && <Button variant="green" className="btn-sm" disabled={movePlan.isPending} onClick={() => movePlan.mutate("active")}>Activate strategy</Button>}{plans.data.items[0].status === "active" && <Button variant="green" className="btn-sm" disabled={movePlan.isPending} onClick={() => movePlan.mutate("completed")}>Complete strategy</Button>}{plans.data.items[0].status === "completed" && <Button className="btn-sm" disabled={movePlan.isPending} onClick={() => movePlan.mutate("archived")}>Archive</Button>}</div></> : <div className="empty"><Target /><h3>Your AI marketing workspace is ready</h3><p>Generate a strategy from the trusted Business Brain. Channel connections are optional until execution.</p><Button variant="primary" onClick={() => setShowPlanGenerator(true)}>Generate marketing plan</Button></div>}</Card><Card><SectionTitle title="Campaign operating system" action={<Badge>{campaigns.data?.total ?? 0} campaigns</Badge>} />{campaigns.isError ? <div className="empty"><AlertCircle /><h3>Campaign drafts could not load</h3><p>{humanizeApiError(campaigns.error, "Retry campaign planning.")}</p><Button onClick={() => void campaigns.refetch()}>Retry campaigns</Button></div> : campaigns.isLoading ? <div className="empty"><RefreshCw className="spin" /><p>Loading campaigns…</p></div> : <>{campaigns.data?.items.slice(0, 5).map((campaign) => <div className="list-row" key={campaign.id}><Target /><div className="row-main"><strong>{campaign.name}</strong><div className="row-copy">{campaign.objective}</div></div><Badge tone={campaign.status === "active" ? "success" : campaign.status === "awaiting_approval" ? "warning" : "neutral"}>{campaign.status.replaceAll("_", " ")}</Badge></div>)}{!campaigns.data?.items.length && <div className="empty"><Target /><h3>No campaign drafts</h3><p>Campaign planning works before Meta or Google is connected.</p><LinkButton href="/campaigns?new=1">Prepare campaign</LinkButton></div>}</>}<div className="ai-banner"><AlertCircle />Connect Meta or Google Ads only when you are ready for governed external execution.</div></Card></div>
+      <div className="grid split-grid"><Card><SectionTitle title="Current strategy" action={<Badge tone={plans.data?.items[0]?.status === "active" ? "success" : "warning"}>{plans.data?.items[0]?.status || "No plan"}</Badge>} />{plans.isError ? <div className="empty"><AlertCircle /><h3>Strategy could not load</h3><p>{humanizeApiError(plans.error, "Retry this section.")}</p><Button onClick={() => void plans.refetch()}>Retry strategy</Button></div> : plans.isLoading ? <div className="empty"><RefreshCw className="spin" /><p>Loading strategy…</p></div> : plans.data?.items[0] ? <><div className="eyebrow">{plans.data.items[0].generated_by === "ai" ? "AI CMO conclusion" : "User strategy"}</div><h2>{plans.data.items[0].title}</h2><p className="detail-copy">{plans.data.items[0].positioning}</p><div className="recommendation-strip"><Sparkles /><div><div className="eyebrow">Key message</div><p>{plans.data.items[0].key_message}</p></div></div><div className="chip-list">{plans.data.items[0].channels.map((channel) => <Badge tone="info" key={channel}>{channel}</Badge>)}</div><div className="toolbar" style={{ marginTop: 14 }}><Button className="btn-sm" onClick={() => setEditingPlan(true)}>Review & edit</Button>{plans.data.items[0].status === "ready" && <Button variant="green" className="btn-sm" disabled={movePlan.isPending} onClick={() => movePlan.mutate("active")}>Activate strategy</Button>}{plans.data.items[0].status === "active" && <Button variant="green" className="btn-sm" disabled={movePlan.isPending} onClick={() => movePlan.mutate("completed")}>Complete strategy</Button>}{plans.data.items[0].status === "completed" && <Button className="btn-sm" disabled={movePlan.isPending} onClick={() => movePlan.mutate("archived")}>Archive</Button>}</div></> : <div className="empty"><Target /><h3>Your AI marketing workspace is ready</h3><p>Generate a strategy from the trusted Business Brain. Channel connections are optional until execution.</p><Button variant="primary" onClick={openStrategyDrawer}>Generate marketing plan</Button></div>}</Card><Card><SectionTitle title="Campaign operating system" action={<Badge>{campaigns.data?.total ?? 0} campaigns</Badge>} />{campaigns.isError ? <div className="empty"><AlertCircle /><h3>Campaign drafts could not load</h3><p>{humanizeApiError(campaigns.error, "Retry campaign planning.")}</p><Button onClick={() => void campaigns.refetch()}>Retry campaigns</Button></div> : campaigns.isLoading ? <div className="empty"><RefreshCw className="spin" /><p>Loading campaigns…</p></div> : <>{campaigns.data?.items.slice(0, 5).map((campaign) => <div className="list-row" key={campaign.id}><Target /><div className="row-main"><strong>{campaign.name}</strong><div className="row-copy">{campaign.objective}</div></div><Badge tone={campaign.status === "active" ? "success" : campaign.status === "awaiting_approval" ? "warning" : "neutral"}>{campaign.status.replaceAll("_", " ")}</Badge></div>)}{!campaigns.data?.items.length && <div className="empty"><Target /><h3>No campaign drafts</h3><p>Campaign planning works before Meta or Google is connected.</p><LinkButton href="/campaigns?new=1">Prepare campaign</LinkButton></div>}</>}<div className="ai-banner"><AlertCircle />Connect Meta or Google Ads only when you are ready for governed external execution.</div></Card></div>
       <div className="grid split-grid">
         <CmoContentStudioCard
           content={primary}
@@ -295,7 +346,7 @@ export function CmoPage() {
           creativeError={creativeAssets.isError ? humanizeApiError(creativeAssets.error, "Retry loading creative history.") : null}
           creativePhase={creativePhase}
           onRetry={() => void content.refetch()}
-          onGenerate={() => setShowContentGenerator(true)}
+          onGenerate={openContentDrawer}
           onRegenerate={(item) => regenerate.mutate(item)}
           onApprove={(item) => approve.mutate(item)}
           onSchedule={(item) => setSchedule(item)}
@@ -316,63 +367,67 @@ export function CmoPage() {
         />
         <Card><SectionTitle title="Content calendar" action={<Badge>{calendar.data?.length ?? 0} upcoming</Badge>} />{calendar.isError ? <div className="empty"><AlertCircle /><h3>Calendar could not load</h3><p>{humanizeApiError(calendar.error, "Retry the internal calendar.")}</p><Button onClick={() => void calendar.refetch()}>Retry calendar</Button></div> : calendar.isLoading ? <div className="empty"><RefreshCw className="spin" /><p>Loading calendar…</p></div> : <>{calendar.data?.slice(0, 8).map((item) => { const contentItem = content.data?.items.find((value) => value.id === item.content_id); return <div className="list-row" key={item.id}><div style={{ width: 86, color: "#938c83", fontSize: 10 }}>{new Date(item.scheduled_for).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}</div><div className="row-main"><div className="row-title">{contentItem?.title || `${item.channel} content`}</div><div className="row-copy">{new Date(item.scheduled_for).toLocaleTimeString()} · {item.timezone}</div></div><Badge tone="success">{item.status.replaceAll("_", " ")}</Badge></div>; })}{!calendar.data?.length && <div className="empty"><Calendar /><h3>No content scheduled</h3><p>Approved content can be added to the internal calendar without a publishing provider.</p></div>}</>}</Card></div>
     </>}
-    {showContentGenerator && (
-      <Modal
-        wide
+    <WorkspaceDrawer
+        open={showContentGenerator}
+        eyebrow="AI CMO"
         title="Create campaign content"
         description="Share the goal in plain language. 9D Brain handles the marketing strategy, copy, and channel adaptation."
         onClose={() => setShowContentGenerator(false)}
+        closeDisabled={generateContent.isPending}
+        testId="cmo-content-workspace-drawer"
+        footer={
+          <div className="cmo-drawer-footer-actions">
+            <Button
+              type="button"
+              disabled={generateContent.isPending}
+              onClick={() => {
+                setShowContentGenerator(false);
+                setError("");
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              type="submit"
+              form="cmo-content-generator-form"
+              disabled={generateContent.isPending}
+            >
+              {generateContent.isPending ? (
+                <>
+                  <RefreshCw className="spin" />
+                  Creating draft…
+                </>
+              ) : (
+                <>
+                  <Sparkles />
+                  Create campaign content
+                </>
+              )}
+            </Button>
+          </div>
+        }
       >
-        <form onSubmit={(event) => generateContent.mutate(event)}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "flex-start",
-              justifyContent: "space-between",
-              gap: 16,
-              padding: 16,
-              marginBottom: 18,
-              border: "1px solid #dbe7fb",
-              borderRadius: 14,
-              background:
-                "linear-gradient(135deg, #f6f9ff 0%, #fbfcff 58%, #fffaf0 100%)",
-            }}
-          >
-            <div style={{ minWidth: 0 }}>
+        <form
+          id="cmo-content-generator-form"
+          className="cmo-drawer-form"
+          onSubmit={(event) => generateContent.mutate(event)}
+        >
+          <div className="cmo-drawer-intro">
+            <div>
               <div className="eyebrow">Grounded generation</div>
-              <h3
-                style={{
-                  margin: 0,
-                  color: "#101828",
-                  fontSize: 15,
-                  lineHeight: 1.35,
-                }}
-              >
+              <h3>
                 {activeBusiness?.name
                   ? `Create for ${activeBusiness.name}`
                   : "Create marketing content"}
               </h3>
-              <p
-                style={{
-                  marginTop: 6,
-                  maxWidth: 620,
-                  color: "#667085",
-                  fontSize: 11,
-                  lineHeight: 1.6,
-                }}
-              >
+              <p>
                 AI CMO uses trusted Business Brain context and permitted memory.
                 Industry privacy rules remain enforced automatically.
               </p>
             </div>
 
-            <div
-              className="chip-list"
-              style={{
-                justifyContent: "flex-end",
-                flexShrink: 0,
-              }}
-            >
+            <div className="chip-list">
               <Badge tone="info">
                 <Sparkles />
                 AI CMO
@@ -384,7 +439,12 @@ export function CmoPage() {
             </div>
           </div>
 
-          <div className="form-grid">
+          <section className="cmo-form-section" aria-labelledby="cmo-content-brief-heading">
+            <div className="cmo-form-section-heading">
+              <h3 id="cmo-content-brief-heading">Campaign brief</h3>
+              <p>Set the outcome and add audience guidance only when you need to.</p>
+            </div>
+            <div className="cmo-drawer-grid">
             <div className="field full">
               <label htmlFor="cmo-content-prompt">
                 What do you want to achieve?
@@ -396,18 +456,9 @@ export function CmoPage() {
                 maxLength={OWNER_GOAL_MAX}
                 autoFocus
                 placeholder="Example: Promote our new shoes"
-                style={{
-                  minHeight: 132,
-                  padding: 14,
-                  fontSize: 12,
-                  lineHeight: 1.6,
-                  background: "#ffffff",
-                }}
+                className="cmo-goal-input"
               />
-              <span
-                className="subtle"
-                style={{ fontSize: 9, lineHeight: 1.5 }}
-              >
+              <span className="cmo-field-help">
                 A short request is enough. Only business facts supported by
                 trusted context will be used.
               </span>
@@ -415,7 +466,7 @@ export function CmoPage() {
 
             <div className="field full">
               <label htmlFor="cmo-content-audience">
-                Audience <span style={{ color: "#98a2b3", fontWeight: 500 }}>optional</span>
+                Audience <span className="cmo-optional">optional</span>
               </label>
               <input
                 id="cmo-content-audience"
@@ -424,40 +475,36 @@ export function CmoPage() {
                 placeholder="Let 9D Brain choose"
               />
             </div>
+            </div>
+          </section>
 
-            <div className="field full">
-              <label>Platforms</label>
-              <div className="checkbox-row" aria-label="Campaign platforms">
+          <section className="cmo-form-section" aria-labelledby="cmo-content-platforms-heading">
+            <div className="cmo-form-section-heading">
+              <h3 id="cmo-content-platforms-heading">Platforms</h3>
+              <p>Each selected platform receives its own native copy variant.</p>
+            </div>
+              <div className="cmo-channel-grid" aria-label="Campaign platforms">
                 {primaryPlatforms.map((channel) => (
-                  <label key={channel}>
+                  <label className="cmo-channel-option" key={channel}>
                     <input
                       type="checkbox"
                       name="platforms"
                       value={channel}
                       defaultChecked={channel === "instagram"}
                     />
-                    {channel.replaceAll("_", " ")}
+                    <span>{channelLabel(channel)}</span>
                   </label>
                 ))}
               </div>
-              <span className="subtle" style={{ fontSize: 9 }}>
-                Each selected platform receives its own native copy variant.
-              </span>
-            </div>
+          </section>
 
             <details
-              style={{
-                gridColumn: "1 / -1",
-                padding: 14,
-                border: "1px solid #e4e7ec",
-                borderRadius: 12,
-                background: "#fbfcfd",
-              }}
+              className="cmo-advanced-controls"
             >
-              <summary style={{ cursor: "pointer", color: "#344054", fontSize: 11, fontWeight: 700 }}>
+              <summary>
                 Advanced controls
               </summary>
-              <div className="form-grid" style={{ marginTop: 14 }}>
+              <div className="cmo-drawer-grid">
 
             <div className="field">
               <label htmlFor="cmo-content-campaign">Campaign</label>
@@ -478,7 +525,7 @@ export function CmoPage() {
                   </option>
                 ))}
               </select>
-              <span className="subtle" style={{ fontSize: 9 }}>
+              <span className="cmo-field-help">
                 Optional campaign context
               </span>
             </div>
@@ -493,11 +540,11 @@ export function CmoPage() {
                 <option value="">None</option>
                 {channels.map((channel) => (
                   <option key={channel} value={channel}>
-                    {channel.replaceAll("_", " ")}
+                    {channelLabel(channel)}
                   </option>
                 ))}
               </select>
-              <span className="subtle" style={{ fontSize: 9 }}>
+              <span className="cmo-field-help">
                 Email, website, ads, and other supported formats remain available
               </span>
             </div>
@@ -515,7 +562,7 @@ export function CmoPage() {
                   </option>
                 ))}
               </select>
-              <span className="subtle" style={{ fontSize: 9 }}>
+              <span className="cmo-field-help">
                 Choose the format you need
               </span>
             </div>
@@ -529,7 +576,7 @@ export function CmoPage() {
                 maxLength={16}
                 spellCheck={false}
               />
-              <span className="subtle" style={{ fontSize: 9 }}>
+              <span className="cmo-field-help">
                 Uses your business locale by default
               </span>
             </div>
@@ -537,13 +584,7 @@ export function CmoPage() {
             <div className="field full">
               <label htmlFor="cmo-content-title">
                 Title override
-                <span
-                  style={{
-                    marginLeft: 5,
-                    color: "#98a2b3",
-                    fontWeight: 500,
-                  }}
-                >
+                <span className="cmo-optional">
                   optional
                 </span>
               </label>
@@ -556,161 +597,54 @@ export function CmoPage() {
             </div>
               </div>
             </details>
-          </div>
 
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
-              gap: 10,
-              marginTop: 18,
-            }}
-          >
-            <div
-              style={{
-                padding: "12px 13px",
-                border: "1px solid #e4e7ec",
-                borderRadius: 11,
-                background: "#fbfcfd",
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  marginBottom: 4,
-                  color: "#344054",
-                  fontSize: 10,
-                  fontWeight: 700,
-                }}
-              >
+          <div className="cmo-assurance-grid">
+            <div className="cmo-assurance-item">
+              <div className="cmo-assurance-title">
                 <Check size={13} />
                 Business Brain
               </div>
-              <p
-                style={{
-                  color: "#667085",
-                  fontSize: 9,
-                  lineHeight: 1.5,
-                }}
-              >
+              <p>
                 Uses trusted business facts and branding available to the CMO.
               </p>
             </div>
 
-            <div
-              style={{
-                padding: "12px 13px",
-                border: "1px solid #e4e7ec",
-                borderRadius: 11,
-                background: "#fbfcfd",
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  marginBottom: 4,
-                  color: "#344054",
-                  fontSize: 10,
-                  fontWeight: 700,
-                }}
-              >
+            <div className="cmo-assurance-item">
+              <div className="cmo-assurance-title">
                 <Target size={13} />
                 Campaign aware
               </div>
-              <p
-                style={{
-                  color: "#667085",
-                  fontSize: 9,
-                  lineHeight: 1.5,
-                }}
-              >
+              <p>
                 Selected campaign objectives and authorized offers are considered.
               </p>
             </div>
 
-            <div
-              style={{
-                padding: "12px 13px",
-                border: "1px solid #e4e7ec",
-                borderRadius: 11,
-                background: "#fbfcfd",
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  marginBottom: 4,
-                  color: "#344054",
-                  fontSize: 10,
-                  fontWeight: 700,
-                }}
-              >
+            <div className="cmo-assurance-item">
+              <div className="cmo-assurance-title">
                 <AlertCircle size={13} />
                 Approval protected
               </div>
-              <p
-                style={{
-                  color: "#667085",
-                  fontSize: 9,
-                  lineHeight: 1.5,
-                }}
-              >
+              <p>
                 Generation creates a draft only. Nothing is published automatically.
               </p>
             </div>
           </div>
 
           {campaigns.isError && (
-            <div className="ai-banner warning" style={{ marginTop: 16 }}>
+            <div className="ai-banner warning">
               <AlertCircle />
               Campaigns could not load. You can still create standalone content.
             </div>
           )}
 
           {error && (
-            <p className="form-error" style={{ marginTop: 14 }}>
+            <p className="form-error">
               {error}
             </p>
           )}
 
-          <div className="modal-foot">
-            <Button
-              type="button"
-              onClick={() => {
-                setShowContentGenerator(false);
-                setError("");
-              }}
-            >
-              Cancel
-            </Button>
-
-            <Button
-              variant="primary"
-              type="submit"
-              disabled={generateContent.isPending}
-            >
-              {generateContent.isPending ? (
-                <>
-                  <RefreshCw className="spin" />
-                  Creating draft…
-                </>
-              ) : (
-                <>
-                  <Sparkles />
-                  Create campaign content
-                </>
-              )}
-            </Button>
-          </div>
         </form>
-      </Modal>
-    )}
+      </WorkspaceDrawer>
     {editingContent && (
       <Modal
         wide
@@ -994,7 +928,152 @@ export function CmoPage() {
       </Modal>
     )}
 
-    {showPlanGenerator && <Modal title="Generate AI CMO strategy" description="This saves usable conclusions only—never hidden reasoning or external actions." onClose={() => setShowPlanGenerator(false)}><form onSubmit={(event) => generatePlan.mutate(event)}><div className="form-grid"><div className="field"><label>Plan title</label><input name="title" maxLength={180} /></div><div className="field"><label>Budget guidance</label><input name="budget" type="number" min="0" max="1000000000" step="0.01" /></div><div className="field full"><label>Marketing goal</label><textarea name="goal" required maxLength={4000} /></div><div className="field full"><label>Target audience</label><textarea name="audience" required maxLength={2000} placeholder="Use generic administrative/customer segmentation only" /></div><div className="field"><label>Period start</label><input name="period_start" type="date" /></div><div className="field"><label>Period end</label><input name="period_end" type="date" /></div><div className="field full"><label>Channels</label><div className="checkbox-row">{channels.map((channel) => <label key={channel}><input type="checkbox" name="channels" value={channel} defaultChecked={["instagram", "email"].includes(channel)} /> {channel.replaceAll("_", " ")}</label>)}</div></div></div><div className="modal-foot"><Button type="button" onClick={() => setShowPlanGenerator(false)}>Cancel</Button><Button variant="primary" type="submit" disabled={generatePlan.isPending}><Sparkles /> {generatePlan.isPending ? "Building strategy…" : "Generate strategy"}</Button></div></form></Modal>}
+    <WorkspaceDrawer
+        open={showPlanGenerator}
+        eyebrow="AI CMO"
+        title="Create marketing strategy"
+        description="Tell 9D Brain the goal. Your Business Brain supplies the context."
+        onClose={() => setShowPlanGenerator(false)}
+        closeDisabled={generatePlan.isPending}
+        testId="cmo-strategy-workspace-drawer"
+        footer={
+          <div className="cmo-drawer-footer-actions">
+            <Button
+              type="button"
+              disabled={generatePlan.isPending}
+              onClick={() => setShowPlanGenerator(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              type="submit"
+              form="cmo-strategy-generator-form"
+              disabled={generatePlan.isPending}
+            >
+              {generatePlan.isPending ? (
+                <>
+                  <RefreshCw className="spin" />
+                  Building strategy…
+                </>
+              ) : (
+                <>
+                  <Sparkles />
+                  Generate strategy
+                </>
+              )}
+            </Button>
+          </div>
+        }
+      >
+        <form
+          id="cmo-strategy-generator-form"
+          className="cmo-drawer-form"
+          onSubmit={(event) => generatePlan.mutate(event)}
+        >
+          <div className="ai-banner">
+            <Sparkles />
+            This saves usable conclusions only—never hidden reasoning or external actions.
+          </div>
+
+          <section className="cmo-form-section" aria-labelledby="cmo-strategy-objective-heading">
+            <div className="cmo-form-section-heading">
+              <h3 id="cmo-strategy-objective-heading">Campaign objective</h3>
+              <p>Describe the business outcome so AI CMO can build a grounded direction.</p>
+            </div>
+            <div className="cmo-drawer-grid">
+              <div className="field full">
+                <label htmlFor="cmo-strategy-title">
+                  Plan title <span className="cmo-optional">optional</span>
+                </label>
+                <input id="cmo-strategy-title" name="title" maxLength={180} />
+              </div>
+              <div className="field full">
+                <label htmlFor="cmo-strategy-goal">Marketing goal</label>
+                <textarea
+                  id="cmo-strategy-goal"
+                  className="cmo-goal-input"
+                  name="goal"
+                  required
+                  maxLength={4000}
+                  autoFocus
+                  placeholder="Example: Increase qualified demand for our new service"
+                />
+              </div>
+            </div>
+          </section>
+
+          <section className="cmo-form-section" aria-labelledby="cmo-strategy-audience-heading">
+            <div className="cmo-form-section-heading">
+              <h3 id="cmo-strategy-audience-heading">Audience &amp; budget</h3>
+              <p>Set practical guidance without replacing trusted business context.</p>
+            </div>
+            <div className="cmo-drawer-grid cmo-audience-budget-grid">
+              <div className="field">
+                <label htmlFor="cmo-strategy-audience">Target audience</label>
+                <textarea
+                  id="cmo-strategy-audience"
+                  name="audience"
+                  required
+                  maxLength={2000}
+                  placeholder="Use generic administrative/customer segmentation only"
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="cmo-strategy-budget">Budget guidance</label>
+                <input
+                  id="cmo-strategy-budget"
+                  name="budget"
+                  type="number"
+                  min="0"
+                  max="1000000000"
+                  step="0.01"
+                  placeholder="Optional"
+                />
+              </div>
+            </div>
+          </section>
+
+          <section className="cmo-form-section" aria-labelledby="cmo-strategy-timing-heading">
+            <div className="cmo-form-section-heading">
+              <h3 id="cmo-strategy-timing-heading">Timing</h3>
+              <p>Add a planning window when the strategy is tied to specific dates.</p>
+            </div>
+            <div className="cmo-drawer-grid">
+              <div className="field">
+                <label htmlFor="cmo-strategy-period-start">Period start</label>
+                <input id="cmo-strategy-period-start" name="period_start" type="date" />
+              </div>
+              <div className="field">
+                <label htmlFor="cmo-strategy-period-end">Period end</label>
+                <input id="cmo-strategy-period-end" name="period_end" type="date" />
+              </div>
+            </div>
+          </section>
+
+          <section className="cmo-form-section" aria-labelledby="cmo-strategy-channels-heading">
+            <div className="cmo-form-section-heading">
+              <h3 id="cmo-strategy-channels-heading">Channels</h3>
+              <p>Select the channels the strategy should coordinate.</p>
+            </div>
+            <div className="cmo-channel-grid" aria-label="Strategy channels">
+              {channels.map((channel) => (
+                <label className="cmo-channel-option" key={channel}>
+                  <input
+                    type="checkbox"
+                    name="channels"
+                    value={channel}
+                    defaultChecked={["instagram", "email"].includes(channel)}
+                  />
+                  <span>{channelLabel(channel)}</span>
+                </label>
+              ))}
+            </div>
+          </section>
+
+          {error && <p className="form-error">{error}</p>}
+        </form>
+      </WorkspaceDrawer>
     {editingPlan && plans.data?.items[0] && <Modal wide title="Review marketing plan" description="Edit the usable AI conclusions before activating the strategy." onClose={() => setEditingPlan(false)}><form onSubmit={(event) => updatePlan.mutate(event)}><div className="form-grid"><div className="field full"><label>Title</label><input name="title" required defaultValue={plans.data.items[0].title} /></div><div className="field full"><label>Objective</label><textarea name="objective" required maxLength={1000} defaultValue={plans.data.items[0].objective} /></div><div className="field full"><label>Target audience</label><textarea name="target_audience" required maxLength={2000} defaultValue={plans.data.items[0].target_audience} /></div><div className="field full"><label>Positioning</label><textarea name="positioning" required maxLength={3000} defaultValue={plans.data.items[0].positioning} /></div><div className="field full"><label>Key message</label><textarea name="key_message" required maxLength={3000} defaultValue={plans.data.items[0].key_message} /></div><div className="field full"><label>Offer</label><textarea name="offer" maxLength={2000} defaultValue={plans.data.items[0].offer || ""} /></div><div className="field full"><label>Content strategy</label><textarea name="content_strategy" maxLength={5000} defaultValue={plans.data.items[0].content_strategy || ""} /></div><div className="field full"><label>Measurement goals (one per line)</label><textarea name="measurement_goals" defaultValue={plans.data.items[0].measurement_goals.join("\n")} /></div></div><div className="modal-foot"><Button type="button" onClick={() => setEditingPlan(false)}>Cancel</Button><Button variant="primary" type="submit" disabled={updatePlan.isPending}>{updatePlan.isPending ? "Saving…" : "Save reviewed plan"}</Button></div></form></Modal>}
     {schedule && <Modal title="Schedule content" description="Creates an internal calendar item; no social platform is contacted." onClose={() => setSchedule(null)}><form onSubmit={(event) => createSchedule.mutate(event)}><div className="field"><label>Date and time</label><input name="scheduled_for" type="datetime-local" required /></div><div className="modal-foot"><Button type="button" onClick={() => setSchedule(null)}>Cancel</Button><Button variant="primary" type="submit" disabled={createSchedule.isPending}><Calendar /> Schedule internally</Button></div></form></Modal>}
   </>;

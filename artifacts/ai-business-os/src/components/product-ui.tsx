@@ -4,6 +4,12 @@ import type {
   ReactNode,
 } from "react";
 import { X } from "lucide-react";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { cx, initials } from "@/lib/product-utils";
 
 export type ButtonVariant =
@@ -62,11 +68,13 @@ export function PageHeader({
   title,
   subtitle,
   action,
+  actionClassName,
 }: {
   eyebrow?: string;
   title: string;
   subtitle?: string;
   action?: ReactNode;
+  actionClassName?: string;
 }) {
   return (
     <div className="page-heading">
@@ -75,7 +83,7 @@ export function PageHeader({
         <h1>{title}</h1>
         {subtitle && <p className="subtle">{subtitle}</p>}
       </div>
-      {action && <div className="toolbar">{action}</div>}
+      {action && <div className={cx("toolbar", actionClassName)}>{action}</div>}
     </div>
   );
 }
@@ -187,5 +195,62 @@ export function Modal({
         <div className="modal-body">{children}</div>
       </div>
     </div>
+  );
+}
+
+export function WorkspaceDrawer({
+  open,
+  eyebrow,
+  title,
+  description,
+  children,
+  footer,
+  onClose,
+  closeDisabled = false,
+  testId,
+}: {
+  open: boolean;
+  eyebrow?: string;
+  title: string;
+  description?: string;
+  children: ReactNode;
+  footer?: ReactNode;
+  onClose: () => void;
+  closeDisabled?: boolean;
+  testId?: string;
+}) {
+  const requestClose = () => {
+    if (!closeDisabled) onClose();
+  };
+
+  return (
+    <Sheet open={open} modal onOpenChange={(nextOpen) => !nextOpen && requestClose()}>
+      <SheetContent
+        side="right"
+        className="workspace-drawer-panel"
+        overlayClassName="workspace-drawer-backdrop"
+        closeLabel={`Close ${title}`}
+        closeDisabled={closeDisabled}
+        closeClassName="workspace-drawer-close"
+        closeTestId="button-close-workspace-drawer"
+        data-testid={testId}
+        role="dialog"
+        aria-modal="true"
+        onEscapeKeyDown={(event) => closeDisabled && event.preventDefault()}
+        onPointerDownOutside={(event) => closeDisabled && event.preventDefault()}
+      >
+        <header className="workspace-drawer-header">
+          {eyebrow && <div className="eyebrow">{eyebrow}</div>}
+          <SheetTitle className="workspace-drawer-title">{title}</SheetTitle>
+          {description && (
+            <SheetDescription className="workspace-drawer-description">
+              {description}
+            </SheetDescription>
+          )}
+        </header>
+        <div className="workspace-drawer-body">{children}</div>
+        {footer && <footer className="workspace-drawer-footer">{footer}</footer>}
+      </SheetContent>
+    </Sheet>
   );
 }

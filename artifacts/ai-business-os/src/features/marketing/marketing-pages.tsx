@@ -1818,9 +1818,16 @@ export function SocialManagementPage() {
         eyebrow="AI CMO · Content autopilot"
         title="Content Studio & Social Calendar"
         subtitle="Review AI recommendations, upcoming drafts, approval state, calendar slots, and measured results."
+        actionClassName="cmo-content-header-actions"
         action={
-          <Link href="/marketing/content" className="btn">
-            <Plus /> Advanced · Create draft
+          <Link
+            href="/marketing/content"
+            className="btn btn-secondary cmo-compact-action"
+            data-testid="button-advanced-create-draft"
+          >
+            <Plus />
+            <span>Create draft</span>
+            <span className="cmo-action-context">Advanced</span>
           </Link>
         }
       />
