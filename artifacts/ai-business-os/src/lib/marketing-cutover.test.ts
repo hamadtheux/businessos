@@ -186,8 +186,9 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
 });
 
 test("AI CMO creation flows use the accessible responsive workspace drawer", async () => {
-  const [page, social, productUi, sheet, styles] = await Promise.all([
+  const [page, studio, social, productUi, sheet, styles] = await Promise.all([
     readFile(new URL("../features/marketing/cmo-page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../features/marketing/cmo-content-studio.tsx", import.meta.url), "utf8"),
     readFile(new URL("../features/marketing/marketing-pages.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/product-ui.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/ui/sheet.tsx", import.meta.url), "utf8"),
@@ -198,7 +199,34 @@ test("AI CMO creation flows use the accessible responsive workspace drawer", asy
   assert.match(page, /Generate content/);
   assert.match(page, /button-generate-strategy/);
   assert.match(page, /button-generate-content/);
-  assert.match(page, /actionClassName="cmo-header-actions"/);
+  assert.match(page, /actionClassName="cmo-overview-actions"/);
+
+  const headerActions = page.slice(
+    page.indexOf('actionClassName="cmo-overview-actions"'),
+    page.indexOf("<CmoDepartmentNav"),
+  );
+  assert.match(headerActions, /cmo-overview-action cmo-overview-action-secondary/);
+  assert.match(headerActions, /cmo-overview-action cmo-overview-action-primary/);
+  assert.match(headerActions, /<Target \/>\s*Generate strategy/);
+  assert.match(headerActions, /<WandSparkles \/>\s*Generate content/);
+  assert.doesNotMatch(headerActions, /icon-(?:badge|chip)|cmo-action-context|<span/);
+
+  const studioEmptyState = studio.slice(
+    studio.indexOf("if (!content)"),
+    studio.indexOf("const groundingSummary"),
+  );
+  assert.match(studioEmptyState, /className="cmo-card-cta" onClick=\{onGenerate\}/);
+  assert.match(studioEmptyState, /<WandSparkles \/>\s*Generate content/);
+  assert.doesNotMatch(studioEmptyState, /<Wand2 \/>|<Sparkles \/>/);
+  assert.match(page, /className="cmo-card-cta" onClick=\{openStrategyDrawer\}/);
+  assert.match(page, /<LinkButton href="\/campaigns\?new=1">Prepare campaign<\/LinkButton>/);
+  assert.match(page, /className="btn btn-primary cmo-card-cta"/);
+
+  assert.match(styles, /\.cmo-overview-actions \{[\s\S]*gap: 12px/);
+  assert.match(styles, /\.cmo-overview-action \{[\s\S]*height: 44px[\s\S]*padding: 0 17px[\s\S]*gap: 8px[\s\S]*font-size: 13px[\s\S]*font-weight: 600/);
+  assert.match(styles, /\.cmo-overview-action svg \{[\s\S]*width: 18px[\s\S]*height: 18px/);
+  assert.match(styles, /\.cmo-card-cta \{[\s\S]*height: 40px[\s\S]*padding: 0 15px[\s\S]*gap: 7px[\s\S]*font-size: 12px[\s\S]*font-weight: 600/);
+  assert.match(styles, /\.cmo-card-cta svg \{[\s\S]*width: 16px[\s\S]*height: 16px[\s\S]*margin: 0[\s\S]*color: currentColor/);
 
   const strategyOpen = page.indexOf("open={showPlanGenerator}");
   const strategyStart = page.lastIndexOf("<WorkspaceDrawer", strategyOpen);

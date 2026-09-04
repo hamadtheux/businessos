@@ -1603,35 +1603,96 @@ td strong {
 }
 
 /* Focused creation workspaces — Radix Sheet provides modal/focus behavior. */
-.cmo-header-actions {
+.cmo-overview-actions {
+  align-self: center;
   flex-wrap: nowrap;
   gap: 12px;
-  padding-top: 4px;
 }
 .cmo-content-header-actions {
   padding-top: 4px;
 }
-.cmo-header-action {
-  min-height: 42px;
+.cmo-overview-action {
+  height: 44px;
+  min-height: 44px;
   padding: 0 17px;
+  border-radius: 10px;
   gap: 8px;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
 }
-.cmo-header-action svg,
+.cmo-overview-action svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  stroke-width: 2;
+}
+.cmo-overview-action-secondary {
+  border-color: #d0d5dd;
+  background: #ffffff;
+  color: #344054;
+  box-shadow: none;
+}
+.cmo-overview-action-secondary:hover {
+  border-color: #b7c0cc;
+  background: #f8fafc;
+  color: #1d2939;
+  box-shadow: none;
+}
+.cmo-overview-action-primary {
+  box-shadow: 0 4px 10px color-mix(in srgb, var(--brand-primary) 18%, transparent);
+}
+.cmo-overview-action-primary:hover {
+  box-shadow: 0 6px 14px color-mix(in srgb, var(--brand-primary) 22%, transparent);
+}
+.cmo-overview-action:active {
+  transform: translateY(0);
+}
+.cmo-overview-action:disabled {
+  box-shadow: none;
+}
+.cmo-card-cta {
+  height: 40px;
+  min-height: 40px;
+  padding: 0 15px;
+  border-radius: 9px;
+  gap: 7px;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  box-shadow: 0 3px 8px color-mix(in srgb, var(--brand-primary) 14%, transparent);
+}
+.cmo-card-cta svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  margin: 0;
+  color: currentColor;
+  stroke-width: 2;
+}
+.cmo-card-cta:hover {
+  box-shadow: 0 4px 10px color-mix(in srgb, var(--brand-primary) 18%, transparent);
+}
+.cmo-card-cta:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--brand-primary) 14%, transparent);
+}
+.cmo-card-cta:disabled {
+  box-shadow: none;
+}
 .cmo-compact-action svg {
   width: 16px;
   height: 16px;
   flex: 0 0 auto;
 }
-.cmo-header-action.btn-secondary:hover,
 .cmo-compact-action:hover {
   color: var(--brand-primary-ink);
   border-color: var(--brand-primary-border);
   background: #ffffff;
   box-shadow: 0 4px 12px rgba(15, 23, 42, 0.07);
 }
-.cmo-header-action:active,
 .cmo-compact-action:active {
   transform: translateY(0);
   box-shadow: 0 2px 7px rgba(15, 23, 42, 0.06);
@@ -2005,11 +2066,11 @@ td strong {
   }
 }
 @media (max-width: 470px) {
-  .cmo-header-actions {
+  .cmo-overview-actions {
     display: grid;
     grid-template-columns: 1fr;
   }
-  .cmo-header-actions .btn {
+  .cmo-overview-actions .btn {
     width: 100%;
   }
   .cmo-channel-grid {

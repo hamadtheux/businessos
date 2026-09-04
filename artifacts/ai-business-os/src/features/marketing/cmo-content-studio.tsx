@@ -9,6 +9,7 @@ import {
   ShieldCheck,
   Sparkles,
   Wand2,
+  WandSparkles,
 } from "lucide-react";
 
 import {
@@ -257,15 +258,14 @@ export function CmoContentStudioCard({
         />
 
         <div className="empty">
-          <Wand2 />
           <h3>Create your first grounded marketing draft</h3>
           <p>
             Generate brand-aware content from the trusted Business Brain.
             Nothing is published until you review and approve it.
           </p>
 
-          <Button variant="primary" onClick={onGenerate}>
-            <Sparkles />
+          <Button variant="primary" className="cmo-card-cta" onClick={onGenerate}>
+            <WandSparkles />
             Generate content
           </Button>
         </div>
