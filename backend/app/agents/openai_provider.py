@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, TypeVar
 
 from openai import AsyncOpenAI, OpenAIError
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.agents.provider import (
     AIAgentProviderMetadata,
     AIAgentProviderRequest,
     AIAgentProviderResult,
+    AIAgentTypedProviderResult,
 )
 from app.core.config import Settings
 from app.exceptions.ai_agent import (
@@ -30,6 +31,12 @@ _PROVIDER_FAILURE: Final = (
 
 _INVALID_RESPONSE: Final = (
     "OpenAI provider returned an invalid structured response"
+)
+
+
+StructuredOutput = TypeVar(
+    "StructuredOutput",
+    bound=BaseModel,
 )
 
 
@@ -118,6 +125,27 @@ class OpenAIAgentProvider:
         Raw responses, headers, credentials, context, and hidden reasoning are
         never returned.
         """
+        typed_result = await self.generate_typed_with_metadata(
+            request,
+            AIAgentStructuredOutput,
+        )
+
+        return AIAgentProviderResult(
+            output=typed_result.output,
+            metadata=typed_result.metadata,
+        )
+
+    async def generate_typed_with_metadata(
+        self,
+        request: AIAgentProviderRequest,
+        output_type: type[StructuredOutput],
+    ) -> AIAgentTypedProviderResult[StructuredOutput]:
+        """
+        Generate one caller-selected, strictly parsed Pydantic result.
+
+        The request and metadata boundaries are identical to ordinary agent
+        generation; only the public structured result schema varies.
+        """
         try:
             response = await self._client.responses.parse(
                 model=self._model,
@@ -131,7 +159,7 @@ class OpenAIAgentProvider:
                         "content": request.task,
                     },
                 ],
-                text_format=AIAgentStructuredOutput,
+                text_format=output_type,
                 store=False,
                 max_output_tokens=request.max_output_tokens,
             )
@@ -160,9 +188,7 @@ class OpenAIAgentProvider:
                 _INVALID_RESPONSE
             )
 
-        parsed_outputs: list[
-            AIAgentStructuredOutput
-        ] = []
+        parsed_outputs: list[StructuredOutput] = []
 
         for output in response.output:
             if output.type != "message":
@@ -179,7 +205,7 @@ class OpenAIAgentProvider:
 
                 try:
                     validated = (
-                        AIAgentStructuredOutput.model_validate(
+                        output_type.model_validate(
                             parsed
                         )
                     )
@@ -244,7 +270,7 @@ class OpenAIAgentProvider:
             ),
         )
 
-        return AIAgentProviderResult(
+        return AIAgentTypedProviderResult(
             output=parsed_outputs[0],
             metadata=metadata,
         )

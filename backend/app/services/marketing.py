@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 from copy import deepcopy
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -14,11 +16,18 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.provider import AIAgentProvider
-from app.agents.runtime import execute_ai_agent
+from app.agents.runtime import (
+    execute_ai_agent,
+    execute_ai_agent_typed_with_metadata,
+)
 from app.domain.marketing import CAMPAIGN_TRANSITIONS, CONTENT_TRANSITIONS, MARKETING_PLAN_TRANSITIONS, TREND_TRANSITIONS
 from app.domain.business_industries import get_business_industry, is_healthcare_business_type
 from app.domain.audience_safety import contains_sensitive_targeting
-from app.exceptions.ai_agent import AIAgentError
+from app.exceptions.ai_agent import (
+    AIAgentError,
+    AIAgentProviderError,
+    AIAgentResponseError,
+)
 from app.exceptions.marketing import MarketingAIError, MarketingNotFoundError, MarketingPersistenceError, MarketingStateError, MarketingValidationError
 from app.services.creative_provider import (
     CreativeGenerationProvider,
@@ -99,6 +108,12 @@ from app.storage.base import ObjectStorage, StorageError
 ZERO = Decimal("0")
 MONEY_QUANTUM = Decimal("0.0001")
 RATIO_QUANTUM = Decimal("0.000001")
+
+logger = logging.getLogger("aibos.marketing")
+
+_SAFE_AI_DIAGNOSTIC_IDENTIFIER = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+)
 
 
 def _page(page: int, page_size: int) -> tuple[int, int]:
@@ -1267,42 +1282,81 @@ async def create_creative_brief(
         "- Do not claim that an image has already been generated.\n\n"
 
         "OUTPUT CONTRACT:\n"
-        "Return recommendations as an empty list. Do not propose actions. "
-        "Put exactly one JSON object in summary using these exact fields:\n"
+        "Return exactly one CreativeStrategyProposal through the required typed "
+        "output schema. Do not wrap it in a summary string, markdown, or a second "
+        "serialized JSON document. Set recommendations, proposed_actions, and "
+        "evidence_source_ids to empty lists. Use these exact strategy fields:\n"
         "marketing_goal, target_audience, audience_insight, campaign_angle, hook, "
         "headline, supporting_message, cta, visual_concept, composition_direction, "
         "subject_focus, mood, lighting, negative_space, brand_treatment, "
         "recommended_channel, pr_guardrails, prohibited_claims, evidence_source_ids.\n"
         "pr_guardrails and prohibited_claims must be short user-visible lists. "
-        "evidence_source_ids must be an empty list because authoritative provenance "
-        "is owned by the server. Never include hidden reasoning or chain-of-thought."
+        "Authoritative provenance is owned by the server. Never include hidden "
+        "reasoning or chain-of-thought."
     )
 
-    execution = await _execute_cmo(
+    execution = await _execute_creative_strategy(
         session,
         business_id,
         task,
         provider,
+        expected_channel=expected_channel,
     )
 
     try:
-        strategy = CreativeStrategyProposal.model_validate_json(
-            execution.output.summary
+        strategy = CreativeStrategyProposal.model_validate(
+            execution.output
         )
     except ValidationError:
+        _log_creative_strategy_failure(
+            "creative_strategy_schema_invalid",
+            provider=provider,
+            expected_channel=expected_channel,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
         raise MarketingAIError from None
 
-    if (
-        execution.output.recommendations
-        or execution.output.proposed_actions
-        or strategy.evidence_source_ids
-    ):
+    if strategy.recommendations:
+        _log_creative_strategy_failure(
+            "creative_strategy_unexpected_recommendations",
+            provider=provider,
+            expected_channel=expected_channel,
+            returned_channel=strategy.recommended_channel,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
+        raise MarketingAIError
+
+    if strategy.proposed_actions:
+        _log_creative_strategy_failure(
+            "creative_strategy_proposed_actions_rejected",
+            provider=provider,
+            expected_channel=expected_channel,
+            returned_channel=strategy.recommended_channel,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
+        raise MarketingAIError
+
+    if strategy.evidence_source_ids:
+        _log_creative_strategy_failure(
+            "creative_strategy_evidence_ids_rejected",
+            provider=provider,
+            expected_channel=expected_channel,
+            returned_channel=strategy.recommended_channel,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
         raise MarketingAIError
 
     if (
         expected_channel is not None
         and strategy.recommended_channel != expected_channel
     ):
+        _log_creative_strategy_failure(
+            "creative_strategy_channel_mismatch",
+            provider=provider,
+            expected_channel=expected_channel,
+            returned_channel=strategy.recommended_channel,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
         raise MarketingAIError
 
     # Keep the existing CreativeAsset contract and database model intact.
@@ -1310,10 +1364,21 @@ async def create_creative_brief(
     # than unvalidated provider prose. A later generation step can parse this
     # exact strategy without asking the model to reinterpret the owner's goal.
     visual_direction = strategy.model_dump_json(
-        exclude={"evidence_source_ids"},
+        exclude={
+            "evidence_source_ids",
+            "recommendations",
+            "proposed_actions",
+        },
     )
 
     if len(visual_direction) > 5000:
+        _log_creative_strategy_failure(
+            "creative_strategy_output_too_large",
+            provider=provider,
+            expected_channel=expected_channel,
+            returned_channel=strategy.recommended_channel,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
         raise MarketingAIError
 
     value = CreativeAsset(
@@ -2270,6 +2335,68 @@ async def _execute_cmo(
     task: str,
     provider: AIAgentProvider,
 ):
+    request = await _build_cmo_execution_request(
+        session,
+        business_id,
+        task,
+    )
+    try:
+        result = await execute_ai_agent(
+            session,
+            business_id,
+            request,
+            provider,
+        )
+    except AIAgentError:
+        raise MarketingAIError from None
+    return result
+
+
+async def _execute_creative_strategy(
+    session: AsyncSession,
+    business_id: UUID,
+    task: str,
+    provider: AIAgentProvider,
+    *,
+    expected_channel: str | None,
+):
+    request = await _build_cmo_execution_request(
+        session,
+        business_id,
+        task,
+    )
+
+    try:
+        return await execute_ai_agent_typed_with_metadata(
+            session,
+            business_id,
+            request,
+            provider,
+            CreativeStrategyProposal,
+        )
+    except AIAgentResponseError:
+        _log_creative_strategy_failure(
+            "creative_strategy_schema_invalid",
+            provider=provider,
+            expected_channel=expected_channel,
+        )
+        raise MarketingAIError from None
+    except AIAgentProviderError:
+        _log_creative_strategy_failure(
+            "creative_strategy_provider_failed",
+            provider=provider,
+            expected_channel=expected_channel,
+        )
+        raise MarketingAIError from None
+    except AIAgentError:
+        raise MarketingAIError from None
+
+
+async def _build_cmo_execution_request(
+    session: AsyncSession,
+    business_id: UUID,
+    task: str,
+) -> AIAgentExecutionRequest:
     brain_source_types = None
     include_memory = True
     if isinstance(session, AsyncSession):
@@ -2298,11 +2425,76 @@ async def _execute_cmo(
         elif isinstance(business_type, str) and business_type.strip().casefold() == "real estate":
             brain_source_types = ["business_profile", "branding", "knowledge_entry"]
             task += " Do not interpret generic catalog items as properties and do not invent property inventory."
+    return AIAgentExecutionRequest(
+        role="cmo",
+        task=task,
+        include_business_brain=True,
+        include_memory=include_memory,
+        brain_source_types=brain_source_types,
+    )
+
+
+def _creative_strategy_request_id(execution: object) -> str | None:
+    metadata = getattr(execution, "provider_metadata", None)
+    return _safe_ai_diagnostic_identifier(
+        getattr(metadata, "provider_request_id", None)
+    )
+
+
+def _safe_ai_diagnostic_identifier(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+
+    normalized = value.strip()
+    if not _SAFE_AI_DIAGNOSTIC_IDENTIFIER.fullmatch(normalized):
+        return None
+
+    return normalized
+
+
+def _safe_provider_attribute(provider: object, attribute: str) -> str | None:
     try:
-        result = await execute_ai_agent(session, business_id, AIAgentExecutionRequest(
-            role="cmo", task=task, include_business_brain=True,
-            include_memory=include_memory, brain_source_types=brain_source_types,
-        ), provider)
-    except AIAgentError:
-        raise MarketingAIError from None
-    return result
+        value = getattr(provider, attribute, None)
+    except Exception:
+        return None
+    return _safe_ai_diagnostic_identifier(value)
+
+
+def _log_creative_strategy_failure(
+    event: str,
+    *,
+    provider: object,
+    expected_channel: str | None,
+    returned_channel: str | None = None,
+    provider_request_id: str | None = None,
+) -> None:
+    metadata = {
+        "event": event,
+        "provider": _safe_provider_attribute(provider, "provider_name"),
+        "model": _safe_provider_attribute(provider, "model"),
+        "expected_channel": _safe_ai_diagnostic_identifier(expected_channel),
+        "returned_channel": _safe_ai_diagnostic_identifier(returned_channel),
+        "provider_request_id": _safe_ai_diagnostic_identifier(
+            provider_request_id
+        ),
+    }
+    message_fields = (
+        ("provider", metadata["provider"]),
+        ("model", metadata["model"]),
+        ("expected_channel", metadata["expected_channel"]),
+        ("returned_channel", metadata["returned_channel"]),
+        ("request_id", metadata["provider_request_id"]),
+    )
+    message = " ".join(
+        (
+            event,
+            *(
+                f"{name}={value if value is not None else 'none'}"
+                for name, value in message_fields
+            ),
+        )
+    )
+    logger.warning(
+        message,
+        extra=metadata,
+    )

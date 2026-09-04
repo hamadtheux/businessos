@@ -23,7 +23,8 @@ from app.models.business_branding import BusinessBranding  # noqa: E402
 from app.models.catalog_item import CatalogItem  # noqa: E402
 from app.models.marketing import Campaign, CampaignChannelPlan, Competitor, CompetitorObservation, CreativeAsset, MarketingContent, MarketingPlan, MarketingTrend, SocialSchedule  # noqa: E402
 from app.models.opportunity import Opportunity  # noqa: E402
-from app.schemas.marketing import CampaignCreate, CampaignGenerateRequest, ChannelPlanCreate, ContentCreate, ContentGenerateRequest, ContentVersionCreate, CreativeBriefCreate, PerformanceCreate, PlanGenerateRequest, ScheduleCreate, TrendOpportunityRequest  # noqa: E402
+from app.schemas.ai_agent import AIAgentProposedAction  # noqa: E402
+from app.schemas.marketing import CampaignCreate, CampaignGenerateRequest, ChannelPlanCreate, ContentCreate, ContentGenerateRequest, ContentVersionCreate, CreativeBriefCreate, CreativeStrategyProposal, PerformanceCreate, PlanGenerateRequest, ScheduleCreate, TrendOpportunityRequest  # noqa: E402
 from app.services.creative_provider import (
     CreativeGenerationResult,
     CreativeProviderGenerationError,
@@ -347,41 +348,67 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("source=shopify", runtime.await_args.args[2])
         self.assertIn("availability=in_stock", runtime.await_args.args[2])
 
+
     async def test_creative_intelligence_turns_weak_request_into_structured_strategy(self) -> None:
         execution = SimpleNamespace(
-            context_revision="b" * 64,
-            business_brain_source_count=4,
-            memory_source_count=1,
-            output=SimpleNamespace(
-                summary=json.dumps(
-                    {
-                        "marketing_goal": "Increase qualified interest in the featured product.",
-                        "target_audience": "Customers interested in the business's active product range.",
-                        "audience_insight": "Lead with clear product value rather than unsupported urgency.",
-                        "campaign_angle": "A polished product-first introduction grounded in the saved brand.",
-                        "hook": "Meet the product designed for your next everyday upgrade.",
-                        "headline": "Made to stand out.",
-                        "supporting_message": "Present the product clearly with confident, concise brand-led messaging.",
-                        "cta": "Explore the product",
-                        "visual_concept": "Premium editorial product scene with a strong central subject and clean environmental styling.",
-                        "composition_direction": "Place the product as the dominant visual anchor and reserve a clean text zone opposite the subject.",
-                        "subject_focus": "The supported catalog product is the hero.",
-                        "mood": "Premium, confident and contemporary.",
-                        "lighting": "Soft directional studio light with controlled contrast.",
-                        "negative_space": "Reserve generous uncluttered space for exact brand typography and CTA.",
-                        "brand_treatment": "Use the saved brand palette as compositional accents; the real logo is added later by the application.",
-                        "recommended_channel": "instagram",
-                        "pr_guardrails": [
-                            "Use only supported product benefits.",
-                            "Avoid fabricated scarcity or social proof.",
-                        ],
-                        "prohibited_claims": [
-                            "No invented discounts.",
-                            "No unsupported performance claims.",
-                        ],
-                        "evidence_source_ids": [],
-                    }
+            provider_metadata=SimpleNamespace(
+                provider_request_id="req-creative-success",
+            ),
+            output=CreativeStrategyProposal(
+                marketing_goal=(
+                    "Increase qualified interest in the featured product."
                 ),
+                target_audience=(
+                    "Customers interested in the business's active product range."
+                ),
+                audience_insight=(
+                    "Lead with clear product value rather than unsupported urgency."
+                ),
+                campaign_angle=(
+                    "A polished product-first introduction grounded in the saved brand."
+                ),
+                hook=(
+                    "Meet the product designed for your next everyday upgrade."
+                ),
+                headline="Made to stand out.",
+                supporting_message=(
+                    "Present the product clearly with confident, concise "
+                    "brand-led messaging."
+                ),
+                cta="Explore the product",
+                visual_concept=(
+                    "Premium editorial product scene with a strong central "
+                    "subject and clean environmental styling."
+                ),
+                composition_direction=(
+                    "Place the product as the dominant visual anchor and "
+                    "reserve a clean text zone opposite the subject."
+                ),
+                subject_focus=(
+                    "The supported catalog product is the hero."
+                ),
+                mood="Premium, confident and contemporary.",
+                lighting=(
+                    "Soft directional studio light with controlled contrast."
+                ),
+                negative_space=(
+                    "Reserve generous uncluttered space for exact brand "
+                    "typography and CTA."
+                ),
+                brand_treatment=(
+                    "Use the saved brand palette as compositional accents; "
+                    "the real logo is added later by the application."
+                ),
+                recommended_channel="instagram",
+                pr_guardrails=[
+                    "Use only supported product benefits.",
+                    "Avoid fabricated scarcity or social proof.",
+                ],
+                prohibited_claims=[
+                    "No invented discounts.",
+                    "No unsupported performance claims.",
+                ],
+                evidence_source_ids=[],
                 recommendations=[],
                 proposed_actions=[],
             ),
@@ -411,7 +438,7 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         session = _ScalarSession([content])
 
         with patch(
-            "app.services.marketing._execute_cmo",
+            "app.services.marketing._execute_creative_strategy",
             new=AsyncMock(return_value=execution),
         ) as runtime:
             asset = await create_creative_brief(
@@ -433,52 +460,95 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(asset.storage_reference)
 
         strategy = json.loads(asset.visual_direction)
+
         self.assertEqual(
             strategy["marketing_goal"],
             "Increase qualified interest in the featured product.",
         )
-        self.assertEqual(strategy["recommended_channel"], "instagram")
-        self.assertEqual(strategy["headline"], "Made to stand out.")
-        self.assertIn("negative_space", strategy)
-        self.assertIn("pr_guardrails", strategy)
-        self.assertNotIn("evidence_source_ids", strategy)
+        self.assertEqual(
+            strategy["recommended_channel"],
+            "instagram",
+        )
+        self.assertEqual(
+            strategy["headline"],
+            "Made to stand out.",
+        )
+        self.assertIn(
+            "negative_space",
+            strategy,
+        )
+        self.assertIn(
+            "pr_guardrails",
+            strategy,
+        )
+        self.assertNotIn(
+            "evidence_source_ids",
+            strategy,
+        )
+        self.assertNotIn(
+            "recommendations",
+            strategy,
+        )
+        self.assertNotIn(
+            "proposed_actions",
+            strategy,
+        )
 
         prompt = runtime.await_args.args[2]
-        self.assertIn("may provide a very short, vague", prompt)
-        self.assertIn("do not require expert prompting", prompt.lower())
-        self.assertIn("Authoritative content context", prompt)
-        self.assertIn("A grounded product launch post.", prompt)
-        self.assertIn("Never include hidden reasoning", prompt)
+
+        self.assertIn(
+            "may provide a very short, vague",
+            prompt,
+        )
+        self.assertIn(
+            "do not require expert prompting",
+            prompt.lower(),
+        )
+        self.assertIn(
+            "Authoritative content context",
+            prompt,
+        )
+        self.assertIn(
+            "A grounded product launch post.",
+            prompt,
+        )
+        self.assertIn(
+            "Never include hidden reasoning",
+            prompt,
+        )
+        self.assertEqual(
+            runtime.await_args.kwargs["expected_channel"],
+            "instagram",
+        )
+
 
     async def test_creative_intelligence_rejects_wrong_content_channel(self) -> None:
         execution = SimpleNamespace(
-            context_revision="c" * 64,
-            business_brain_source_count=2,
-            memory_source_count=0,
-            output=SimpleNamespace(
-                summary=json.dumps(
-                    {
-                        "marketing_goal": "Promote the product.",
-                        "target_audience": "Relevant customers.",
-                        "audience_insight": "Keep the message clear.",
-                        "campaign_angle": "Product-first.",
-                        "hook": "Discover it.",
-                        "headline": "Discover more.",
-                        "supporting_message": "Grounded supporting copy.",
-                        "cta": "Explore",
-                        "visual_concept": "Clean product scene.",
-                        "composition_direction": "Product left, copy area right.",
-                        "subject_focus": "Product.",
-                        "mood": "Premium.",
-                        "lighting": "Soft studio lighting.",
-                        "negative_space": "Clear copy area.",
-                        "brand_treatment": "Use saved brand accents.",
-                        "recommended_channel": "facebook",
-                        "pr_guardrails": [],
-                        "prohibited_claims": [],
-                        "evidence_source_ids": [],
-                    }
+            provider_metadata=SimpleNamespace(
+                provider_request_id="req-creative-wrong-channel",
+            ),
+            output=CreativeStrategyProposal(
+                marketing_goal="Promote the product.",
+                target_audience="Relevant customers.",
+                audience_insight="Keep the message clear.",
+                campaign_angle="Product-first.",
+                hook="Discover it.",
+                headline="Discover more.",
+                supporting_message="Grounded supporting copy.",
+                cta="Explore",
+                visual_concept="Clean product scene.",
+                composition_direction=(
+                    "Product left, copy area right."
                 ),
+                subject_focus="Product.",
+                mood="Premium.",
+                lighting="Soft studio lighting.",
+                negative_space="Clear copy area.",
+                brand_treatment="Use saved brand accents.",
+                recommended_channel="facebook",
+                pr_guardrails=[],
+                prohibited_claims=[],
+                evidence_source_ids=[],
                 recommendations=[],
                 proposed_actions=[],
             ),
@@ -505,7 +575,7 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch(
-            "app.services.marketing._execute_cmo",
+            "app.services.marketing._execute_creative_strategy",
             new=AsyncMock(return_value=execution),
         ):
             with self.assertRaises(MarketingAIError):
@@ -521,42 +591,39 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
                     provider=SimpleNamespace(),
                 )
 
+
     async def test_creative_intelligence_rejects_model_invented_evidence(self) -> None:
         execution = SimpleNamespace(
-            context_revision="d" * 64,
-            business_brain_source_count=1,
-            memory_source_count=0,
-            output=SimpleNamespace(
-                summary=json.dumps(
-                    {
-                        "marketing_goal": "Promote the business.",
-                        "target_audience": "Relevant customers.",
-                        "audience_insight": "Use trusted context.",
-                        "campaign_angle": "Brand-led.",
-                        "hook": "Explore.",
-                        "headline": "Explore.",
-                        "supporting_message": "Supported copy.",
-                        "cta": None,
-                        "visual_concept": "Clean commercial scene.",
-                        "composition_direction": "Balanced composition.",
-                        "subject_focus": "Supported business offering.",
-                        "mood": "Professional.",
-                        "lighting": "Natural soft light.",
-                        "negative_space": "Reserve copy space.",
-                        "brand_treatment": "Use saved brand direction.",
-                        "recommended_channel": "channel_agnostic",
-                        "pr_guardrails": [],
-                        "prohibited_claims": [],
-                        "evidence_source_ids": ["invented-source"],
-                    }
-                ),
+            provider_metadata=SimpleNamespace(
+                provider_request_id="req-creative-evidence",
+            ),
+            output=CreativeStrategyProposal(
+                marketing_goal="Promote the business.",
+                target_audience="Relevant customers.",
+                audience_insight="Use trusted context.",
+                campaign_angle="Brand-led.",
+                hook="Explore.",
+                headline="Explore.",
+                supporting_message="Supported copy.",
+                cta=None,
+                visual_concept="Clean commercial scene.",
+                composition_direction="Balanced composition.",
+                subject_focus="Supported business offering.",
+                mood="Professional.",
+                lighting="Natural soft light.",
+                negative_space="Reserve copy space.",
+                brand_treatment="Use saved brand direction.",
+                recommended_channel="other",
+                pr_guardrails=[],
+                prohibited_claims=[],
+                evidence_source_ids=["invented-source"],
                 recommendations=[],
                 proposed_actions=[],
             ),
         )
 
         with patch(
-            "app.services.marketing._execute_cmo",
+            "app.services.marketing._execute_creative_strategy",
             new=AsyncMock(return_value=execution),
         ):
             with self.assertRaises(MarketingAIError):
@@ -571,42 +638,53 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
                     provider=SimpleNamespace(),
                 )
 
+
     async def test_creative_intelligence_rejects_actions_from_model(self) -> None:
         execution = SimpleNamespace(
-            context_revision="e" * 64,
-            business_brain_source_count=2,
-            memory_source_count=0,
-            output=SimpleNamespace(
-                summary=json.dumps(
-                    {
-                        "marketing_goal": "Promote the business.",
-                        "target_audience": "Relevant customers.",
-                        "audience_insight": "Use a clear benefit-led message.",
-                        "campaign_angle": "Brand-led.",
-                        "hook": "Discover more.",
-                        "headline": "Discover more.",
-                        "supporting_message": "Grounded supporting copy.",
-                        "cta": "Explore",
-                        "visual_concept": "Premium commercial scene.",
-                        "composition_direction": "Strong hero subject and copy zone.",
-                        "subject_focus": "Supported offering.",
-                        "mood": "Confident.",
-                        "lighting": "Soft directional light.",
-                        "negative_space": "Reserve clean overlay space.",
-                        "brand_treatment": "Use trusted brand colors.",
-                        "recommended_channel": "channel_agnostic",
-                        "pr_guardrails": [],
-                        "prohibited_claims": [],
-                        "evidence_source_ids": [],
-                    }
+            provider_metadata=SimpleNamespace(
+                provider_request_id="req-creative-action",
+            ),
+            output=CreativeStrategyProposal(
+                marketing_goal="Promote the business.",
+                target_audience="Relevant customers.",
+                audience_insight=(
+                    "Use a clear benefit-led message."
                 ),
+                campaign_angle="Brand-led.",
+                hook="Discover more.",
+                headline="Discover more.",
+                supporting_message="Grounded supporting copy.",
+                cta="Explore",
+                visual_concept="Premium commercial scene.",
+                composition_direction=(
+                    "Strong hero subject and copy zone."
+                ),
+                subject_focus="Supported offering.",
+                mood="Confident.",
+                lighting="Soft directional light.",
+                negative_space="Reserve clean overlay space.",
+                brand_treatment="Use trusted brand colors.",
+                recommended_channel="other",
+                pr_guardrails=[],
+                prohibited_claims=[],
+                evidence_source_ids=[],
                 recommendations=[],
-                proposed_actions=[SimpleNamespace(action_type="publish_social_post")],
+                proposed_actions=[
+                    AIAgentProposedAction(
+                        action_type="publish_social_post",
+                        description=(
+                            "Attempt to publish generated social content."
+                        ),
+                        risk_level="high",
+                        requires_approval=True,
+                        action_payload=None,
+                    )
+                ],
             ),
         )
 
         with patch(
-            "app.services.marketing._execute_cmo",
+            "app.services.marketing._execute_creative_strategy",
             new=AsyncMock(return_value=execution),
         ):
             with self.assertRaises(MarketingAIError):
@@ -744,7 +822,7 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
             "lighting": "Soft natural light.",
             "negative_space": "Open right-side area.",
             "brand_treatment": "Use saved brand palette cues.",
-            "recommended_channel": "channel_agnostic",
+            "recommended_channel": "other",
             "pr_guardrails": [],
             "prohibited_claims": [],
         }

@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Generic, Protocol, TypeVar, runtime_checkable
 from uuid import UUID
+
+from pydantic import BaseModel
 
 from app.schemas.ai_agent import (
     AIAgentRole,
     AIAgentStructuredOutput,
 )
 from app.schemas.ai_context import AIContextBundle
+
+
+AIAgentTypedOutput = TypeVar(
+    "AIAgentTypedOutput",
+    bound=BaseModel,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +139,19 @@ class AIAgentProviderResult:
     """
 
     output: AIAgentStructuredOutput
+    metadata: AIAgentProviderMetadata
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class AIAgentTypedProviderResult(
+    Generic[AIAgentTypedOutput]
+):
+    """Provider-neutral typed output plus existing audit-safe metadata."""
+
+    output: AIAgentTypedOutput
     metadata: AIAgentProviderMetadata
 
 

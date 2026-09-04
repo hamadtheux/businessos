@@ -16,7 +16,7 @@ from openai import (
     OpenAIError,
     RateLimitError,
 )
-from pydantic import SecretStr, ValidationError
+from pydantic import BaseModel, SecretStr, ValidationError
 
 
 os.environ.setdefault(
@@ -554,6 +554,108 @@ class OpenAIProviderExecutionTests(
             await provider.generate(
                 _provider_request()
             )
+
+
+
+class _TypedProviderTestOutput(BaseModel):
+    headline: str
+    channel: str
+
+
+class OpenAIProviderTypedOutputTests(
+    unittest.IsolatedAsyncioTestCase,
+):
+    async def test_generate_typed_with_metadata_uses_requested_schema_and_preserves_metadata(
+        self,
+    ) -> None:
+        parsed = _TypedProviderTestOutput(
+            headline="A grounded campaign headline.",
+            channel="instagram",
+        )
+
+        response = _FakeResponse(
+            status="completed",
+            output=[
+                _FakeMessage(
+                    [
+                        _FakeOutputText(
+                            parsed=parsed,
+                        )
+                    ]
+                )
+            ],
+            request_id="req_typed_123",
+            usage=_FakeUsage(
+                input_tokens=725,
+                output_tokens=185,
+            ),
+        )
+
+        responses = _FakeResponses(
+            response
+        )
+
+        provider = OpenAIAgentProvider(
+            client=_FakeClient(
+                responses=responses,
+            ),  # type: ignore[arg-type]
+            model="gpt-5.6-terra",
+        )
+
+        result = await provider.generate_typed_with_metadata(
+            _provider_request(),
+            _TypedProviderTestOutput,
+        )
+
+        self.assertIsInstance(
+            result.output,
+            _TypedProviderTestOutput,
+        )
+
+        self.assertEqual(
+            result.output.headline,
+            "A grounded campaign headline.",
+        )
+
+        self.assertEqual(
+            result.output.channel,
+            "instagram",
+        )
+
+        self.assertFalse(
+            hasattr(
+                result.output,
+                "summary",
+            )
+        )
+
+        self.assertEqual(
+            result.metadata.provider_request_id,
+            "req_typed_123",
+        )
+
+        self.assertEqual(
+            result.metadata.input_tokens,
+            725,
+        )
+
+        self.assertEqual(
+            result.metadata.output_tokens,
+            185,
+        )
+
+        self.assertIsNotNone(
+            responses.kwargs,
+        )
+
+        self.assertIs(
+            responses.kwargs["text_format"],
+            _TypedProviderTestOutput,
+        )
+
+        self.assertFalse(
+            responses.kwargs["store"],
+        )
 
 
 class OpenAIProviderMetadataTests(

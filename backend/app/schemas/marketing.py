@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, get_args
 from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
+from app.schemas.ai_agent import AIAgentProposedAction
+
 
 Channel = Literal["meta", "google_ads", "instagram", "facebook", "linkedin", "tiktok", "email", "whatsapp", "website", "other"]
+_MARKETING_CHANNEL_VALUES = frozenset(get_args(Channel))
 MarketingPlanStatus = Literal["draft", "ready", "active", "completed", "archived"]
 CampaignStatus = Literal[
     "draft", "planned", "awaiting_approval", "approved", "scheduled", "executing",
@@ -416,7 +419,7 @@ class CreativeStrategyProposal(MarketingSchema):
     negative_space: str = Field(min_length=1, max_length=300)
     brand_treatment: str = Field(min_length=1, max_length=700)
 
-    recommended_channel: str = Field(min_length=1, max_length=32)
+    recommended_channel: Channel
 
     pr_guardrails: list[str] = Field(default_factory=list, max_length=8)
     prohibited_claims: list[str] = Field(default_factory=list, max_length=8)
@@ -424,6 +427,26 @@ class CreativeStrategyProposal(MarketingSchema):
     # The model must never invent provenance. The server owns authoritative
     # source identity and validates that this remains empty.
     evidence_source_ids: list[str] = Field(default_factory=list, max_length=20)
+
+    # These governance fields remain explicit so the server can distinguish
+    # and reject attempted recommendations/actions instead of persisting them.
+    recommendations: list[str] = Field(default_factory=list, max_length=20)
+    proposed_actions: list[AIAgentProposedAction] = Field(
+        default_factory=list,
+        max_length=20,
+    )
+
+    @field_validator("recommended_channel", mode="before")
+    @classmethod
+    def normalize_recommended_channel(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+
+        normalized = value.strip().casefold()
+        if normalized not in _MARKETING_CHANNEL_VALUES:
+            raise ValueError("recommended_channel must be a canonical channel")
+
+        return normalized
 
 
 class CreativeBriefCreate(MarketingSchema):

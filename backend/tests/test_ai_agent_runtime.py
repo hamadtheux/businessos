@@ -8,7 +8,7 @@ from hashlib import sha256
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 os.environ.setdefault(
     "AIBOS_DATABASE_URL",
@@ -32,10 +32,12 @@ from app.agents.provider import (  # noqa: E402
     AIAgentProviderMetadata,
     AIAgentProviderRequest,
     AIAgentProviderResult,
+    AIAgentTypedProviderResult,
     validate_agent_provider,
 )
 from app.agents.runtime import (  # noqa: E402
     execute_ai_agent,
+    execute_ai_agent_typed_with_metadata,
     execute_ai_agent_with_metadata,
 )
 from app.exceptions.ai_agent import (  # noqa: E402
@@ -371,6 +373,154 @@ class ContextRendererTests(unittest.TestCase):
 class AIAgentRuntimeTests(
     unittest.IsolatedAsyncioTestCase,
 ):
+    async def test_typed_runtime_preserves_trusted_context_and_provider_metadata(
+        self,
+    ) -> None:
+        class TypedRuntimeOutput(BaseModel):
+            headline: str
+            channel: str
+
+        class TypedRuntimeProvider(_FakeProvider):
+            def __init__(self) -> None:
+                self.request: AIAgentProviderRequest | None = None
+                self.output_type = None
+
+            @property
+            def provider_name(self) -> str:
+                return "typed-runtime"
+
+            async def generate_typed_with_metadata(
+                self,
+                request: AIAgentProviderRequest,
+                output_type,
+            ):
+                self.request = request
+                self.output_type = output_type
+
+                return AIAgentTypedProviderResult(
+                    output=output_type.model_validate(
+                        {
+                            "headline": "Grounded campaign direction.",
+                            "channel": "instagram",
+                        }
+                    ),
+                    metadata=AIAgentProviderMetadata(
+                        provider_request_id="req_runtime_typed_123",
+                        input_tokens=880,
+                        output_tokens=210,
+                    ),
+                )
+
+        task = "Prepare a grounded campaign direction."
+
+        context = _context_bundle(
+            business_id=BUSINESS_A_ID,
+            purpose="sales",
+            task=task,
+            include_sources=True,
+        )
+
+        provider = TypedRuntimeProvider()
+        session = AsyncMock()
+
+        with patch(
+            "app.agents.runtime.assemble_ai_context",
+            new=AsyncMock(
+                return_value=context,
+            ),
+        ) as assemble:
+            result = await execute_ai_agent_typed_with_metadata(
+                session,
+                BUSINESS_A_ID,
+                AIAgentExecutionRequest(
+                    role="sales",
+                    task=task,
+                ),
+                provider,
+                TypedRuntimeOutput,
+            )
+
+        self.assertEqual(
+            result.business_id,
+            BUSINESS_A_ID,
+        )
+        self.assertEqual(
+            result.role,
+            "sales",
+        )
+
+        self.assertEqual(
+            result.context_revision,
+            context.revision,
+        )
+        self.assertEqual(
+            result.context_source_count,
+            context.source_count,
+        )
+        self.assertEqual(
+            result.business_brain_source_count,
+            context.business_brain_source_count,
+        )
+        self.assertEqual(
+            result.memory_source_count,
+            context.memory_source_count,
+        )
+
+        self.assertIsInstance(
+            result.output,
+            TypedRuntimeOutput,
+        )
+        self.assertEqual(
+            result.output.headline,
+            "Grounded campaign direction.",
+        )
+        self.assertEqual(
+            result.output.channel,
+            "instagram",
+        )
+
+        self.assertEqual(
+            result.provider_metadata.provider_request_id,
+            "req_runtime_typed_123",
+        )
+        self.assertEqual(
+            result.provider_metadata.input_tokens,
+            880,
+        )
+        self.assertEqual(
+            result.provider_metadata.output_tokens,
+            210,
+        )
+
+        self.assertIs(
+            provider.output_type,
+            TypedRuntimeOutput,
+        )
+        self.assertIsNotNone(
+            provider.request,
+        )
+        self.assertEqual(
+            provider.request.business_id,
+            BUSINESS_A_ID,
+        )
+        self.assertIs(
+            provider.request.context,
+            context,
+        )
+
+        # Proves the same trusted Business Brain / permitted-memory context
+        # was rendered into the typed provider request.
+        self.assertIn(
+            "Premium Milk",
+            provider.request.task,
+        )
+        self.assertIn(
+            "Customer prefers WhatsApp.",
+            provider.request.task,
+        )
+
+        assemble.assert_awaited_once()
+
     async def test_metadata_aware_provider_returns_safe_metadata(
         self,
     ) -> None:

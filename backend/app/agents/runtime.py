@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Generic, TypeVar
 from uuid import UUID
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.context_renderer import (
@@ -20,6 +20,7 @@ from app.agents.provider import (
     AIAgentProviderMetadata,
     AIAgentProviderRequest,
     AIAgentProviderResult,
+    AIAgentTypedProviderResult,
     validate_agent_provider,
 )
 from app.exceptions.ai_agent import (
@@ -31,9 +32,10 @@ from app.exceptions.ai_context import AIContextAssemblyError
 from app.schemas.ai_agent import (
     AIAgentExecutionRequest,
     AIAgentExecutionResult,
+    AIAgentRole,
     AIAgentStructuredOutput,
 )
-from app.schemas.ai_context import AIContextRequest
+from app.schemas.ai_context import AIContextBundle, AIContextRequest
 from app.services.ai_context import assemble_ai_context
 
 
@@ -47,6 +49,12 @@ _PROVIDER_ERROR_MESSAGE: Final = (
 
 _RESPONSE_ERROR_MESSAGE: Final = (
     "AI provider returned an invalid structured response"
+)
+
+
+RuntimeTypedOutput = TypeVar(
+    "RuntimeTypedOutput",
+    bound=BaseModel,
 )
 
 
@@ -66,6 +74,25 @@ class AIAgentRuntimeResult:
     """
 
     execution_result: AIAgentExecutionResult
+    provider_metadata: AIAgentProviderMetadata
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class AIAgentTypedRuntimeResult(
+    Generic[RuntimeTypedOutput]
+):
+    """Typed runtime output with trusted-context and usage metadata intact."""
+
+    business_id: UUID
+    role: AIAgentRole
+    context_revision: str
+    context_source_count: int
+    business_brain_source_count: int
+    memory_source_count: int
+    output: RuntimeTypedOutput
     provider_metadata: AIAgentProviderMetadata
 
 
@@ -134,6 +161,109 @@ async def execute_ai_agent_with_metadata(
     change, integration call, ad spend, or other external side effect occurs
     here.
     """
+    provider_request, context = await _prepare_agent_provider_request(
+        session,
+        business_id,
+        request,
+        provider,
+        server_instructions=server_instructions,
+        custom_instructions=custom_instructions,
+        allowed_capabilities=allowed_capabilities,
+        server_context=server_context,
+        max_output_tokens=max_output_tokens,
+    )
+
+    provider_result = await _generate_provider_result(
+        provider,
+        provider_request,
+    )
+
+    output = _validate_provider_output(
+        provider_result.output,
+    )
+
+    provider_metadata = _validate_provider_metadata(
+        provider_result.metadata,
+    )
+
+    execution_result = AIAgentExecutionResult(
+        business_id=business_id,
+        role=request.role,
+        context_revision=context.revision,
+        context_source_count=context.source_count,
+        business_brain_source_count=context.business_brain_source_count,
+        memory_source_count=context.memory_source_count,
+        output=output,
+    )
+
+    return AIAgentRuntimeResult(
+        execution_result=execution_result,
+        provider_metadata=provider_metadata,
+    )
+
+
+async def execute_ai_agent_typed_with_metadata(
+    session: AsyncSession,
+    business_id: UUID,
+    request: AIAgentExecutionRequest,
+    provider: AIAgentProvider,
+    output_type: type[RuntimeTypedOutput],
+    *,
+    server_instructions: str | None = None,
+    custom_instructions: str | None = None,
+    allowed_capabilities: tuple[str, ...] | None = None,
+    server_context: str | None = None,
+    max_output_tokens: int | None = None,
+) -> AIAgentTypedRuntimeResult[RuntimeTypedOutput]:
+    """Execute against a caller-selected schema using the trusted runtime."""
+    provider_request, context = await _prepare_agent_provider_request(
+        session,
+        business_id,
+        request,
+        provider,
+        server_instructions=server_instructions,
+        custom_instructions=custom_instructions,
+        allowed_capabilities=allowed_capabilities,
+        server_context=server_context,
+        max_output_tokens=max_output_tokens,
+    )
+
+    provider_result = await _generate_typed_provider_result(
+        provider,
+        provider_request,
+        output_type,
+    )
+
+    return AIAgentTypedRuntimeResult(
+        business_id=business_id,
+        role=request.role,
+        context_revision=context.revision,
+        context_source_count=context.source_count,
+        business_brain_source_count=context.business_brain_source_count,
+        memory_source_count=context.memory_source_count,
+        output=_validate_typed_provider_output(
+            provider_result.output,
+            output_type,
+        ),
+        provider_metadata=_validate_provider_metadata(
+            provider_result.metadata,
+        ),
+    )
+
+
+async def _prepare_agent_provider_request(
+    session: AsyncSession,
+    business_id: UUID,
+    request: AIAgentExecutionRequest,
+    provider: AIAgentProvider,
+    *,
+    server_instructions: str | None,
+    custom_instructions: str | None,
+    allowed_capabilities: tuple[str, ...] | None,
+    server_context: str | None,
+    max_output_tokens: int | None,
+) -> tuple[AIAgentProviderRequest, AIContextBundle]:
+    """Assemble and verify the one trusted provider request used by all schemas."""
     validate_agent_provider(
         provider
     )
@@ -228,42 +358,14 @@ async def execute_ai_agent_with_metadata(
             f"{custom_instructions.strip()[:2_000]}"
         )
 
-    provider_request = AIAgentProviderRequest(
+    return AIAgentProviderRequest(
         business_id=business_id,
         role=request.role,
         system_instructions=system_instructions,
         task=provider_task_message,
         context=context,
         max_output_tokens=max_output_tokens,
-    )
-
-    provider_result = await _generate_provider_result(
-        provider,
-        provider_request,
-    )
-
-    output = _validate_provider_output(
-        provider_result.output,
-    )
-
-    provider_metadata = _validate_provider_metadata(
-        provider_result.metadata,
-    )
-
-    execution_result = AIAgentExecutionResult(
-        business_id=business_id,
-        role=request.role,
-        context_revision=context.revision,
-        context_source_count=context.source_count,
-        business_brain_source_count=context.business_brain_source_count,
-        memory_source_count=context.memory_source_count,
-        output=output,
-    )
-
-    return AIAgentRuntimeResult(
-        execution_result=execution_result,
-        provider_metadata=provider_metadata,
-    )
+    ), context
 
 
 async def _generate_provider_result(
@@ -354,6 +456,56 @@ def _validate_provider_result(
     )
 
 
+async def _generate_typed_provider_result(
+    provider: AIAgentProvider,
+    request: AIAgentProviderRequest,
+    output_type: type[RuntimeTypedOutput],
+) -> AIAgentTypedProviderResult[RuntimeTypedOutput]:
+    generate_typed = getattr(
+        provider,
+        "generate_typed_with_metadata",
+        None,
+    )
+
+    if not callable(generate_typed):
+        raise AIAgentProviderError(
+            _PROVIDER_ERROR_MESSAGE
+        )
+
+    try:
+        value = await generate_typed(
+            request,
+            output_type,
+        )
+    except (
+        AIAgentProviderError,
+        AIAgentResponseError,
+    ):
+        raise
+    except Exception:
+        raise AIAgentProviderError(
+            _PROVIDER_ERROR_MESSAGE
+        ) from None
+
+    if not isinstance(
+        value,
+        AIAgentTypedProviderResult,
+    ):
+        raise AIAgentResponseError(
+            _RESPONSE_ERROR_MESSAGE
+        )
+
+    return AIAgentTypedProviderResult(
+        output=_validate_typed_provider_output(
+            value.output,
+            output_type,
+        ),
+        metadata=_validate_provider_metadata(
+            value.metadata,
+        ),
+    )
+
+
 def _validate_provider_metadata(
     value: object,
 ) -> AIAgentProviderMetadata:
@@ -410,6 +562,24 @@ def _validate_provider_output(
             _RESPONSE_ERROR_MESSAGE
         ) from None
 
+    except Exception:
+        raise AIAgentResponseError(
+            _RESPONSE_ERROR_MESSAGE
+        ) from None
+
+
+def _validate_typed_provider_output(
+    value: object,
+    output_type: type[RuntimeTypedOutput],
+) -> RuntimeTypedOutput:
+    try:
+        return output_type.model_validate(
+            value,
+        )
+    except (ValidationError, AttributeError, TypeError):
+        raise AIAgentResponseError(
+            _RESPONSE_ERROR_MESSAGE
+        ) from None
     except Exception:
         raise AIAgentResponseError(
             _RESPONSE_ERROR_MESSAGE
