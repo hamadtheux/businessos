@@ -402,6 +402,22 @@ export function createMarketingApi(client: ApiClient) {
           marketingPath(id, "/creative-assets/brief"),
           { method: "POST", json: data },
         ),
+      generate: (id: string, creativeAssetId: string) =>
+        client.request<CreativeAsset>(
+          marketingPath(
+            id,
+            `/creative-assets/${encodeURIComponent(creativeAssetId)}/generate`,
+          ),
+          { method: "POST" },
+        ),
+      regenerate: (id: string, creativeAssetId: string) =>
+        client.request<CreativeAsset>(
+          marketingPath(
+            id,
+            `/creative-assets/${encodeURIComponent(creativeAssetId)}/regenerate`,
+          ),
+          { method: "POST" },
+        ),
     },
     calendar: {
       list: (

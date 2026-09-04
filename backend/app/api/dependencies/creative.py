@@ -10,7 +10,6 @@ from app.services.creative_provider import (
     CreativeGenerationProvider,
     create_creative_generation_provider,
 )
-from app.storage.factory import get_object_storage
 
 
 @lru_cache(maxsize=1)
@@ -18,13 +17,9 @@ def get_creative_generation_provider() -> CreativeGenerationProvider:
     """
     Reuse one backend-only image provider and HTTP connection pool per process.
 
-    Object storage is also the existing singleton production storage adapter.
-    No provider credentials or storage credentials enter browser code.
+    No provider credentials enter browser code.
     """
-    return create_creative_generation_provider(
-        settings,
-        get_object_storage(),
-    )
+    return create_creative_generation_provider(settings)
 
 
 CreativeGenerationProviderDependency = Annotated[

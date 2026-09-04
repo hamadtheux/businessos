@@ -5,9 +5,21 @@ import { useBusiness } from "@/business-context";
 import { Badge, Button, Card, Modal, PageHeader, SectionTitle } from "@/components/product-ui";
 import { CmoContentStudioCard } from "@/features/marketing/cmo-content-studio";
 import { CmoDepartmentNav } from "@/features/marketing/marketing-pages";
+import {
+  AUDIENCE_GUIDANCE_MAX,
+  OWNER_GOAL_MAX,
+  channelGenerationNotice,
+  createCreativeWithRecovery,
+  creativeFormatForContent,
+  creativePhaseForDisplay,
+  creativeResultNotice,
+  generateCampaignChannelDrafts,
+  runCreativeOperationWithRecovery,
+  type CreativeProgress,
+} from "@/lib/cmo-ux";
 import { businessDateRange } from "@/lib/operational-dates";
 import { humanizeApiError } from "@/services/api-client";
-import type { MarketingChannel, MarketingContent, MarketingContentType } from "@/services/api-types";
+import type { CreativeAsset, MarketingChannel, MarketingContent, MarketingContentType } from "@/services/api-types";
 import { marketingApi } from "@/services/marketing";
 
 function Kpi({ title, value, foot, icon, tone }: { title: string; value: string; foot: string; icon: ReactNode; tone: string }) {
@@ -16,6 +28,7 @@ function Kpi({ title, value, foot, icon, tone }: { title: string; value: string;
 
 const channels: MarketingChannel[] = ["instagram", "facebook", "linkedin", "tiktok", "email", "whatsapp", "website", "meta", "google_ads"];
 const contentTypes: MarketingContentType[] = ["social_post", "ad_copy", "email_draft", "whatsapp_draft", "blog_draft", "landing_page_copy", "headline", "cta", "content_package"];
+const primaryPlatforms: MarketingChannel[] = ["instagram", "facebook", "linkedin", "tiktok"];
 
 export function CmoPage() {
   const { activeBusinessId, activeBusiness } = useBusiness();
@@ -27,6 +40,7 @@ export function CmoPage() {
   const [editingContent, setEditingContent] = useState<MarketingContent | null>(null);
   const [historyContent, setHistoryContent] = useState<MarketingContent | null>(null);
   const [schedule, setSchedule] = useState<MarketingContent | null>(null);
+  const [creativeProgress, setCreativeProgress] = useState<CreativeProgress>(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const period = useMemo(() => businessDateRange(activeBusiness?.timezone || "UTC", 30), [activeBusiness?.timezone]);
@@ -37,6 +51,12 @@ export function CmoPage() {
   const analytics = useQuery({ queryKey: ["marketing", activeBusinessId, "analytics", period.start, period.end], queryFn: ({ signal }) => marketingApi.analytics(activeBusinessId, period.start, period.end, signal), enabled: Boolean(activeBusinessId) });
   const calendar = useQuery({ queryKey: ["marketing", activeBusinessId, "calendar", "cmo"], queryFn: ({ signal }) => marketingApi.calendar.list(activeBusinessId, new Date().toISOString(), calendarEnd, {}, signal), enabled: Boolean(activeBusinessId) });
   const campaigns = useQuery({ queryKey: ["marketing", activeBusinessId, "campaigns", "cmo"], queryFn: ({ signal }) => marketingApi.campaigns.list(activeBusinessId, { pageSize: 10 }, signal), enabled: Boolean(activeBusinessId) });
+  const primary = content.data?.items[0];
+  const creativeAssets = useQuery({
+    queryKey: ["marketing", activeBusinessId, "creative-assets", "cmo", primary?.id],
+    queryFn: ({ signal }) => marketingApi.creative.list(activeBusinessId, primary?.campaign_id || undefined, primary!.id, signal),
+    enabled: Boolean(activeBusinessId && primary),
+  });
 
   const versions = useQuery({
     queryKey: [
@@ -55,20 +75,44 @@ export function CmoPage() {
   });
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["marketing", activeBusinessId] });
+  const refreshCreatives = () => queryClient.invalidateQueries({
+    queryKey: ["marketing", activeBusinessId, "creative-assets"],
+  });
 
   const generateContent = useMutation({
-    mutationFn: (event: FormEvent<HTMLFormElement>) => {
+    mutationFn: async (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
       const form = new FormData(event.currentTarget);
-      return marketingApi.content.generate(activeBusinessId, {
-        prompt: String(form.get("prompt")), channel: String(form.get("channel")) as MarketingChannel,
-        content_type: String(form.get("content_type")) as MarketingContentType,
-        campaign_id: String(form.get("campaign_id")) || null, title: String(form.get("title")) || null,
+      const selected = form.getAll("platforms").map(String) as MarketingChannel[];
+      const additional = String(form.get("additional_channel") || "") as MarketingChannel;
+      if (additional) selected.push(additional);
+      const selectedChannels = [...new Set(selected)];
+      if (!selectedChannels.length) throw new Error("Choose at least one platform.");
+      const goal = String(form.get("prompt") || "").trim();
+      const audience = String(form.get("audience") || "").trim();
+      return generateCampaignChannelDrafts({
+        channels: selectedChannels,
+        goal,
+        audience,
+        contentType: String(form.get("content_type") || "social_post") as MarketingContentType,
+        campaignId: String(form.get("campaign_id")) || null,
+        title: String(form.get("title")) || null,
         language: String(form.get("language") || "en"),
-      });
+      }, (request) => marketingApi.content.generate(activeBusinessId, request));
     },
-    onSuccess: (item) => { setShowContentGenerator(false); setNotice(`“${item.title}” is ready for internal review.`); setError(""); void refresh(); },
+    onSuccess: (outcome) => {
+      const outcomeNotice = channelGenerationNotice(outcome);
+      if (outcomeNotice) {
+        setShowContentGenerator(false);
+        setNotice(outcomeNotice);
+        setError("");
+      } else {
+        setNotice("");
+        setError("AI content generation could not be completed. No channel drafts were created.");
+      }
+    },
     onError: (reason) => setError(humanizeApiError(reason, "AI content generation could not be completed.")),
+    onSettled: () => refresh(),
   });
   const editContent = useMutation({
     mutationFn: (event: FormEvent<HTMLFormElement>) => {
@@ -168,7 +212,50 @@ export function CmoPage() {
     onError: (reason) => setError(humanizeApiError(reason, "Marketing plan status could not be changed.")),
   });
 
-  const primary = content.data?.items[0];
+  const createCreative = useMutation({
+    mutationFn: (item: MarketingContent) => createCreativeWithRecovery({
+      contentId: item.id,
+      createBrief: () => marketingApi.creative.brief(activeBusinessId, {
+        campaign_id: item.campaign_id,
+        content_id: item.id,
+        ...creativeFormatForContent(item),
+        instructions: item.creative_brief || `Create a professional campaign visual for ${item.title}.`,
+        alt_text: `Branded campaign creative for ${item.title}`,
+      }),
+      generate: (brief) => marketingApi.creative.generate(activeBusinessId, brief.id),
+      refresh: refreshCreatives,
+      onProgress: setCreativeProgress,
+    }),
+    onSuccess: (asset) => { setNotice(creativeResultNotice(asset)); setError(""); },
+    onError: () => setError("The visual creative could not be completed. Refresh to see saved progress and try again."),
+  });
+  const retryCreative = useMutation({
+    mutationFn: (asset: CreativeAsset) => runCreativeOperationWithRecovery({
+      progress: { phase: "visual", contentId: asset.content_id || undefined, assetId: asset.id },
+      operation: () => marketingApi.creative.generate(activeBusinessId, asset.id),
+      refresh: refreshCreatives,
+      onProgress: setCreativeProgress,
+    }),
+    onSuccess: (asset) => { setNotice(creativeResultNotice(asset)); setError(""); },
+    onError: () => setError("The visual creative could not be completed. Refresh to see saved progress and try again."),
+  });
+  const regenerateCreative = useMutation({
+    mutationFn: (asset: CreativeAsset) => runCreativeOperationWithRecovery({
+      progress: { phase: "visual", contentId: asset.content_id || undefined, assetId: asset.id },
+      operation: () => marketingApi.creative.regenerate(activeBusinessId, asset.id),
+      refresh: refreshCreatives,
+      onProgress: setCreativeProgress,
+    }),
+    onSuccess: (asset) => { setNotice(`${creativeResultNotice(asset)} The previous creative remains in history.`); setError(""); },
+    onError: () => setError("A new creative version could not be completed. Refresh to see any saved history before retrying."),
+  });
+
+  const creativePhase = creativePhaseForDisplay(
+    creativeProgress,
+    primary?.id,
+    creativeAssets.data?.[0]?.id,
+  );
+
   const metrics = analytics.data;
   const currency = metrics?.currency || activeBusiness?.currency || "USD";
   const money = (value: string) => new Intl.NumberFormat(undefined, { style: "currency", currency, notation: "compact" }).format(Number(value));
@@ -176,7 +263,7 @@ export function CmoPage() {
     plans.isLoading && content.isLoading && analytics.isLoading;
   const hasPartialFailure =
     plans.isError || content.isError || analytics.isError ||
-    calendar.isError || campaigns.isError;
+    calendar.isError || campaigns.isError || creativeAssets.isError;
 
   return <>
     <PageHeader eyebrow="AI CMO" title="AI Marketing Manager" subtitle="Grounded strategy, durable content, and internal campaign planning—never silent external execution." action={<div className="toolbar"><Button onClick={() => setShowPlanGenerator(true)}><Target /> Generate strategy</Button><Button variant="primary" onClick={() => setShowContentGenerator(true)} data-testid="button-generate-content"><Wand2 /> Generate content</Button></div>} />
@@ -202,6 +289,11 @@ export function CmoPage() {
           }
           isRegenerating={regenerate.isPending}
           isApproving={approve.isPending}
+          creative={creativeAssets.data?.[0]}
+          creatives={creativeAssets.data}
+          isCreativeLoading={creativeAssets.isLoading}
+          creativeError={creativeAssets.isError ? humanizeApiError(creativeAssets.error, "Retry loading creative history.") : null}
+          creativePhase={creativePhase}
           onRetry={() => void content.refetch()}
           onGenerate={() => setShowContentGenerator(true)}
           onRegenerate={(item) => regenerate.mutate(item)}
@@ -215,14 +307,20 @@ export function CmoPage() {
             setError("");
             setHistoryContent(item);
           }}
+          onCreateCreative={() => {
+            if (primary) createCreative.mutate(primary);
+          }}
+          onReloadCreative={() => void creativeAssets.refetch()}
+          onRetryCreative={(asset) => retryCreative.mutate(asset)}
+          onRegenerateCreative={(asset) => regenerateCreative.mutate(asset)}
         />
         <Card><SectionTitle title="Content calendar" action={<Badge>{calendar.data?.length ?? 0} upcoming</Badge>} />{calendar.isError ? <div className="empty"><AlertCircle /><h3>Calendar could not load</h3><p>{humanizeApiError(calendar.error, "Retry the internal calendar.")}</p><Button onClick={() => void calendar.refetch()}>Retry calendar</Button></div> : calendar.isLoading ? <div className="empty"><RefreshCw className="spin" /><p>Loading calendar…</p></div> : <>{calendar.data?.slice(0, 8).map((item) => { const contentItem = content.data?.items.find((value) => value.id === item.content_id); return <div className="list-row" key={item.id}><div style={{ width: 86, color: "#938c83", fontSize: 10 }}>{new Date(item.scheduled_for).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}</div><div className="row-main"><div className="row-title">{contentItem?.title || `${item.channel} content`}</div><div className="row-copy">{new Date(item.scheduled_for).toLocaleTimeString()} · {item.timezone}</div></div><Badge tone="success">{item.status.replaceAll("_", " ")}</Badge></div>; })}{!calendar.data?.length && <div className="empty"><Calendar /><h3>No content scheduled</h3><p>Approved content can be added to the internal calendar without a publishing provider.</p></div>}</>}</Card></div>
     </>}
     {showContentGenerator && (
       <Modal
         wide
-        title="Create with AI"
-        description="Turn a marketing goal into a grounded, review-ready draft using your existing business context."
+        title="Create campaign content"
+        description="Share the goal in plain language. 9D Brain handles the marketing strategy, copy, and channel adaptation."
         onClose={() => setShowContentGenerator(false)}
       >
         <form onSubmit={(event) => generateContent.mutate(event)}>
@@ -289,15 +387,15 @@ export function CmoPage() {
           <div className="form-grid">
             <div className="field full">
               <label htmlFor="cmo-content-prompt">
-                What do you want to promote?
+                What do you want to achieve?
               </label>
               <textarea
                 id="cmo-content-prompt"
                 name="prompt"
                 required
-                maxLength={4000}
+                maxLength={OWNER_GOAL_MAX}
                 autoFocus
-                placeholder="Example: Promote our new summer collection to existing customers. Focus on quality and encourage them to explore the latest products."
+                placeholder="Example: Promote our new shoes"
                 style={{
                   minHeight: 132,
                   padding: 14,
@@ -310,10 +408,56 @@ export function CmoPage() {
                 className="subtle"
                 style={{ fontSize: 9, lineHeight: 1.5 }}
               >
-                Describe the goal, audience, offer, or message. AI will only use
-                business facts supported by trusted context.
+                A short request is enough. Only business facts supported by
+                trusted context will be used.
               </span>
             </div>
+
+            <div className="field full">
+              <label htmlFor="cmo-content-audience">
+                Audience <span style={{ color: "#98a2b3", fontWeight: 500 }}>optional</span>
+              </label>
+              <input
+                id="cmo-content-audience"
+                name="audience"
+                maxLength={AUDIENCE_GUIDANCE_MAX}
+                placeholder="Let 9D Brain choose"
+              />
+            </div>
+
+            <div className="field full">
+              <label>Platforms</label>
+              <div className="checkbox-row" aria-label="Campaign platforms">
+                {primaryPlatforms.map((channel) => (
+                  <label key={channel}>
+                    <input
+                      type="checkbox"
+                      name="platforms"
+                      value={channel}
+                      defaultChecked={channel === "instagram"}
+                    />
+                    {channel.replaceAll("_", " ")}
+                  </label>
+                ))}
+              </div>
+              <span className="subtle" style={{ fontSize: 9 }}>
+                Each selected platform receives its own native copy variant.
+              </span>
+            </div>
+
+            <details
+              style={{
+                gridColumn: "1 / -1",
+                padding: 14,
+                border: "1px solid #e4e7ec",
+                borderRadius: 12,
+                background: "#fbfcfd",
+              }}
+            >
+              <summary style={{ cursor: "pointer", color: "#344054", fontSize: 11, fontWeight: 700 }}>
+                Advanced controls
+              </summary>
+              <div className="form-grid" style={{ marginTop: 14 }}>
 
             <div className="field">
               <label htmlFor="cmo-content-campaign">Campaign</label>
@@ -340,12 +484,13 @@ export function CmoPage() {
             </div>
 
             <div className="field">
-              <label htmlFor="cmo-content-channel">Channel</label>
+              <label htmlFor="cmo-content-channel">Additional channel</label>
               <select
                 id="cmo-content-channel"
-                name="channel"
-                defaultValue="instagram"
+                name="additional_channel"
+                defaultValue=""
               >
+                <option value="">None</option>
                 {channels.map((channel) => (
                   <option key={channel} value={channel}>
                     {channel.replaceAll("_", " ")}
@@ -353,7 +498,7 @@ export function CmoPage() {
                 ))}
               </select>
               <span className="subtle" style={{ fontSize: 9 }}>
-                AI adapts the draft to this channel
+                Email, website, ads, and other supported formats remain available
               </span>
             </div>
 
@@ -409,6 +554,8 @@ export function CmoPage() {
                 placeholder="Leave blank and let AI CMO create the title"
               />
             </div>
+              </div>
+            </details>
           </div>
 
           <div
@@ -556,7 +703,7 @@ export function CmoPage() {
               ) : (
                 <>
                   <Sparkles />
-                  Generate content
+                  Create campaign content
                 </>
               )}
             </Button>
@@ -568,7 +715,7 @@ export function CmoPage() {
       <Modal
         wide
         title="Edit content"
-        description={`Saving creates version ${editingContent.version + 1}. The current version remains unchanged in history.`}
+        description="Saving creates a new immutable version. The selected version remains unchanged in history."
         onClose={() => {
           setEditingContent(null);
           setError("");

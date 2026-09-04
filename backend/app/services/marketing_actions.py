@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 from typing import Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -27,7 +28,12 @@ from app.models.commerce import (
     ProductGroupDestination,
 )
 from app.models.automation_intelligence import AdvertisingSpendPolicy
-from app.models.marketing import Campaign, CampaignProductSelection, MarketingContent
+from app.models.marketing import (
+    Campaign,
+    CampaignProductSelection,
+    CreativeAsset,
+    MarketingContent,
+)
 from app.schemas.ai_action_payload import (
     CampaignAudience,
     CampaignCreative,
@@ -403,6 +409,15 @@ async def prepare_content_publish_action(
     body = content.body
     if content.cta:
         body = f"{body}\n\n{content.cta}"
+    media_refs = (
+        await _ready_instagram_media_refs(
+            session,
+            business_id=business_id,
+            content_id=content.id,
+        )
+        if target == "instagram"
+        else []
+    )
     return await _materialize_governed_proposal(
         session,
         business_id=business_id,
@@ -419,9 +434,59 @@ async def prepare_content_publish_action(
             action_payload=PublishSocialPostPayload(
                 platform=target,
                 content=body[:10_000],
-                media_refs=[],
+                media_refs=media_refs,
             ),
         ),
+    )
+
+
+async def _ready_instagram_media_refs(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    content_id: UUID,
+) -> list[str]:
+    """Return only tenant-owned, final, HTTPS media supported by the adapter."""
+    try:
+        candidates = list(
+            (
+                await session.scalars(
+                    select(CreativeAsset)
+                    .where(
+                        CreativeAsset.business_id == business_id,
+                        CreativeAsset.content_id == content_id,
+                        CreativeAsset.source_type == "future_provider",
+                        CreativeAsset.generation_status == "ready",
+                        CreativeAsset.storage_reference.is_not(None),
+                    )
+                    .order_by(
+                        CreativeAsset.created_at.desc(),
+                        CreativeAsset.id.desc(),
+                    )
+                    .limit(10)
+                )
+            ).all()
+        )
+    except SQLAlchemyError:
+        raise MarketingPersistenceError from None
+    for candidate in candidates:
+        reference = candidate.storage_reference
+        if isinstance(reference, str) and _safe_public_media_reference(reference):
+            return [reference]
+    return []
+
+
+def _safe_public_media_reference(value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+        and len(value) <= 1024
     )
 
 

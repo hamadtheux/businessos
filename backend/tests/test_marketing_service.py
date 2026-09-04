@@ -5,16 +5,21 @@ import os
 import unittest
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+from PIL import Image
+from sqlalchemy.exc import SQLAlchemyError
+
 os.environ.setdefault("AIBOS_DATABASE_URL", "postgresql+asyncpg://database.invalid/test")
 os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 
-from app.exceptions.marketing import MarketingAIError, MarketingStateError, MarketingValidationError  # noqa: E402
+from app.exceptions.marketing import MarketingAIError, MarketingNotFoundError, MarketingPersistenceError, MarketingStateError, MarketingValidationError  # noqa: E402
 from app.models.audit_log import AuditLog  # noqa: E402
 from app.models.business import Business  # noqa: E402
+from app.models.business_branding import BusinessBranding  # noqa: E402
 from app.models.catalog_item import CatalogItem  # noqa: E402
 from app.models.marketing import Campaign, CampaignChannelPlan, Competitor, CompetitorObservation, CreativeAsset, MarketingContent, MarketingPlan, MarketingTrend, SocialSchedule  # noqa: E402
 from app.models.opportunity import Opportunity  # noqa: E402
@@ -41,6 +46,8 @@ from app.services.marketing import (  # noqa: E402
     generate_campaign,
     generate_content,
     generate_creative_asset,
+    regenerate_creative_asset,
+    list_creative_assets,
     generate_plan,
     learn_from_performance,
     marketing_analytics,
@@ -49,11 +56,116 @@ from app.services.marketing import (  # noqa: E402
     unschedule,
     _run_cmo,
 )
+from app.storage.base import StorageOperationError  # noqa: E402
 
 
 BUSINESS_ID = uuid4()
 USER_ID = uuid4()
 NOW = datetime(2026, 8, 23, 12, tzinfo=UTC)
+
+
+def _png_bytes(
+    width: int = 1024,
+    height: int = 1024,
+    *,
+    mode: str = "RGB",
+) -> bytes:
+    output = BytesIO()
+    color = (100, 120, 140, 255) if mode == "RGBA" else (100, 120, 140)
+    Image.new(mode, (width, height), color).save(output, format="PNG")
+    return output.getvalue()
+
+
+def _business_record() -> Business:
+    return Business(
+        id=BUSINESS_ID,
+        name="Acme",
+        slug="acme",
+        business_type="retail",
+        status="active",
+        timezone="UTC",
+        currency="USD",
+        locale="en",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+class _ObjectStorage:
+    def __init__(
+        self,
+        *,
+        get_content: bytes | None = None,
+        put_error: Exception | None = None,
+        public_url_error: Exception | None = None,
+    ) -> None:
+        self.get = AsyncMock(
+            return_value=get_content if get_content is not None else _png_bytes(240, 80)
+        )
+        self.put = AsyncMock(side_effect=put_error)
+        self.delete = AsyncMock()
+        self.public_url_error = public_url_error
+
+    def public_url(self, object_key: str) -> str:
+        if self.public_url_error is not None:
+            raise self.public_url_error
+        return f"https://media.example.com/{object_key}"
+
+
+def _creative_strategy() -> dict[str, object]:
+    return {
+        "marketing_goal": "Increase qualified product interest.",
+        "target_audience": "Relevant customers.",
+        "audience_insight": "Lead with a clear supported benefit.",
+        "campaign_angle": "Premium product-first launch.",
+        "hook": "Discover the product.",
+        "headline": "Made for the moment",
+        "supporting_message": "A grounded, confident product story.",
+        "cta": "Explore now",
+        "visual_concept": "Editorial product scene with a strong hero subject.",
+        "composition_direction": "Hero subject left with clean open space right.",
+        "subject_focus": "The supported catalog product.",
+        "mood": "Premium and contemporary.",
+        "lighting": "Soft directional studio lighting.",
+        "negative_space": "Generous clear area on the right for typography.",
+        "brand_treatment": "Use saved palette cues without drawing the logo.",
+        "recommended_channel": "instagram",
+        "pr_guardrails": ["Use only supported claims."],
+        "prohibited_claims": ["No invented discounts."],
+    }
+
+
+def _creative_asset(
+    *,
+    status: str = "brief_ready",
+    business_id=BUSINESS_ID,
+    source_type: str = "ai_brief",
+    visual_direction: str | None = None,
+) -> CreativeAsset:
+    return CreativeAsset(
+        id=uuid4(),
+        business_id=business_id,
+        campaign_id=None,
+        content_id=None,
+        asset_type="social_square",
+        source_type=source_type,
+        instructions="create a grounded product post",
+        visual_direction=(
+            json.dumps(_creative_strategy())
+            if visual_direction is None
+            else visual_direction
+        ),
+        generation_status=status,
+        storage_reference=(
+            "https://media.example.com/existing.png" if status == "ready" else None
+        ),
+        width=640,
+        height=640,
+        aspect_ratio="1:1",
+        alt_text="Product campaign creative",
+        created_at=NOW,
+        updated_at=NOW,
+    )
 
 
 class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -551,7 +663,7 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         result = CreativeGenerationResult(
-            storage_reference="https://media.example.com/generated.png",
+            content=_png_bytes(),
             width=1024,
             height=1024,
             provider_request_id="req_123",
@@ -561,22 +673,47 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
             generate_draft=AsyncMock(return_value=result),
         )
 
+        business = Business(
+            id=BUSINESS_ID,
+            name="Acme",
+            slug="acme",
+            business_type="retail",
+            status="active",
+            timezone="UTC",
+            currency="USD",
+            locale="en",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        storage = _ObjectStorage()
         generated = await generate_creative_asset(
-            _ScalarSession([asset]),
+            _ScalarSession([asset, business, None, asset]),
             business_id=BUSINESS_ID,
             creative_asset_id=asset.id,
             actor_user_id=USER_ID,
             provider=provider,
+            storage=storage,
         )
 
         self.assertEqual(generated.generation_status, "ready")
         self.assertEqual(generated.source_type, "future_provider")
         self.assertEqual(
             generated.storage_reference,
-            "https://media.example.com/generated.png",
+            storage.public_url(storage.put.await_args.args[0]),
         )
-        self.assertEqual(generated.width, 1024)
-        self.assertEqual(generated.height, 1024)
+        self.assertEqual(generated.width, 1080)
+        self.assertEqual(generated.height, 1080)
+        storage.put.assert_awaited_once()
+        object_key, final_bytes, content_type = storage.put.await_args.args
+        self.assertTrue(
+            object_key.startswith(
+                f"businesses/{BUSINESS_ID}/marketing/creatives/{asset.id}/final/"
+            )
+        )
+        self.assertEqual(content_type, "image/png")
+        with Image.open(BytesIO(final_bytes)) as final_image:
+            self.assertEqual(final_image.size, (1080, 1080))
+            self.assertEqual(final_image.format, "PNG")
 
         request = provider.generate_draft.await_args.args[0]
         self.assertEqual(request.business_id, BUSINESS_ID)
@@ -641,16 +778,64 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         generated = await generate_creative_asset(
-            _ScalarSession([asset]),
+            _ScalarSession([asset, _business_record(), None]),
             business_id=BUSINESS_ID,
             creative_asset_id=asset.id,
             actor_user_id=USER_ID,
             provider=provider,
+            storage=_ObjectStorage(),
         )
 
         self.assertEqual(generated.generation_status, "provider_required")
         self.assertIsNone(generated.storage_reference)
         self.assertEqual(generated.source_type, "ai_brief")
+
+    async def test_creative_composition_runs_through_worker_thread_boundary(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        composed = SimpleNamespace(
+            content=_png_bytes(640, 640),
+            width=640,
+            height=640,
+            selected_layout="minimal_hero",
+        )
+
+        async def dispatch(function, *args):
+            return function(*args)
+
+        with (
+            patch(
+                "app.services.marketing.asyncio.to_thread",
+                new=AsyncMock(side_effect=dispatch),
+            ) as to_thread,
+            patch(
+                "app.services.marketing.CreativeCompositor.compose",
+                return_value=composed,
+            ) as compose,
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None, asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=provider,
+                storage=storage,
+            )
+
+        self.assertEqual(generated.generation_status, "ready")
+        to_thread.assert_awaited_once()
+        self.assertIs(to_thread.await_args.args[0], compose)
+        compose.assert_called_once_with(to_thread.await_args.args[1])
 
     async def test_creative_generation_persists_failed_provider_result(self) -> None:
         strategy = {
@@ -703,11 +888,12 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         generated = await generate_creative_asset(
-            _ScalarSession([asset]),
+            _ScalarSession([asset, _business_record(), None]),
             business_id=BUSINESS_ID,
             creative_asset_id=asset.id,
             actor_user_id=USER_ID,
             provider=provider,
+            storage=_ObjectStorage(),
         )
 
         self.assertEqual(generated.generation_status, "failed")
@@ -746,6 +932,7 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
                 creative_asset_id=asset.id,
                 actor_user_id=USER_ID,
                 provider=provider,
+                storage=_ObjectStorage(),
             )
 
         provider.generate_draft.assert_not_awaited()
@@ -753,6 +940,395 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
             asset.storage_reference,
             "https://media.example.com/existing.png",
         )
+
+    async def test_creative_composition_failure_persists_failed_state(self) -> None:
+        asset = _creative_asset()
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=b"not-an-image",
+                    width=640,
+                    height=640,
+                )
+            ),
+        )
+        storage = _ObjectStorage()
+
+        generated = await generate_creative_asset(
+            _ScalarSession([asset, _business_record(), None]),
+            business_id=BUSINESS_ID,
+            creative_asset_id=asset.id,
+            actor_user_id=USER_ID,
+            provider=provider,
+            storage=storage,
+        )
+
+        self.assertEqual(generated.generation_status, "failed")
+        self.assertIsNone(generated.storage_reference)
+        storage.put.assert_not_awaited()
+
+    async def test_unsupported_typography_persists_failed_state(self) -> None:
+        strategy = _creative_strategy()
+        strategy["headline"] = "مرحبا بالعالم"
+        asset = _creative_asset(visual_direction=json.dumps(strategy))
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        storage = _ObjectStorage()
+
+        generated = await generate_creative_asset(
+            _ScalarSession([asset, _business_record(), None]),
+            business_id=BUSINESS_ID,
+            creative_asset_id=asset.id,
+            actor_user_id=USER_ID,
+            provider=provider,
+            storage=storage,
+        )
+
+        self.assertEqual(generated.generation_status, "failed")
+        self.assertIsNone(generated.storage_reference)
+        storage.put.assert_not_awaited()
+
+    async def test_creative_storage_failure_never_marks_asset_ready(self) -> None:
+        asset = _creative_asset()
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        storage = _ObjectStorage(
+            put_error=StorageOperationError("storage unavailable")
+        )
+
+        generated = await generate_creative_asset(
+            _ScalarSession([asset, _business_record(), None, asset]),
+            business_id=BUSINESS_ID,
+            creative_asset_id=asset.id,
+            actor_user_id=USER_ID,
+            provider=provider,
+            storage=storage,
+        )
+
+        self.assertEqual(generated.generation_status, "failed")
+        self.assertIsNone(generated.storage_reference)
+        storage.delete.assert_awaited_once_with(storage.put.await_args.args[0])
+
+    async def test_public_reference_failure_deletes_stored_creative(self) -> None:
+        asset = _creative_asset()
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        storage = _ObjectStorage(
+            public_url_error=StorageOperationError("reference unavailable")
+        )
+
+        generated = await generate_creative_asset(
+            _ScalarSession([asset, _business_record(), None, asset]),
+            business_id=BUSINESS_ID,
+            creative_asset_id=asset.id,
+            actor_user_id=USER_ID,
+            provider=provider,
+            storage=storage,
+        )
+
+        self.assertEqual(generated.generation_status, "failed")
+        self.assertIsNone(generated.storage_reference)
+        storage.put.assert_awaited_once()
+        storage.delete.assert_awaited_once_with(storage.put.await_args.args[0])
+
+    async def test_finalization_recheck_preserves_concurrent_ready_winner(self) -> None:
+        initial = _creative_asset()
+        winner = _creative_asset(status="ready", source_type="future_provider")
+        winner.id = initial.id
+        winner.storage_reference = "https://media.example.com/winning-final.png"
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        composed = SimpleNamespace(
+            content=_png_bytes(640, 640),
+            width=640,
+            height=640,
+            selected_layout="minimal_hero",
+        )
+        storage = _ObjectStorage()
+        session = _ScalarSession(
+            [initial, _business_record(), None, winner]
+        )
+
+        with patch(
+            "app.services.marketing.CreativeCompositor.compose",
+            return_value=composed,
+        ) as compose:
+            generated = await generate_creative_asset(
+                session,
+                business_id=BUSINESS_ID,
+                creative_asset_id=initial.id,
+                actor_user_id=USER_ID,
+                provider=provider,
+                storage=storage,
+            )
+
+        self.assertIs(generated, winner)
+        self.assertEqual(winner.generation_status, "ready")
+        self.assertEqual(
+            winner.storage_reference,
+            "https://media.example.com/winning-final.png",
+        )
+        provider.generate_draft.assert_awaited_once()
+        compose.assert_called_once()
+        storage.put.assert_not_awaited()
+        storage.delete.assert_not_awaited()
+        finalization_statement = session.scalar_statements[-1]
+        self.assertIn("FOR UPDATE", str(finalization_statement))
+        self.assertIn("creative_assets.business_id", str(finalization_statement))
+        self.assertTrue(
+            finalization_statement.get_execution_options()["populate_existing"]
+        )
+
+    async def test_creative_reads_real_logo_from_private_tenant_key(self) -> None:
+        asset = _creative_asset()
+        logo_key = f"businesses/{BUSINESS_ID}/branding/logo/brand.png"
+        branding = BusinessBranding(
+            business_id=BUSINESS_ID,
+            logo_url="https://public.example.com/logo.png",
+            logo_storage_key=logo_key,
+            primary_color="#123456",
+            secondary_color="#F4F0E8",
+            accent_color="#D27D2D",
+        )
+        transparent_logo = BytesIO()
+        Image.new("RGBA", (240, 80), (220, 20, 20, 120)).save(
+            transparent_logo,
+            format="PNG",
+        )
+        storage = _ObjectStorage(get_content=transparent_logo.getvalue())
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+
+        generated = await generate_creative_asset(
+            _ScalarSession([asset, _business_record(), branding, asset]),
+            business_id=BUSINESS_ID,
+            creative_asset_id=asset.id,
+            actor_user_id=USER_ID,
+            provider=provider,
+            storage=storage,
+        )
+
+        self.assertEqual(generated.generation_status, "ready")
+        storage.get.assert_awaited_once_with(logo_key, max_bytes=5_000_000)
+        provider_request = provider.generate_draft.await_args.args[0]
+        self.assertNotIn(logo_key, provider_request.instructions)
+        self.assertNotIn(branding.logo_url, provider_request.instructions)
+
+    async def test_invalid_private_logo_is_omitted_without_failing_creative(self) -> None:
+        asset = _creative_asset()
+        logo_key = f"businesses/{BUSINESS_ID}/branding/logo/invalid.png"
+        branding = BusinessBranding(
+            business_id=BUSINESS_ID,
+            logo_url=None,
+            logo_storage_key=logo_key,
+            primary_color=None,
+            secondary_color=None,
+            accent_color=None,
+        )
+        storage = _ObjectStorage(get_content=b"invalid-logo")
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+
+        generated = await generate_creative_asset(
+            _ScalarSession([asset, _business_record(), branding, asset]),
+            business_id=BUSINESS_ID,
+            creative_asset_id=asset.id,
+            actor_user_id=USER_ID,
+            provider=provider,
+            storage=storage,
+        )
+
+        self.assertEqual(generated.generation_status, "ready")
+        storage.get.assert_awaited_once()
+
+    async def test_cross_tenant_logo_key_is_never_read(self) -> None:
+        asset = _creative_asset()
+        branding = BusinessBranding(
+            business_id=BUSINESS_ID,
+            logo_url="https://public.example.com/logo.png",
+            logo_storage_key=f"businesses/{uuid4()}/branding/logo/brand.png",
+            primary_color="#123456",
+            secondary_color="#F4F0E8",
+            accent_color="#D27D2D",
+        )
+        storage = _ObjectStorage()
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+
+        generated = await generate_creative_asset(
+            _ScalarSession([asset, _business_record(), branding, asset]),
+            business_id=BUSINESS_ID,
+            creative_asset_id=asset.id,
+            actor_user_id=USER_ID,
+            provider=provider,
+            storage=storage,
+        )
+
+        self.assertEqual(generated.generation_status, "ready")
+        storage.get.assert_not_awaited()
+
+    async def test_cross_tenant_creative_is_rejected_before_generation(self) -> None:
+        asset = _creative_asset(business_id=uuid4())
+        provider = SimpleNamespace(provider_name="test", generate_draft=AsyncMock())
+
+        with self.assertRaises(MarketingNotFoundError):
+            await generate_creative_asset(
+                _ScalarSession([asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=provider,
+                storage=_ObjectStorage(),
+            )
+        provider.generate_draft.assert_not_awaited()
+
+    async def test_legacy_unstructured_brief_fails_safely_and_remains_unchanged(self) -> None:
+        asset = _creative_asset(visual_direction="Use a blue background")
+        provider = SimpleNamespace(provider_name="test", generate_draft=AsyncMock())
+
+        with self.assertRaises(MarketingValidationError):
+            await generate_creative_asset(
+                _ScalarSession([asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=provider,
+                storage=_ObjectStorage(),
+            )
+
+        self.assertEqual(asset.visual_direction, "Use a blue background")
+        self.assertEqual(asset.generation_status, "brief_ready")
+        provider.generate_draft.assert_not_awaited()
+
+    async def test_legacy_unstructured_brief_remains_listable(self) -> None:
+        asset = _creative_asset(visual_direction="Legacy visual direction")
+
+        result = await list_creative_assets(
+            _ScalarSession([], rows=[[asset]]),
+            business_id=BUSINESS_ID,
+            campaign_id=None,
+            content_id=None,
+        )
+
+        self.assertEqual(result, [asset])
+
+    async def test_ready_regeneration_creates_new_asset_and_preserves_original(self) -> None:
+        original = _creative_asset(status="ready", source_type="future_provider")
+        original_reference = original.storage_reference
+        storage = _ObjectStorage()
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        session = _RegenerationSession([original, _business_record(), None])
+
+        revision = await regenerate_creative_asset(
+            session,
+            business_id=BUSINESS_ID,
+            creative_asset_id=original.id,
+            actor_user_id=USER_ID,
+            provider=provider,
+            storage=storage,
+        )
+
+        self.assertIsNot(revision, original)
+        self.assertNotEqual(revision.id, original.id)
+        self.assertEqual(revision.generation_status, "ready")
+        self.assertEqual(original.generation_status, "ready")
+        self.assertEqual(original.storage_reference, original_reference)
+        self.assertNotEqual(revision.storage_reference, original_reference)
+
+    async def test_final_storage_is_compensated_when_database_flush_fails(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+
+        with self.assertRaises(MarketingPersistenceError):
+            await generate_creative_asset(
+                _FailingFlushSession([asset, _business_record(), None, asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=provider,
+                storage=storage,
+            )
+
+        storage.put.assert_awaited_once()
+        storage.delete.assert_awaited_once_with(storage.put.await_args.args[0])
+        self.assertEqual(asset.generation_status, "brief_ready")
+        self.assertIsNone(asset.storage_reference)
 
     async def test_plan_generation_uses_cmo_runtime_result_and_persists_only_conclusions(self) -> None:
         business = Business(id=BUSINESS_ID, name="Acme", slug="acme", business_type="retail", status="active", timezone="UTC", currency="USD", locale="en", created_at=NOW, updated_at=NOW)
@@ -1131,8 +1707,10 @@ class _ScalarSession:
         self.rows = list(rows or [])
         self.added = []
         self.flush_calls = 0
+        self.scalar_statements = []
 
-    async def scalar(self, _statement):
+    async def scalar(self, statement):
+        self.scalar_statements.append(statement)
         return self.values.pop(0) if self.values else None
 
     async def scalars(self, _statement):
@@ -1143,6 +1721,24 @@ class _ScalarSession:
 
     async def flush(self):
         self.flush_calls += 1
+
+
+class _FailingFlushSession(_ScalarSession):
+    async def flush(self):
+        self.flush_calls += 1
+        raise SQLAlchemyError("database unavailable")
+
+
+class _RegenerationSession(_ScalarSession):
+    async def scalar(self, statement):
+        if self.values:
+            return await super().scalar(statement)
+        self.scalar_statements.append(statement)
+        return next(
+            value
+            for value in reversed(self.added)
+            if isinstance(value, CreativeAsset)
+        )
 
 
 class _ScalarRows:

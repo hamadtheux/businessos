@@ -84,6 +84,107 @@ test("calendar scheduling remains an internal API record", async () => {
   assert.deepEqual(body, { content_id: "content-id", scheduled_for: "2026-08-24T10:00:00Z" });
 });
 
+test("creative generation and regeneration use tenant-scoped POST endpoints", async () => {
+  const requests: Array<{ path: string; method: string }> = [];
+  const api = await authenticated(async (input, init) => {
+    if (String(input).endsWith("/login")) return json(session);
+    requests.push({
+      path: new URL(String(input)).pathname,
+      method: String(init?.method || "GET"),
+    });
+    return json({});
+  });
+
+  await api.creative.generate(businessA, "creative-one");
+  await api.creative.regenerate(businessA, "creative-one");
+
+  assert.deepEqual(requests, [
+    {
+      path: `/api/v1/businesses/${businessA}/marketing/creative-assets/creative-one/generate`,
+      method: "POST",
+    },
+    {
+      path: `/api/v1/businesses/${businessA}/marketing/creative-assets/creative-one/regenerate`,
+      method: "POST",
+    },
+  ]);
+});
+
+test("CMO creative studio exposes honest visual lifecycle states and immutable regeneration", async () => {
+  const [panel, studio, page, social, helpers] = await Promise.all([
+    readFile(new URL("../features/marketing/cmo-creative-panel.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../features/marketing/cmo-content-studio.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../features/marketing/cmo-page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../features/marketing/marketing-pages.tsx", import.meta.url), "utf8"),
+    readFile(new URL("./cmo-ux.ts", import.meta.url), "utf8"),
+  ]);
+
+  for (const state of [
+    "creative-empty-state",
+    "creative-provider-required",
+    "creative-failed-state",
+    "creative-ready-preview",
+  ]) {
+    assert.match(panel, new RegExp(state));
+  }
+  assert.match(panel, /creative-loading-\$\{phase\}/);
+  assert.match(panel, /Creating the visual strategy/);
+  assert.match(panel, /Designing your branded creative/);
+  assert.match(panel, /Regenerate as new creative/);
+  assert.match(panel, /Previous artwork remains in history|preserved in history/);
+  assert.match(panel, /safeCreativeMediaUrl/);
+  assert.match(panel, /onError=\{\(\) => setFailedPreviewId/);
+  assert.match(panel, /creative-preview-unavailable/);
+  assert.match(panel, /button-retry-preview/);
+  assert.match(panel, /Creative is ready, but the preview could not be loaded/);
+  assert.match(panel, /Creative history ·/);
+  assert.match(panel, /Previous creative artwork/);
+  assert.match(panel, /remains read-only here/);
+  assert.match(panel, /button-reload-creatives/);
+  assert.match(panel, /flexWrap: "wrap"/);
+  assert.match(panel, /width: "100%"/);
+  assert.doesNotMatch(panel, /placeholder artwork|data:image/);
+  for (const forbidden of ["server-side", "OpenAI", "API key", "raw visual"]) {
+    assert.equal(panel.toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);
+  }
+  assert.match(studio, /button-approve-content/);
+  assert.match(studio, /button-schedule-content/);
+  assert.match(studio, /onHistory/);
+  assert.match(studio, /creatives=\{creatives\}/);
+  assert.match(page, /Saving creates a new immutable version/);
+  assert.doesNotMatch(page, /editingContent\.version \+ 1/);
+  assert.match(page, /primaryPlatforms/);
+  assert.match(page, /generateCampaignChannelDrafts/);
+  assert.match(page, /maxLength=\{OWNER_GOAL_MAX\}/);
+  assert.match(page, /maxLength=\{AUDIENCE_GUIDANCE_MAX\}/);
+  assert.doesNotMatch(page, /Promise\.all\(selectedChannels\.map/);
+  assert.match(page, /createCreativeWithRecovery/);
+  assert.match(page, /runCreativeOperationWithRecovery/);
+  assert.match(page, /creativePhaseForDisplay/);
+  assert.match(page, /creatives=\{creativeAssets\.data\}/);
+  assert.match(page, /humanizeApiError/);
+  assert.match(social, /assets\.data\?\.slice\(1\)/);
+  assert.match(social, /creativePhaseForDisplay/);
+  assert.match(social, /button-regenerate-creative|onRegenerate/);
+  assert.match(social, /Publishing always requires your approval and an available connected channel/);
+  assert.doesNotMatch(social, /AIAction policy/);
+  assert.match(helpers, /finally \{/);
+  assert.match(helpers, /refreshAfterCreativeOperation/);
+  assert.match(helpers, /creativeFormatForContent/);
+  assert.match(helpers, /SHARED CAMPAIGN DIRECTION/);
+  assert.match(helpers, /trusted Business Brain context/);
+
+  for (const control of [
+    "button-regenerate-content",
+    "button-approve-content",
+    "button-schedule-content",
+    "Save new version",
+    "Version history",
+  ]) {
+    assert.match(`${studio}\n${page}`, new RegExp(control));
+  }
+});
+
 test("completed marketing screens contain no workspace or localStorage dependency", async () => {
   const files = [
     "../features/marketing/cmo-page.tsx", "../features/marketing/marketing-pages.tsx",

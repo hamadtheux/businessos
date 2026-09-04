@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from fastapi import HTTPException
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 os.environ.setdefault("AIBOS_DATABASE_URL", "postgresql+asyncpg://database.invalid/test")
@@ -22,6 +23,9 @@ from app.db.session import get_db_session  # noqa: E402
 from app.exceptions.marketing import MarketingStateError  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.marketing import Campaign, MarketingPlan  # noqa: E402
+from app.services.marketing import (  # noqa: E402
+    _register_creative_storage_compensation,
+)
 
 
 BUSINESS_ID = UUID("61000000-0000-0000-0000-000000000001")
@@ -122,6 +126,43 @@ class MarketingApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result, plan)
         self.assertEqual(session.calls, ["flush", "refresh", "commit"])
 
+    async def test_failed_commit_compensates_pending_creative_storage(self) -> None:
+        storage = SimpleNamespace(delete=AsyncMock())
+        session = _CommitFailingSession()
+        object_key = f"businesses/{BUSINESS_ID}/marketing/creatives/final.png"
+
+        async def operation():
+            _register_creative_storage_compensation(session, storage, object_key)
+            return SimpleNamespace()
+
+        with self.assertRaises(HTTPException) as raised:
+            await marketing_mutate(None, session, operation())
+
+        self.assertEqual(raised.exception.status_code, 503)
+        storage.delete.assert_awaited_once_with(object_key)
+        self.assertEqual(session.rollback_calls, 1)
+        self.assertEqual(session.info, {})
+
+    async def test_unexpected_mutation_failure_compensates_and_propagates(self) -> None:
+        storage = SimpleNamespace(delete=AsyncMock())
+        session = _CommitFailingSession()
+        object_key = f"businesses/{BUSINESS_ID}/marketing/creatives/runtime.png"
+
+        async def operation():
+            _register_creative_storage_compensation(session, storage, object_key)
+            raise RuntimeError("unexpected materialization failure")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "unexpected materialization failure",
+        ):
+            await marketing_mutate(None, session, operation())
+
+        storage.delete.assert_awaited_once_with(object_key)
+        self.assertEqual(session.commit_calls, 0)
+        self.assertEqual(session.rollback_calls, 1)
+        self.assertEqual(session.info, {})
+
     async def test_calendar_rejects_naive_datetime(self) -> None:
         response = await self.client.post(self._url("calendar"), json={"content_id": str(uuid4()), "scheduled_for": "2026-08-24T10:00:00"})
         self.assertEqual(response.status_code, 422)
@@ -190,6 +231,16 @@ class _FakeSession:
 
     async def rollback(self):
         self.rollback_calls += 1
+
+
+class _CommitFailingSession(_FakeSession):
+    def __init__(self):
+        super().__init__()
+        self.info = {}
+
+    async def commit(self):
+        self.commit_calls += 1
+        raise SQLAlchemyError("private commit failure")
 
 
 class _TrackingAsyncSession(AsyncSession):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -25,7 +26,14 @@ from app.services.creative_provider import (
     CreativeProviderError,
     CreativeProviderNotConfiguredError,
 )
+from app.services.creative_compositor import (
+    CreativeCompositionError,
+    CreativeCompositionInput,
+    CreativeCompositor,
+    resolve_final_dimensions,
+)
 from app.models.business import Business
+from app.models.business_branding import BusinessBranding
 from app.models.catalog_item import CatalogItem
 from app.models.automation_intelligence import AudienceHypothesis, MarketingAutomationRun
 from app.models.crm_lead import CRMLead
@@ -83,6 +91,9 @@ from app.schemas.marketing import (
 from app.schemas.operations import OpportunityCreate
 from app.services.operations import create_opportunity, record_audit
 from app.services.automation_events import record_automation_event
+from app.services.logo_image import MAX_LOGO_UPLOAD_BYTES, sanitize_logo_bytes
+from app.exceptions.logo import LogoError
+from app.storage.base import ObjectStorage, StorageError
 
 
 ZERO = Decimal("0")
@@ -1367,16 +1378,17 @@ async def generate_creative_asset(
     creative_asset_id: UUID,
     actor_user_id: UUID,
     provider: CreativeGenerationProvider,
+    storage: ObjectStorage,
 ) -> CreativeAsset:
     """
-    Turn an approved internal Creative Intelligence brief into a stored raw
-    visual layer.
+    Turn grounded Creative Intelligence into a final branded PNG.
 
     Provider failures are persisted as truthful asset states and returned
     normally. They are intentionally not raised as MarketingAIError because
     the API mutation helper rolls exceptions back.
 
-    No social provider is contacted and nothing is published.
+    Raw provider bytes remain transient. No social provider is contacted and
+    nothing is published.
     """
     value = await _get(
         session,
@@ -1385,6 +1397,88 @@ async def generate_creative_asset(
         creative_asset_id,
     )
 
+    return await _generate_creative_asset_value(
+        session,
+        business_id=business_id,
+        value=value,
+        actor_user_id=actor_user_id,
+        provider=provider,
+        storage=storage,
+    )
+
+
+async def regenerate_creative_asset(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    creative_asset_id: UUID,
+    actor_user_id: UUID,
+    provider: CreativeGenerationProvider,
+    storage: ObjectStorage,
+) -> CreativeAsset:
+    """Create and generate a new immutable creative revision."""
+    source = await _get(
+        session,
+        CreativeAsset,
+        business_id,
+        creative_asset_id,
+    )
+    if source.generation_status != "ready" or source.source_type != "future_provider":
+        raise MarketingStateError
+    if not source.visual_direction:
+        raise MarketingValidationError
+
+    revision = CreativeAsset(
+        id=uuid4(),
+        business_id=business_id,
+        campaign_id=source.campaign_id,
+        content_id=source.content_id,
+        asset_type=source.asset_type,
+        source_type="ai_brief",
+        instructions=source.instructions,
+        visual_direction=source.visual_direction,
+        generation_status="brief_ready",
+        storage_reference=None,
+        width=source.width,
+        height=source.height,
+        aspect_ratio=source.aspect_ratio,
+        alt_text=source.alt_text,
+    )
+    session.add(revision)
+    await _flush(session)
+    record_audit(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        event_type="marketing.creative_revision_created",
+        entity_type="marketing_creative_asset",
+        entity_id=revision.id,
+        summary=(
+            "Created a new creative revision from an existing grounded strategy; "
+            "the previous final artwork remains unchanged."
+        ),
+    )
+    return await _generate_creative_asset_value(
+        session,
+        business_id=business_id,
+        value=revision,
+        actor_user_id=actor_user_id,
+        provider=provider,
+        storage=storage,
+    )
+
+
+async def _generate_creative_asset_value(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    value: CreativeAsset,
+    actor_user_id: UUID,
+    provider: CreativeGenerationProvider,
+    storage: ObjectStorage,
+) -> CreativeAsset:
+    if value.business_id != business_id:
+        raise MarketingNotFoundError
     if value.generation_status in {"ready", "archived"}:
         raise MarketingStateError
 
@@ -1410,6 +1504,32 @@ async def generate_creative_asset(
         # trusted for provider generation. A new grounded strategy is required.
         raise MarketingValidationError from None
 
+    try:
+        target_width, target_height = resolve_final_dimensions(
+            value.asset_type,
+            value.width,
+            value.height,
+            value.aspect_ratio,
+        )
+    except CreativeCompositionError:
+        raise MarketingValidationError from None
+
+    business = await _business(session, business_id)
+    content = (
+        await get_content(
+            session,
+            business_id=business_id,
+            content_id=value.content_id,
+        )
+        if value.content_id is not None
+        else None
+    )
+    branding = await _creative_branding(session, business_id)
+    logo_content = await _creative_logo_content(
+        storage,
+        business_id=business_id,
+        branding=branding,
+    )
     instructions = _creative_visual_generation_instructions(strategy)
 
     try:
@@ -1418,16 +1538,17 @@ async def generate_creative_asset(
                 business_id=business_id,
                 creative_asset_id=value.id,
                 instructions=instructions,
-                width=value.width,
-                height=value.height,
+                width=target_width,
+                height=target_height,
                 aspect_ratio=value.aspect_ratio,
             )
         )
     except CreativeProviderNotConfiguredError:
-        value.generation_status = "provider_required"
-        value.storage_reference = None
-
-        await _flush(session)
+        await _set_creative_generation_state(
+            session,
+            value,
+            status="provider_required",
+        )
 
         record_audit(
             session,
@@ -1447,32 +1568,129 @@ async def generate_creative_asset(
         # external provider outage.
         raise MarketingValidationError from None
     except CreativeProviderError:
-        value.generation_status = "failed"
-        value.storage_reference = None
-
-        await _flush(session)
-
-        record_audit(
+        return await _fail_creative_generation(
             session,
             business_id=business_id,
+            value=value,
             actor_user_id=actor_user_id,
-            event_type="marketing.creative_generation_failed",
-            entity_type="marketing_creative_asset",
-            entity_id=value.id,
-            summary=(
-                "Creative visual generation failed safely; no usable image was "
-                "attached and nothing was published."
+            stage="provider",
+        )
+
+    try:
+        composition_input = CreativeCompositionInput(
+            raw_visual=result.content,
+            target_width=target_width,
+            target_height=target_height,
+            asset_type=value.asset_type,
+            headline=strategy.headline,
+            supporting_copy=strategy.supporting_message,
+            cta=strategy.cta,
+            business_name=business.name,
+            primary_color=(branding.primary_color if branding else None),
+            secondary_color=(branding.secondary_color if branding else None),
+            accent_color=(branding.accent_color if branding else None),
+            logo_content=logo_content,
+            composition_direction=strategy.composition_direction,
+            negative_space=strategy.negative_space,
+            channel=(
+                content.channel
+                if content is not None
+                else strategy.recommended_channel
             ),
         )
-        return value
+        compositor = CreativeCompositor()
+        final = await asyncio.to_thread(
+            compositor.compose,
+            composition_input,
+        )
+    except CreativeCompositionError:
+        return await _fail_creative_generation(
+            session,
+            business_id=business_id,
+            value=value,
+            actor_user_id=actor_user_id,
+            stage="composition",
+        )
 
+    value = await _lock_creative_for_finalization(
+        session,
+        business_id=business_id,
+        creative_asset_id=value.id,
+    )
+    if value.generation_status == "ready":
+        if value.source_type == "future_provider" and value.storage_reference:
+            return value
+        raise MarketingStateError
+    if value.generation_status not in {
+        "brief_ready",
+        "provider_required",
+        "failed",
+    }:
+        raise MarketingStateError
+    if value.source_type not in {"ai_brief", "future_provider"}:
+        raise MarketingStateError
+
+    object_key = _final_creative_storage_key(
+        business_id=business_id,
+        creative_asset_id=value.id,
+    )
+    put_attempted = False
+    try:
+        put_attempted = True
+        await storage.put(object_key, final.content, "image/png")
+        public_reference = storage.public_url(object_key)
+        if (
+            not isinstance(public_reference, str)
+            or not public_reference.strip()
+            or len(public_reference) > 1024
+        ):
+            raise StorageError("Invalid final creative reference")
+    except (StorageError, ValueError):
+        if put_attempted:
+            await _best_effort_delete(storage, object_key)
+        return await _fail_creative_generation(
+            session,
+            business_id=business_id,
+            value=value,
+            actor_user_id=actor_user_id,
+            stage="storage",
+        )
+    except Exception:
+        if put_attempted:
+            await _best_effort_delete(storage, object_key)
+        raise
+
+    previous = (
+        value.source_type,
+        value.generation_status,
+        value.storage_reference,
+        value.width,
+        value.height,
+    )
     value.source_type = "future_provider"
     value.generation_status = "ready"
-    value.storage_reference = result.storage_reference
-    value.width = result.width
-    value.height = result.height
+    value.storage_reference = public_reference
+    value.width = final.width
+    value.height = final.height
 
-    await _flush(session)
+    # The object store and database cannot share a transaction. Retain a
+    # transaction-local compensation hook until the API commit succeeds so a
+    # failed commit does not strand tenant artwork in storage.
+    _register_creative_storage_compensation(session, storage, object_key)
+
+    try:
+        await _flush(session)
+    except MarketingPersistenceError:
+        (
+            value.source_type,
+            value.generation_status,
+            value.storage_reference,
+            value.width,
+            value.height,
+        ) = previous
+        _remove_creative_storage_compensation(session, object_key)
+        await _best_effort_delete(storage, object_key)
+        raise
 
     record_audit(
         session,
@@ -1482,12 +1700,181 @@ async def generate_creative_asset(
         entity_type="marketing_creative_asset",
         entity_id=value.id,
         summary=(
-            f"Generated and stored a validated {result.width}x{result.height} "
-            "internal creative visual; nothing was published externally."
+            f"Generated and stored a validated {final.width}x{final.height} final "
+            f"branded creative using the {final.selected_layout} layout; nothing "
+            "was published externally."
         ),
     )
 
     return value
+
+
+async def _lock_creative_for_finalization(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    creative_asset_id: UUID,
+) -> CreativeAsset:
+    """Lock a freshly reloaded tenant asset for the short finalization window."""
+    statement = (
+        select(CreativeAsset)
+        .where(
+            CreativeAsset.id == creative_asset_id,
+            CreativeAsset.business_id == business_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    try:
+        value = await session.scalar(statement)
+    except SQLAlchemyError:
+        raise MarketingPersistenceError from None
+    if value is None:
+        raise MarketingNotFoundError
+    return value
+
+
+async def _creative_branding(
+    session: AsyncSession,
+    business_id: UUID,
+) -> BusinessBranding | None:
+    try:
+        branding = await session.scalar(
+            select(BusinessBranding).where(BusinessBranding.business_id == business_id)
+        )
+    except SQLAlchemyError:
+        raise MarketingPersistenceError from None
+    if branding is not None and not isinstance(branding, BusinessBranding):
+        raise MarketingPersistenceError
+    return branding
+
+
+async def _creative_logo_content(
+    storage: ObjectStorage,
+    *,
+    business_id: UUID,
+    branding: BusinessBranding | None,
+) -> bytes | None:
+    if branding is None or not branding.logo_storage_key:
+        return None
+    object_key = branding.logo_storage_key
+    if not object_key.startswith(f"businesses/{business_id}/branding/logo/"):
+        return None
+    try:
+        content = await storage.get(object_key, max_bytes=MAX_LOGO_UPLOAD_BYTES)
+        return sanitize_logo_bytes(content).content
+    except (StorageError, LogoError, ValueError):
+        # A logo is optional presentation data. Invalid or unavailable logo
+        # bytes never cause a tenant's otherwise valid creative to disappear.
+        return None
+
+
+async def _set_creative_generation_state(
+    session: AsyncSession,
+    value: CreativeAsset,
+    *,
+    status: str,
+) -> None:
+    value.source_type = "ai_brief"
+    value.generation_status = status
+    value.storage_reference = None
+    await _flush(session)
+
+
+async def _fail_creative_generation(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    value: CreativeAsset,
+    actor_user_id: UUID,
+    stage: str,
+) -> CreativeAsset:
+    await _set_creative_generation_state(session, value, status="failed")
+    record_audit(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        event_type="marketing.creative_generation_failed",
+        entity_type="marketing_creative_asset",
+        entity_id=value.id,
+        summary=(
+            f"Final creative generation failed safely during {stage}; no usable "
+            "asset was attached and nothing was published."
+        ),
+    )
+    return value
+
+
+async def _best_effort_delete(storage: ObjectStorage, object_key: str) -> None:
+    try:
+        await storage.delete(object_key)
+    except StorageError:
+        pass
+
+
+_PENDING_CREATIVE_STORAGE_COMPENSATIONS = (
+    "pending_creative_storage_compensations"
+)
+
+
+def _register_creative_storage_compensation(
+    session: AsyncSession,
+    storage: ObjectStorage,
+    object_key: str,
+) -> None:
+    """Keep a transaction-local cleanup hook until the API commit succeeds."""
+    info = getattr(session, "info", None)
+    if not isinstance(info, dict):
+        return
+    pending = info.setdefault(_PENDING_CREATIVE_STORAGE_COMPENSATIONS, [])
+    pending.append((storage, object_key))
+
+
+def _remove_creative_storage_compensation(
+    session: AsyncSession,
+    object_key: str,
+) -> None:
+    info = getattr(session, "info", None)
+    if not isinstance(info, dict):
+        return
+    pending = info.get(_PENDING_CREATIVE_STORAGE_COMPENSATIONS)
+    if not isinstance(pending, list):
+        return
+    info[_PENDING_CREATIVE_STORAGE_COMPENSATIONS] = [
+        entry for entry in pending if entry[1] != object_key
+    ]
+
+
+def clear_pending_creative_storage_compensations(
+    session: AsyncSession,
+) -> None:
+    """Forget cleanup hooks after the owning database transaction commits."""
+    info = getattr(session, "info", None)
+    if isinstance(info, dict):
+        info.pop(_PENDING_CREATIVE_STORAGE_COMPENSATIONS, None)
+
+
+async def compensate_pending_creative_storage(
+    session: AsyncSession,
+) -> None:
+    """Best-effort delete final artwork when its database commit cannot land."""
+    info = getattr(session, "info", None)
+    if not isinstance(info, dict):
+        return
+    pending = info.pop(_PENDING_CREATIVE_STORAGE_COMPENSATIONS, [])
+    for storage, object_key in reversed(pending):
+        await _best_effort_delete(storage, object_key)
+
+
+def _final_creative_storage_key(
+    *,
+    business_id: UUID,
+    creative_asset_id: UUID,
+) -> str:
+    return (
+        f"businesses/{business_id}/marketing/creatives/"
+        f"{creative_asset_id}/final/{uuid4().hex}.png"
+    )
 
 
 async def list_creative_assets(session: AsyncSession, *, business_id: UUID, campaign_id: UUID | None, content_id: UUID | None) -> list[CreativeAsset]:

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies.ai_agent import AIAgentProviderDependency
 from app.api.dependencies.creative import CreativeGenerationProviderDependency
+from app.storage.factory import ObjectStorageDependency
 from app.api.dependencies.business import BusinessAccessDependency, require_business_role
 from app.api.response_materialization import materialize_response_before_commit
 from app.db.session import get_db_session
@@ -347,6 +348,7 @@ async def generate_creative_asset(
     response: Response,
     session: SessionDependency,
     provider: CreativeGenerationProviderDependency,
+    storage: ObjectStorageDependency,
 ):
     await _guard(
         session,
@@ -363,6 +365,40 @@ async def generate_creative_asset(
             creative_asset_id=creative_asset_id,
             actor_user_id=access.user.id,
             provider=provider,
+            storage=storage,
+        ),
+    )
+
+
+@router.post(
+    "/creative-assets/{creative_asset_id}/regenerate",
+    response_model=CreativeAssetResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def regenerate_creative_asset(
+    creative_asset_id: UUID,
+    access: BusinessAccessDependency,
+    response: Response,
+    session: SessionDependency,
+    provider: CreativeGenerationProviderDependency,
+    storage: ObjectStorageDependency,
+):
+    await _guard(
+        session,
+        access.business.id,
+        "marketing_cmo",
+        ai=True,
+    )
+    return await _mutate(
+        response,
+        session,
+        service.regenerate_creative_asset(
+            session,
+            business_id=access.business.id,
+            creative_asset_id=creative_asset_id,
+            actor_user_id=access.user.id,
+            provider=provider,
+            storage=storage,
         ),
     )
 
@@ -739,29 +775,38 @@ async def _mutate(response: Response | None, session: AsyncSession, operation: A
         await materialize_response_before_commit(session, value)
         await session.commit()
     except MarketingNotFoundError:
-        await _rollback(session)
+        await _abort_mutation(session)
         raise _not_found() from None
     except AutomationIntelligenceNotFoundError:
-        await _rollback(session)
+        await _abort_mutation(session)
         raise _not_found() from None
     except MarketingValidationError:
-        await _rollback(session)
+        await _abort_mutation(session)
         raise _invalid() from None
     except AutomationIntelligenceValidationError:
-        await _rollback(session)
+        await _abort_mutation(session)
         raise _invalid() from None
     except MarketingStateError:
-        await _rollback(session)
+        await _abort_mutation(session)
         raise _conflict() from None
     except MarketingAIError:
-        await _rollback(session)
+        await _abort_mutation(session)
         raise _ai_unavailable() from None
     except (MarketingPersistenceError, AutomationIntelligencePersistenceError, AIActionError, AIAgentExecutionLedgerError, ApprovalError, SQLAlchemyError):
-        await _rollback(session)
+        await _abort_mutation(session)
         raise _unavailable() from None
+    except Exception:
+        await _abort_mutation(session)
+        raise
+    service.clear_pending_creative_storage_compensations(session)
     if response is not None:
         _private(response)
     return value
+
+
+async def _abort_mutation(session: AsyncSession) -> None:
+    await service.compensate_pending_creative_storage(session)
+    await _rollback(session)
 
 
 async def _rollback(session: AsyncSession) -> None:

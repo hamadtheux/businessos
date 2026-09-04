@@ -46,7 +46,11 @@ from app.services.automation_intelligence import (  # noqa: E402
     run_competitor_discovery,
     schedule_marketing_automation,
 )
-from app.services.marketing_actions import _connector_state, prepare_content_publish_action  # noqa: E402
+from app.services.marketing_actions import (  # noqa: E402
+    _connector_state,
+    _ready_instagram_media_refs,
+    prepare_content_publish_action,
+)
 from app.services.marketing_automation import (  # noqa: E402
     _create_opportunity_if_missing,
     _industry_guardrail,
@@ -250,6 +254,79 @@ class AutomationIntelligenceTests(unittest.IsolatedAsyncioTestCase):
                 requested_by_user_id=uuid4(), channel="instagram",
             )
 
+    async def test_instagram_media_lookup_is_tenant_scoped_and_https_only(self) -> None:
+        business_id = uuid4()
+        content_id = uuid4()
+        session = _CreativeSession([
+            SimpleNamespace(storage_reference="https://user:secret@media.example/a.png"),
+            SimpleNamespace(storage_reference="http://media.example/b.png"),
+            SimpleNamespace(storage_reference="https://media.example/final.png"),
+        ])
+
+        refs = await _ready_instagram_media_refs(
+            session,
+            business_id=business_id,
+            content_id=content_id,
+        )
+
+        self.assertEqual(refs, ["https://media.example/final.png"])
+        compiled = session.statement.compile(dialect=postgresql.dialect())
+        self.assertEqual(compiled.params["business_id_1"], business_id)
+        self.assertEqual(compiled.params["content_id_1"], content_id)
+        self.assertIn("generation_status", str(compiled))
+        self.assertIn("source_type", str(compiled))
+
+    async def test_instagram_publish_proposal_includes_only_final_media(self) -> None:
+        business_id = uuid4()
+        content = SimpleNamespace(
+            id=uuid4(),
+            status="approved",
+            channel="instagram",
+            body="Reviewed copy",
+            cta="Shop now",
+            title="Product launch",
+        )
+        captured: dict[str, object] = {}
+
+        async def materialize(*_args, **kwargs):
+            captured.update(kwargs)
+            return {"action_status": "pending_approval"}
+
+        with (
+            patch(
+                "app.services.marketing_actions.get_content",
+                new=AsyncMock(return_value=content),
+            ),
+            patch(
+                "app.services.marketing_actions._existing_link",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "app.services.marketing_actions._ready_instagram_media_refs",
+                new=AsyncMock(return_value=["https://media.example/final.png"]),
+            ),
+            patch(
+                "app.services.marketing_actions._materialize_governed_proposal",
+                new=materialize,
+            ),
+        ):
+            result = await prepare_content_publish_action(
+                _Session([]),
+                business_id=business_id,
+                content_id=content.id,
+                requested_by_user_id=uuid4(),
+                channel="instagram",
+            )
+
+        action = captured["action"]
+        self.assertEqual(result["action_status"], "pending_approval")
+        self.assertTrue(action.requires_approval)
+        self.assertEqual(
+            action.action_payload.media_refs,
+            ["https://media.example/final.png"],
+        )
+        self.assertEqual(action.action_payload.content, "Reviewed copy\n\nShop now")
+
     async def test_external_execution_requires_connection_and_real_write_provider(self) -> None:
         business_id = uuid4()
         missing = await _connector_state(
@@ -426,6 +503,16 @@ class _ScalarResult:
 
     def all(self) -> list[object]:
         return list(self.values)
+
+
+class _CreativeSession:
+    def __init__(self, values: list[object]) -> None:
+        self.values = values
+        self.statement = None
+
+    async def scalars(self, statement) -> _ScalarResult:
+        self.statement = statement
+        return _ScalarResult(self.values)
 
 
 class _SchedulerSession:

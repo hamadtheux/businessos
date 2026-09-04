@@ -17,7 +17,12 @@ import {
   Card,
   SectionTitle,
 } from "@/components/product-ui";
+import {
+  CmoCreativePanel,
+  type CreativePhase,
+} from "@/features/marketing/cmo-creative-panel";
 import type {
+  CreativeAsset,
   MarketingContent,
   MarketingContentStatus,
 } from "@/services/api-types";
@@ -29,6 +34,11 @@ type ContentStudioCardProps = {
   error?: string | null;
   isRegenerating?: boolean;
   isApproving?: boolean;
+  creative?: CreativeAsset;
+  creatives?: CreativeAsset[];
+  isCreativeLoading?: boolean;
+  creativeError?: string | null;
+  creativePhase?: CreativePhase | null;
   onRetry?: () => void;
   onGenerate: () => void;
   onRegenerate: (content: MarketingContent) => void;
@@ -36,6 +46,10 @@ type ContentStudioCardProps = {
   onSchedule: (content: MarketingContent) => void;
   onEdit?: (content: MarketingContent) => void;
   onHistory?: (content: MarketingContent) => void;
+  onCreateCreative: () => void;
+  onReloadCreative?: () => void;
+  onRetryCreative: (creative: CreativeAsset) => void;
+  onRegenerateCreative: (creative: CreativeAsset) => void;
 };
 
 const studioGridStyle: CSSProperties = {
@@ -177,6 +191,11 @@ export function CmoContentStudioCard({
   error,
   isRegenerating = false,
   isApproving = false,
+  creative,
+  creatives,
+  isCreativeLoading = false,
+  creativeError,
+  creativePhase = null,
   onRetry,
   onGenerate,
   onRegenerate,
@@ -184,6 +203,10 @@ export function CmoContentStudioCard({
   onSchedule,
   onEdit,
   onHistory,
+  onCreateCreative,
+  onReloadCreative,
+  onRetryCreative,
+  onRegenerateCreative,
 }: ContentStudioCardProps) {
   if (isLoading) {
     return (
@@ -379,6 +402,30 @@ export function CmoContentStudioCard({
             </div>
           )}
         </aside>
+      </div>
+
+      <div style={{ marginTop: 24 }}>
+        <SectionTitle
+          title="Visual creative"
+          action={
+            creative?.generation_status === "ready" ? (
+              <Badge tone="success">Final artwork</Badge>
+            ) : (
+              <Badge>Optional</Badge>
+            )
+          }
+        />
+        <CmoCreativePanel
+          creative={creative}
+          creatives={creatives}
+          isLoading={isCreativeLoading}
+          error={creativeError}
+          phase={creativePhase}
+          onCreate={onCreateCreative}
+          onReload={onReloadCreative}
+          onRetry={onRetryCreative}
+          onRegenerate={onRegenerateCreative}
+        />
       </div>
 
       <div
