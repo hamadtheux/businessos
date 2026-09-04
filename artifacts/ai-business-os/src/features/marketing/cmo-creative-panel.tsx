@@ -1,7 +1,6 @@
 import {
   useEffect,
   useState,
-  type CSSProperties,
   type ReactNode,
 } from "react";
 import {
@@ -27,6 +26,8 @@ type CmoCreativePanelProps = {
   creatives?: CreativeAsset[];
   isLoading?: boolean;
   error?: string | null;
+  actionError?: string | null;
+  isPending?: boolean;
   phase?: CreativePhase | null;
   onCreate: () => void;
   onReload?: () => void;
@@ -34,39 +35,21 @@ type CmoCreativePanelProps = {
   onRegenerate: (creative: CreativeAsset) => void;
 };
 
-const panelStyle: CSSProperties = {
-  marginTop: 16,
-  overflow: "hidden",
-  border: "1px solid var(--border, #e4e7ec)",
-  borderRadius: 18,
-  background: "var(--surface, #ffffff)",
-};
-
-const stateStyle: CSSProperties = {
-  display: "flex",
-  minHeight: 180,
-  alignItems: "center",
-  justifyContent: "center",
-  padding: 24,
-  textAlign: "center",
-};
-
-const historyStyle: CSSProperties = {
-  padding: 14,
-  borderTop: "1px solid var(--border, #e4e7ec)",
-  background: "var(--surface-subtle, #f8fafc)",
-};
-
 function WorkingState({ phase }: { phase: CreativePhase }) {
   return (
-    <div style={stateStyle} data-testid={`creative-loading-${phase}`} aria-live="polite">
-      <div className="empty" style={{ minHeight: 0 }}>
+    <div className="cmo-creative-state cmo-creative-working" data-testid={`creative-loading-${phase}`} aria-live="polite">
+      <div className="empty compact-empty">
         <RefreshCw className="spin" />
-        <h3>{phase === "strategy" ? "Creating the visual strategy" : "Designing your branded creative"}</h3>
+        <div className="cmo-creative-progress-steps" aria-hidden="true">
+          <span className="complete" />
+          <span className={phase === "visual" ? "complete" : "active"} />
+          <span className={phase === "visual" ? "active" : undefined} />
+        </div>
+        <h3>{phase === "strategy" ? "Preparing creative direction…" : "Generating your branded visual…"}</h3>
         <p>
           {phase === "strategy"
-            ? "9D Brain is grounding the campaign angle, copy, and art direction in your business context."
-            : "9D Brain is combining your campaign direction, brand identity, copy, and visual into the final creative."}
+            ? "AI CMO is grounding the composition in your post, Business Brain, and brand identity."
+            : "Your campaign direction, copy, and brand system are being composed into the final image."}
         </p>
       </div>
     </div>
@@ -75,8 +58,8 @@ function WorkingState({ phase }: { phase: CreativePhase }) {
 
 function StateFrame({ testId, children }: { testId: string; children: ReactNode }) {
   return (
-    <div style={stateStyle} data-testid={testId}>
-      <div className="empty" style={{ minHeight: 0 }}>
+    <div className="cmo-creative-state" data-testid={testId}>
+      <div className="empty compact-empty">
         {children}
       </div>
     </div>
@@ -88,6 +71,8 @@ export function CmoCreativePanel({
   creatives,
   isLoading = false,
   error,
+  actionError,
+  isPending = false,
   phase = null,
   onCreate,
   onReload,
@@ -121,13 +106,13 @@ export function CmoCreativePanel({
   }, [displayed?.id, displayed?.storage_reference]);
 
   if (phase) {
-    return <div style={panelStyle}><WorkingState phase={phase} /></div>;
+    return <div className="cmo-creative-panel"><WorkingState phase={phase} /></div>;
   }
 
   if (isLoading) {
     return (
-      <div style={panelStyle}>
-        <div style={stateStyle} data-testid="creative-loading-assets" aria-live="polite">
+      <div className="cmo-creative-panel">
+        <div className="cmo-creative-state" data-testid="creative-loading-assets" aria-live="polite">
           <RefreshCw className="spin" />
           <span style={{ marginLeft: 10 }}>Loading creative history…</span>
         </div>
@@ -137,13 +122,13 @@ export function CmoCreativePanel({
 
   if (error) {
     return (
-      <div style={panelStyle}>
+      <div className="cmo-creative-panel">
         <StateFrame testId="creative-error">
           <AlertCircle />
           <h3>Creative history could not load</h3>
           <p>{error}</p>
           {onReload && (
-            <Button onClick={onReload} data-testid="button-reload-creatives">
+            <Button onClick={onReload} disabled={isPending} data-testid="button-reload-creatives">
               <RefreshCw /> Retry history
             </Button>
           )}
@@ -154,29 +139,54 @@ export function CmoCreativePanel({
 
   if (!displayed) {
     return (
-      <div style={panelStyle}>
-        <StateFrame testId="creative-empty-state">
-          <ImageIcon />
-          <h3>No visual creative yet</h3>
-          <p>Turn this grounded draft into a professionally composed, branded image.</p>
-          <Button variant="primary" onClick={onCreate} data-testid="button-create-visual">
-            <Sparkles /> Create visual
-          </Button>
-        </StateFrame>
+      <div className="cmo-creative-panel">
+        {actionError ? (
+          <StateFrame testId="creative-operation-error">
+            <AlertCircle />
+            <h3>Visual could not be completed</h3>
+            <p>{actionError}</p>
+            <Button onClick={onCreate} disabled={isPending} data-testid="button-retry-creative-operation">
+              <RefreshCw /> Retry
+            </Button>
+          </StateFrame>
+        ) : (
+          <StateFrame testId="creative-empty-state">
+            <ImageIcon />
+            <h3>Create a branded visual for this post</h3>
+            <p>AI CMO will use your Business Brain, brand identity, campaign direction, and post context.</p>
+            <Button variant="primary" onClick={onCreate} disabled={isPending} data-testid="button-create-visual">
+              <Sparkles /> Create visual
+            </Button>
+            <span className="cmo-creative-assurance">Nothing will be published automatically.</span>
+          </StateFrame>
+        )}
       </div>
     );
   }
 
   let currentState: ReactNode;
 
-  if (displayed.generation_status === "provider_required") {
+  if (actionError && displayed.generation_status !== "ready") {
+    currentState = (
+      <StateFrame testId="creative-operation-error">
+        <AlertCircle />
+        <h3>Visual could not be completed</h3>
+        <p>{actionError}</p>
+        {!isHistorical && (
+          <Button onClick={() => onRetry(displayed)} disabled={isPending} data-testid="button-retry-creative-operation">
+            <RefreshCw /> Retry
+          </Button>
+        )}
+      </StateFrame>
+    );
+  } else if (displayed.generation_status === "provider_required") {
     currentState = (
       <StateFrame testId="creative-provider-required">
         <AlertCircle />
         <h3>Image generation is temporarily unavailable</h3>
         <p>Your creative strategy is saved. Try again shortly—nothing has been lost.</p>
         {!isHistorical && (
-          <Button onClick={() => onRetry(displayed)}>
+          <Button onClick={() => onRetry(displayed)} disabled={isPending}>
             <RefreshCw /> Try again
           </Button>
         )}
@@ -189,7 +199,7 @@ export function CmoCreativePanel({
         <h3>The visual could not be completed</h3>
         <p>No unfinished image was attached. Your grounded strategy is safe and ready to retry.</p>
         {!isHistorical && (
-          <Button onClick={() => onRetry(displayed)} data-testid="button-retry-creative">
+          <Button onClick={() => onRetry(displayed)} disabled={isPending} data-testid="button-retry-creative">
             <RefreshCw /> Retry visual
           </Button>
         )}
@@ -202,7 +212,7 @@ export function CmoCreativePanel({
         <h3>Creative strategy ready</h3>
         <p>The campaign angle and visual direction are grounded. Generate the final branded image when you are ready.</p>
         {!isHistorical && (
-          <Button variant="primary" onClick={() => onRetry(displayed)}>
+          <Button variant="primary" onClick={() => onRetry(displayed)} disabled={isPending}>
             <Sparkles /> Generate final visual
           </Button>
         )}
@@ -210,22 +220,18 @@ export function CmoCreativePanel({
     );
   } else if (displayed.generation_status === "ready" && safeReference) {
     currentState = (
-      <div data-testid="creative-ready-preview">
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-            padding: "13px 16px",
-            borderBottom: "1px solid var(--border, #e4e7ec)",
-          }}
-        >
+      <div className="cmo-creative-ready" data-testid="creative-ready-preview">
+        <div className="cmo-creative-ready-head">
           <div>
             <div className="eyebrow">
-              {isHistorical ? "Previous final creative" : "Final branded creative"}
+              {isHistorical ? "Previous creative" : "Current creative"}
             </div>
-            <strong>{displayed.width} × {displayed.height} PNG</strong>
+            <strong>
+              {displayed.width && displayed.height
+                ? `${displayed.width} × ${displayed.height} PNG`
+                : "Branded post visual"}
+            </strong>
+            <span>{new Date(displayed.created_at).toLocaleString()}</span>
           </div>
           <Badge tone="success"><ShieldCheck /> Ready for review</Badge>
         </div>
@@ -258,26 +264,19 @@ export function CmoCreativePanel({
             </StateFrame>
           </div>
         ) : (
-          <div style={{ background: "var(--surface-subtle, #f2f4f7)", padding: 14 }}>
+          <div className="cmo-creative-image-wrap">
             <img
               key={`${displayed.id}-${previewAttempt}`}
               src={safeReference}
               alt={displayed.alt_text || "Branded marketing creative preview"}
               onError={() => setFailedPreviewId(displayed.id)}
-              style={{
-                display: "block",
-                width: "100%",
-                maxHeight: 560,
-                objectFit: "contain",
-                borderRadius: 12,
-                background: "var(--surface, #ffffff)",
-              }}
+              className="cmo-creative-image"
             />
           </div>
         )}
 
         {!previewFailed && (
-          <div className="toolbar" style={{ justifyContent: "space-between", padding: 14, flexWrap: "wrap" }}>
+          <div className="cmo-creative-actions">
             <a
               className="btn btn-secondary btn-sm"
               href={safeReference}
@@ -290,9 +289,10 @@ export function CmoCreativePanel({
               <Button
                 className="btn-sm"
                 onClick={() => onRegenerate(displayed)}
+                disabled={isPending}
                 data-testid="button-regenerate-creative"
               >
-                <RefreshCw /> Regenerate as new creative
+                <RefreshCw /> Regenerate visual
               </Button>
             )}
           </div>
@@ -310,38 +310,55 @@ export function CmoCreativePanel({
   }
 
   return (
-    <div style={panelStyle}>
+    <div className="cmo-creative-panel">
+      {actionError && displayed.generation_status === "ready" && (
+        <div className="cmo-creative-inline-error" data-testid="creative-operation-error">
+          <AlertCircle />
+          <div>
+            <strong>Visual could not be completed</strong>
+            <span>{actionError}</span>
+          </div>
+          {!isHistorical && (
+            <Button
+              className="btn-sm"
+              onClick={() => onRegenerate(displayed)}
+              disabled={isPending}
+              data-testid="button-retry-creative-operation"
+            >
+              Retry
+            </Button>
+          )}
+        </div>
+      )}
       {currentState}
 
       {previousCreatives.length > 0 && (
-        <div style={historyStyle} data-testid="creative-history">
-          <div
-            className="toolbar"
-            style={{ justifyContent: "space-between", marginBottom: 10 }}
-          >
-            <strong style={{ fontSize: 12 }}>
+        <div className="cmo-creative-history" data-testid="creative-history">
+          <div className="cmo-creative-history-head">
+            <strong>
               Creative history · {previousCreatives.length} previous
             </strong>
             {isHistorical && (
-              <Button className="btn-sm" onClick={() => setHistoryId(null)}>
+              <Button className="btn-sm" onClick={() => setHistoryId(null)} disabled={isPending}>
                 Back to latest
               </Button>
             )}
           </div>
-          <div className="toolbar" aria-label="Previous creative artwork">
+          <div className="cmo-creative-history-list" aria-label="Previous creative artwork">
             {previousCreatives.map((item, index) => (
               <Button
                 key={item.id}
                 variant="secondary"
                 className="btn-sm"
                 onClick={() => setHistoryId(item.id)}
+                disabled={isPending}
                 aria-pressed={item.id === displayed.id}
               >
                 <ImageIcon /> Previous {index + 1} · {item.generation_status.replaceAll("_", " ")}
               </Button>
             ))}
           </div>
-          <p className="subtle" style={{ margin: "10px 0 0", fontSize: 10 }}>
+          <p className="subtle">
             Previous artwork is preserved in history and remains read-only here.
           </p>
         </div>

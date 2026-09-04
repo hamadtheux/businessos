@@ -208,6 +208,7 @@ export function WorkspaceDrawer({
   onClose,
   closeDisabled = false,
   testId,
+  className,
 }: {
   open: boolean;
   eyebrow?: string;
@@ -218,6 +219,7 @@ export function WorkspaceDrawer({
   onClose: () => void;
   closeDisabled?: boolean;
   testId?: string;
+  className?: string;
 }) {
   const requestClose = () => {
     if (!closeDisabled) onClose();
@@ -227,7 +229,7 @@ export function WorkspaceDrawer({
     <Sheet open={open} modal onOpenChange={(nextOpen) => !nextOpen && requestClose()}>
       <SheetContent
         side="right"
-        className="workspace-drawer-panel"
+        className={cx("workspace-drawer-panel", className)}
         overlayClassName="workspace-drawer-backdrop"
         closeLabel={`Close ${title}`}
         closeDisabled={closeDisabled}

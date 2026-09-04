@@ -113,7 +113,7 @@ test("AI content generation uses the tenant-scoped POST endpoint", async () => {
   });
 });
 
-test("creative generation and regeneration use tenant-scoped POST endpoints", async () => {
+test("creative briefing, generation, and regeneration use tenant-scoped POST endpoints", async () => {
   const requests: Array<{ path: string; method: string }> = [];
   const api = await authenticated(async (input, init) => {
     if (String(input).endsWith("/login")) return json(session);
@@ -124,10 +124,24 @@ test("creative generation and regeneration use tenant-scoped POST endpoints", as
     return json({});
   });
 
+  await api.creative.brief(businessA, {
+    campaign_id: "campaign-one",
+    content_id: "content-one",
+    asset_type: "social_square",
+    instructions: "Create a campaign visual",
+    aspect_ratio: "1:1",
+    width: 1080,
+    height: 1080,
+    alt_text: "Campaign visual",
+  });
   await api.creative.generate(businessA, "creative-one");
   await api.creative.regenerate(businessA, "creative-one");
 
   assert.deepEqual(requests, [
+    {
+      path: `/api/v1/businesses/${businessA}/marketing/creative-assets/brief`,
+      method: "POST",
+    },
     {
       path: `/api/v1/businesses/${businessA}/marketing/creative-assets/creative-one/generate`,
       method: "POST",
@@ -157,9 +171,11 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
     assert.match(panel, new RegExp(state));
   }
   assert.match(panel, /creative-loading-\$\{phase\}/);
-  assert.match(panel, /Creating the visual strategy/);
-  assert.match(panel, /Designing your branded creative/);
-  assert.match(panel, /Regenerate as new creative/);
+  assert.match(panel, /Preparing creative direction/);
+  assert.match(panel, /Generating your branded visual/);
+  assert.match(panel, /Create a branded visual for this post/);
+  assert.match(panel, /Nothing will be published automatically/);
+  assert.match(panel, /Regenerate visual/);
   assert.match(panel, /Previous artwork remains in history|preserved in history/);
   assert.match(panel, /safeCreativeMediaUrl/);
   assert.match(panel, /onError=\{\(\) => setFailedPreviewId/);
@@ -170,8 +186,9 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
   assert.match(panel, /Previous creative artwork/);
   assert.match(panel, /remains read-only here/);
   assert.match(panel, /button-reload-creatives/);
-  assert.match(panel, /flexWrap: "wrap"/);
-  assert.match(panel, /width: "100%"/);
+  assert.match(panel, /creative-operation-error/);
+  assert.match(panel, /button-retry-creative-operation/);
+  assert.match(panel, /disabled=\{isPending\}/);
   assert.doesNotMatch(panel, /placeholder artwork|data:image/);
   for (const forbidden of ["server-side", "OpenAI", "API key", "raw visual"]) {
     assert.equal(panel.toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);
@@ -192,10 +209,19 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
   assert.match(page, /creativePhaseForDisplay/);
   assert.match(page, /creatives=\{creativeAssets\.data\}/);
   assert.match(page, /humanizeApiError/);
-  assert.match(social, /assets\.data\?\.slice\(1\)/);
+  assert.match(social, /creatives=\{assets\.data\}/);
   assert.match(social, /creativePhaseForDisplay/);
   assert.match(social, /button-regenerate-creative|onRegenerate/);
-  assert.match(social, /Publishing always requires your approval and an available connected channel/);
+  assert.match(social, /Publishing requires approval and a supported connected channel/);
+  assert.match(social, /createCreativeWithRecovery/);
+  assert.match(social, /marketingApi\.creative\.brief/);
+  assert.match(social, /marketingApi\.creative\.generate/);
+  assert.match(social, /marketingApi\.creative\.regenerate/);
+  assert.match(social, /creativeOperationLock\.current/);
+  assert.match(social, /if \(postWorkspaceBusy \|\| creativeOperationLock\.current\) return/);
+  assert.match(social, /creativeOperationLock\.current = false/);
+  assert.match(social, /setCreativeActionError\(\s*humanizeApiError/);
+  assert.match(social, /void invalidate\(\)/);
   assert.doesNotMatch(social, /AIAction policy/);
   assert.match(helpers, /finally \{/);
   assert.match(helpers, /refreshAfterCreativeOperation/);
@@ -212,6 +238,174 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
   ]) {
     assert.match(`${studio}\n${page}`, new RegExp(control));
   }
+});
+
+test("AI CMO content details use a governed right-side post workspace", async () => {
+  const [social, panel, productUi, styles] = await Promise.all([
+    readFile(new URL("../features/marketing/marketing-pages.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../features/marketing/cmo-creative-panel.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/product-ui.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../index.css", import.meta.url), "utf8"),
+  ]);
+
+  const drawerStart = social.indexOf("<WorkspaceDrawer\n        open={Boolean(selected)}");
+  const drawerEnd = social.indexOf("{schedule &&", drawerStart);
+  assert.ok(drawerStart >= 0 && drawerEnd > drawerStart);
+  const drawer = social.slice(drawerStart, drawerEnd);
+  const footerStart = social.indexOf("const postWorkspaceFooter");
+  const footerEnd = social.indexOf("\n\n  return (", footerStart);
+  assert.ok(footerStart >= 0 && footerEnd > footerStart);
+  const footer = social.slice(footerStart, footerEnd);
+  const busyStart = social.indexOf("const postWorkspaceBusy");
+  const busyEnd = social.indexOf("const startCreativeOperation", busyStart);
+  assert.ok(busyStart >= 0 && busyEnd > busyStart);
+  const busyDefinition = social.slice(busyStart, busyEnd);
+
+  for (const pendingState of [
+    "creativeOperationPending",
+    "edit.isPending",
+    "createBrief.isPending",
+    "regenerate.isPending",
+    "move.isPending",
+    "preparePublish.isPending",
+  ]) {
+    assert.equal(busyDefinition.includes(pendingState), true, pendingState);
+  }
+
+  assert.match(drawer, /className="cmo-post-workspace-drawer"/);
+  assert.match(drawer, /testId="cmo-post-workspace-drawer"/);
+  assert.match(drawer, /closeDisabled=\{postWorkspaceBusy\}/);
+  assert.doesNotMatch(drawer, /<Modal/);
+  for (const value of [
+    "selected?.title",
+    "selected.channel",
+    "selected.status",
+    "selected.version",
+    "selected.title",
+    "selected.body",
+    "selected.cta",
+  ]) {
+    assert.equal(drawer.includes(value), true, value);
+  }
+
+  const orderedSections = ["Post preview", "Visual creative", "Version history", "Governance"];
+  let previousIndex = -1;
+  for (const section of orderedSections) {
+    const index = drawer.indexOf(section);
+    assert.ok(index > previousIndex, section);
+    previousIndex = index;
+  }
+
+  assert.match(drawer, /data-testid="cmo-post-preview"/);
+  assert.match(drawer, /<CmoCreativePanel/);
+  assert.match(drawer, /onCreate=\{\(\) => startCreativeOperation\(\(\) => createCreative\.mutate\(selected\)\)\}/);
+  assert.match(drawer, /actionError=\{creativeActionError\}/);
+  assert.match(drawer, /onRetry=\{\(asset\) => startCreativeOperation/);
+  assert.match(drawer, /onRegenerate=\{\(asset\) => startCreativeOperation/);
+  assert.match(drawer, /isPending=\{postWorkspaceBusy\}/);
+  assert.match(drawer, /phase=\{creativePhase\}/);
+  assert.match(panel, /data-testid="button-create-visual"/);
+  assert.match(panel, /data-testid="creative-operation-error"/);
+  assert.match(panel, /data-testid="button-retry-creative-operation"/);
+  assert.match(drawer, /postWorkspaceMode === "edit"/);
+  assert.match(drawer, /postWorkspaceMode === "creative_brief"/);
+  assert.match(drawer, /postWorkspaceMode === "edit"\s*\? "Edit post"/);
+  assert.match(drawer, /postWorkspaceMode === "creative_brief"\s*\? "Advanced creative brief"/);
+  assert.match(drawer, /data-testid="cmo-edit-post-workspace"/);
+  assert.match(drawer, /data-testid="cmo-creative-brief-workspace"/);
+  assert.match(drawer, /id="cmo-edit-post-form"/);
+  assert.match(drawer, /id="cmo-creative-brief-form"/);
+  assert.match(drawer, /onSubmit=\{submitContentVersion\}/);
+  assert.match(drawer, /onSubmit=\{submitCreativeBrief\}/);
+  assert.doesNotMatch(social, /\{editing && selected|\{briefing && selected/);
+  assert.doesNotMatch(social, /edit\.mutate\(event\)|createBrief\.mutate\(event\)/);
+
+  const editMutation = social.slice(
+    social.indexOf("const edit = useMutation"),
+    social.indexOf("const createSchedule", social.indexOf("const edit = useMutation")),
+  );
+  assert.match(editMutation, /mutationFn: \(values: ContentVersionFormValues\)/);
+  assert.match(editMutation, /marketingApi\.content\.edit\(activeBusinessId, values\.contentId/);
+  assert.match(editMutation, /title: values\.title/);
+  assert.match(editMutation, /body: values\.body/);
+  assert.match(editMutation, /cta: values\.cta/);
+  assert.match(editMutation, /setPostWorkspaceMode\("overview"\)/);
+  assert.match(editMutation, /earlier versions remain available/);
+  assert.doesNotMatch(editMutation, /FormEvent|FormData|currentTarget|preventDefault/);
+
+  const briefMutation = social.slice(
+    social.indexOf("const createBrief = useMutation"),
+    social.indexOf("const createCreative = useMutation", social.indexOf("const createBrief = useMutation")),
+  );
+  assert.match(briefMutation, /mutationFn: \(values: CreativeBriefFormValues\)/);
+  assert.match(briefMutation, /marketingApi\.creative\.brief\(activeBusinessId/);
+  assert.match(briefMutation, /content_id: values\.contentId/);
+  assert.match(briefMutation, /setPostWorkspaceMode\("overview"\)/);
+  assert.match(briefMutation, /humanizeApiError/);
+  assert.match(briefMutation, /onSettled: \(\) => refreshCreatives\(\)/);
+  assert.doesNotMatch(briefMutation, /FormEvent|FormData|currentTarget|preventDefault/);
+
+  const editSubmit = social.slice(
+    social.indexOf("const submitContentVersion"),
+    social.indexOf("const submitCreativeBrief", social.indexOf("const submitContentVersion")),
+  );
+  assert.match(editSubmit, /const form = new FormData\(event\.currentTarget\)/);
+  assert.ok(editSubmit.indexOf("new FormData(event.currentTarget)") < editSubmit.indexOf("edit.mutate({"));
+  assert.match(editSubmit, /event\.preventDefault\(\)/);
+  assert.match(editSubmit, /contentId: selected\.id/);
+
+  const briefSubmit = social.slice(
+    social.indexOf("const submitCreativeBrief"),
+    social.indexOf("const SelectedPlatformIcon", social.indexOf("const submitCreativeBrief")),
+  );
+  assert.match(briefSubmit, /const form = new FormData\(event\.currentTarget\)/);
+  assert.ok(briefSubmit.indexOf("new FormData(event.currentTarget)") < briefSubmit.indexOf("createBrief.mutate({"));
+  assert.match(briefSubmit, /event\.preventDefault\(\)/);
+  assert.match(briefSubmit, /contentId: selected\.id/);
+
+  assert.match(footer, /form="cmo-edit-post-form"/);
+  assert.match(footer, /Save new version/);
+  assert.match(footer, /form="cmo-creative-brief-form"/);
+  assert.match(footer, /Prepare creative strategy/);
+  assert.match(footer, /Back to post/);
+  assert.equal((footer.match(/disabled=\{postWorkspaceBusy\}/g) || []).length, 9);
+  assert.match(drawer, /setPostWorkspaceMode\("creative_brief"\);[\s\S]*disabled=\{postWorkspaceBusy\}[\s\S]*Advanced brief/);
+  assert.match(footer, /disabled=\{edit\.isPending\}[\s\S]*form="cmo-edit-post-form"[\s\S]*disabled=\{edit\.isPending\}/);
+  assert.match(footer, /disabled=\{createBrief\.isPending\}[\s\S]*form="cmo-creative-brief-form"[\s\S]*disabled=\{createBrief\.isPending\}/);
+  assert.match(social, /if \(postWorkspaceBusy \|\| creativeOperationLock\.current\) return/);
+
+  assert.match(drawer, /versions\.data\?\.map/);
+  assert.match(drawer, /onClick=\{\(\) => setSelected\(version\)\}/);
+  assert.match(drawer, /Version \{version\.version\}/);
+  assert.match(drawer, /version\.ai_generated/);
+  assert.match(drawer, /version\.created_at/);
+  assert.match(drawer, /version\.status/);
+
+  const publishGuard = footer.slice(
+    footer.indexOf("{selectedProviderWriteReady &&"),
+    footer.indexOf("</div>\n    </div>", footer.indexOf("{selectedProviderWriteReady &&")),
+  );
+  assert.match(publishGuard, /selectedProviderWriteReady/);
+  assert.match(publishGuard, /\["facebook", "instagram"\]\.includes\(selected\.channel\)/);
+  assert.match(publishGuard, /\["approved", "scheduled", "ready_to_publish"\]\.includes\(selected\.status\)/);
+  assert.match(publishGuard, /preparePublish\.mutate\(selected\)/);
+  assert.doesNotMatch(footer.slice(0, footer.indexOf("{selectedProviderWriteReady &&")), /preparePublish\.mutate/);
+  assert.match(footer, /selected\.status === "draft"/);
+  assert.match(footer, /status: "review"/);
+  assert.match(footer, /selected\.status === "review"/);
+  assert.match(footer, /status: "approved"/);
+  assert.match(footer, /selected\.status === "approved"/);
+  assert.match(footer, /setSchedule\(selected\)/);
+
+  assert.match(productUi, /className\?: string/);
+  assert.match(productUi, /className=\{cx\("workspace-drawer-panel", className\)\}/);
+  assert.match(styles, /\.cmo-post-workspace-drawer \{\s*width: clamp\(600px, 46vw, 760px\)/);
+  assert.match(styles, /\.workspace-drawer-panel \{[\s\S]*grid-template-rows: auto minmax\(0, 1fr\) auto/);
+  assert.match(styles, /\.workspace-drawer-body \{[\s\S]*overflow-y: auto/);
+  assert.match(styles, /\.workspace-drawer-footer \{[\s\S]*position: sticky/);
+  assert.match(styles, /\.cmo-creative-image \{[\s\S]*object-fit: contain/);
+  assert.match(styles, /@media \(max-width: 680px\)[\s\S]*\.workspace-drawer-panel \{[\s\S]*width: 100vw/);
+  assert.match(styles, /@media \(max-width: 680px\)[\s\S]*\.workspace-drawer-panel \.field input,[\s\S]*font-size: 16px/);
 });
 
 test("AI CMO creation flows use the accessible responsive workspace drawer", async () => {

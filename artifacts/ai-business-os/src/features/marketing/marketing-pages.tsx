@@ -1,19 +1,22 @@
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
+  Archive,
   BarChart3,
   Calendar,
   Check,
   Copy,
   Eye,
   Facebook,
+  FileClock,
   Instagram,
   Linkedin,
   Pause,
   Play,
   Plus,
   Send,
+  ShieldCheck,
   Sparkles,
   Target,
   Wand2,
@@ -28,11 +31,13 @@ import {
   Modal,
   PageHeader,
   SectionTitle,
+  WorkspaceDrawer,
 } from "@/components/product-ui";
 import {
   CmoCreativePanel,
 } from "@/features/marketing/cmo-creative-panel";
 import {
+  createCreativeWithRecovery,
   creativeFormatForContent,
   creativePhaseForDisplay,
   creativeResultNotice,
@@ -1449,6 +1454,26 @@ const contentTransitions: Record<
   archived: [],
 };
 
+type PostWorkspaceMode = "overview" | "edit" | "creative_brief";
+
+type ContentVersionFormValues = {
+  contentId: string;
+  title: string;
+  body: string;
+  cta: string | null;
+};
+
+type CreativeBriefFormValues = {
+  campaignId: string | null;
+  contentId: string;
+  assetType: string;
+  instructions: string;
+  aspectRatio: string | null;
+  width: number | null;
+  height: number | null;
+  altText: string | null;
+};
+
 export function SocialManagementPage() {
   const [location] = useLocation();
   const { activeBusinessId } = useBusiness();
@@ -1456,9 +1481,11 @@ export function SocialManagementPage() {
   const [status, setStatus] = useState<MarketingContentStatus | "">("");
   const [selected, setSelected] = useState<MarketingContent | null>(null);
   const [schedule, setSchedule] = useState<MarketingContent | null>(null);
-  const [editing, setEditing] = useState(false);
-  const [briefing, setBriefing] = useState(false);
+  const [postWorkspaceMode, setPostWorkspaceMode] =
+    useState<PostWorkspaceMode>("overview");
   const [creativeProgress, setCreativeProgress] = useState<CreativeProgress>(null);
+  const [creativeActionError, setCreativeActionError] = useState("");
+  const creativeOperationLock = useRef(false);
   const [calendarDays, setCalendarDays] = useState<1 | 7 | 30>(7);
   const [calendarChannel, setCalendarChannel] = useState<MarketingChannel | "">(
     "",
@@ -1561,6 +1588,10 @@ export function SocialManagementPage() {
   const refreshCreatives = () => queryClient.invalidateQueries({
     queryKey: ["marketing", activeBusinessId, "creative-assets"],
   });
+  useEffect(() => {
+    setCreativeActionError("");
+    setPostWorkspaceMode("overview");
+  }, [selected?.id]);
   const move = useMutation({
     mutationFn: ({
       id,
@@ -1581,18 +1612,15 @@ export function SocialManagementPage() {
       ),
   });
   const edit = useMutation({
-    mutationFn: (event: FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-      const form = new FormData(event.currentTarget);
-      return marketingApi.content.edit(activeBusinessId, selected!.id, {
-        title: String(form.get("title")),
-        body: String(form.get("body")),
-        cta: String(form.get("cta")) || null,
-      });
-    },
+    mutationFn: (values: ContentVersionFormValues) =>
+      marketingApi.content.edit(activeBusinessId, values.contentId, {
+        title: values.title,
+        body: values.body,
+        cta: values.cta,
+      }),
     onSuccess: (item) => {
       setSelected(item);
-      setEditing(false);
+      setPostWorkspaceMode("overview");
       setNotice(
         `Version ${item.version} was saved; earlier versions remain available.`,
       );
@@ -1657,31 +1685,63 @@ export function SocialManagementPage() {
       setError(humanizeApiError(reason, "Calendar item could not be removed.")),
   });
   const createBrief = useMutation({
-    mutationFn: (event: FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-      const form = new FormData(event.currentTarget);
-      const width = String(form.get("width") || "");
-      const height = String(form.get("height") || "");
-      return marketingApi.creative.brief(activeBusinessId, {
-        campaign_id: selected?.campaign_id || null,
-        content_id: selected!.id,
-        asset_type: String(form.get("asset_type")),
-        instructions: String(form.get("instructions")),
-        aspect_ratio: String(form.get("aspect_ratio")) || null,
-        width: width ? Number(width) : null,
-        height: height ? Number(height) : null,
-        alt_text: String(form.get("alt_text")) || null,
-      });
-    },
+    mutationFn: (values: CreativeBriefFormValues) =>
+      marketingApi.creative.brief(activeBusinessId, {
+        campaign_id: values.campaignId,
+        content_id: values.contentId,
+        asset_type: values.assetType,
+        instructions: values.instructions,
+        aspect_ratio: values.aspectRatio,
+        width: values.width,
+        height: values.height,
+        alt_text: values.altText,
+      }),
     onSuccess: () => {
-      setBriefing(false);
+      setPostWorkspaceMode("overview");
       setNotice(
         "Creative strategy was saved and is ready for visual generation.",
       );
       setError("");
     },
-    onError: () => setError("The creative strategy could not be prepared. Refresh to see saved progress before retrying."),
+    onError: (reason) =>
+      setError(
+        humanizeApiError(
+          reason,
+          "The creative strategy could not be prepared. Refresh to see saved progress before retrying.",
+        ),
+      ),
     onSettled: () => refreshCreatives(),
+  });
+  const createCreative = useMutation({
+    mutationFn: (item: MarketingContent) => createCreativeWithRecovery({
+      contentId: item.id,
+      createBrief: () => marketingApi.creative.brief(activeBusinessId, {
+        campaign_id: item.campaign_id,
+        content_id: item.id,
+        ...creativeFormatForContent(item),
+        instructions: item.creative_brief || `Create a professional campaign visual for ${item.title}.`,
+        alt_text: `Branded campaign creative for ${item.title}`,
+      }),
+      generate: (brief) => marketingApi.creative.generate(activeBusinessId, brief.id),
+      refresh: refreshCreatives,
+      onProgress: setCreativeProgress,
+    }),
+    onSuccess: (asset) => {
+      setNotice(creativeResultNotice(asset));
+      setCreativeActionError("");
+      setError("");
+      void invalidate();
+    },
+    onError: (reason) =>
+      setCreativeActionError(
+        humanizeApiError(
+          reason,
+          "Visual could not be completed. Your post and saved creative progress remain available.",
+        ),
+      ),
+    onSettled: () => {
+      creativeOperationLock.current = false;
+    },
   });
   const generateVisual = useMutation({
     mutationFn: (asset: CreativeAsset) => runCreativeOperationWithRecovery({
@@ -1692,9 +1752,20 @@ export function SocialManagementPage() {
     }),
     onSuccess: (asset) => {
       setNotice(creativeResultNotice(asset));
+      setCreativeActionError("");
       setError("");
+      void invalidate();
     },
-    onError: () => setError("The final creative could not be completed. Refresh to see saved progress and try again."),
+    onError: (reason) =>
+      setCreativeActionError(
+        humanizeApiError(
+          reason,
+          "Visual could not be completed. Your post and saved creative progress remain available.",
+        ),
+      ),
+    onSettled: () => {
+      creativeOperationLock.current = false;
+    },
   });
   const regenerateVisual = useMutation({
     mutationFn: (asset: CreativeAsset) => runCreativeOperationWithRecovery({
@@ -1709,9 +1780,20 @@ export function SocialManagementPage() {
           ? "A new final creative is ready. Previous artwork remains in history."
           : `${creativeResultNotice(asset)} The new revision remains in history.`,
       );
+      setCreativeActionError("");
       setError("");
+      void invalidate();
     },
-    onError: () => setError("A new creative version could not be completed. Refresh to see any saved history before retrying."),
+    onError: (reason) =>
+      setCreativeActionError(
+        humanizeApiError(
+          reason,
+          "A new visual could not be completed. The current creative and earlier versions remain available.",
+        ),
+      ),
+    onSettled: () => {
+      creativeOperationLock.current = false;
+    },
   });
   const regenerate = useMutation({
     mutationFn: (item: MarketingContent) =>
@@ -1811,6 +1893,201 @@ export function SocialManagementPage() {
         channel: "instagram",
         content_type: "social_post",
       });
+  const creativeOperationPending =
+    createCreative.isPending ||
+    generateVisual.isPending ||
+    regenerateVisual.isPending;
+  const postWorkspaceBusy =
+    creativeOperationPending ||
+    edit.isPending ||
+    createBrief.isPending ||
+    regenerate.isPending ||
+    move.isPending ||
+    preparePublish.isPending;
+  const startCreativeOperation = (operation: () => void) => {
+    if (postWorkspaceBusy || creativeOperationLock.current) return;
+    creativeOperationLock.current = true;
+    setCreativeActionError("");
+    operation();
+  };
+  const closePostWorkspace = () => {
+    setSelected(null);
+    setPostWorkspaceMode("overview");
+    setCreativeActionError("");
+  };
+  const returnToPostWorkspace = () => {
+    setPostWorkspaceMode("overview");
+    setError("");
+  };
+  const submitContentVersion = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!selected) return;
+    const form = new FormData(event.currentTarget);
+    edit.mutate({
+      contentId: selected.id,
+      title: String(form.get("title")),
+      body: String(form.get("body")),
+      cta: String(form.get("cta")) || null,
+    });
+  };
+  const submitCreativeBrief = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!selected) return;
+    const form = new FormData(event.currentTarget);
+    const width = String(form.get("width") || "");
+    const height = String(form.get("height") || "");
+    createBrief.mutate({
+      campaignId: selected.campaign_id || null,
+      contentId: selected.id,
+      assetType: String(form.get("asset_type")),
+      instructions: String(form.get("instructions")),
+      aspectRatio: String(form.get("aspect_ratio")) || null,
+      width: width ? Number(width) : null,
+      height: height ? Number(height) : null,
+      altText: String(form.get("alt_text")) || null,
+    });
+  };
+  const SelectedPlatformIcon = selected
+    ? platformIcons[selected.channel as keyof typeof platformIcons] ?? Sparkles
+    : Sparkles;
+  const postWorkspaceFooter = !selected ? undefined : postWorkspaceMode === "edit" ? (
+    <div className="cmo-post-workspace-footer">
+      <div className="cmo-post-workspace-secondary-actions">
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={edit.isPending}
+          onClick={returnToPostWorkspace}
+        >
+          Back to post
+        </Button>
+      </div>
+      <div className="cmo-post-workspace-primary-actions">
+        <Button
+          variant="primary"
+          type="submit"
+          form="cmo-edit-post-form"
+          disabled={edit.isPending}
+        >
+          {edit.isPending ? "Saving…" : "Save new version"}
+        </Button>
+      </div>
+    </div>
+  ) : postWorkspaceMode === "creative_brief" ? (
+    <div className="cmo-post-workspace-footer">
+      <div className="cmo-post-workspace-secondary-actions">
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={createBrief.isPending}
+          onClick={returnToPostWorkspace}
+        >
+          Back to post
+        </Button>
+      </div>
+      <div className="cmo-post-workspace-primary-actions">
+        <Button
+          variant="primary"
+          type="submit"
+          form="cmo-creative-brief-form"
+          disabled={createBrief.isPending}
+        >
+          <Sparkles />
+          {createBrief.isPending ? "Preparing…" : "Prepare creative strategy"}
+        </Button>
+      </div>
+    </div>
+  ) : (
+    <div className="cmo-post-workspace-footer">
+      <div className="cmo-post-workspace-secondary-actions">
+        <Button
+          variant="secondary"
+          onClick={() => {
+            setError("");
+            setPostWorkspaceMode("edit");
+          }}
+          disabled={postWorkspaceBusy}
+        >
+          <Copy /> Edit post
+        </Button>
+        <Button
+          variant="secondary"
+          disabled={postWorkspaceBusy}
+          onClick={() => regenerate.mutate(selected)}
+        >
+          <Wand2 />
+          {regenerate.isPending ? "Regenerating…" : "Regenerate copy"}
+        </Button>
+        {contentTransitions[selected.status].includes("draft") && (
+          <Button
+            variant="tertiary"
+            disabled={postWorkspaceBusy}
+            onClick={() => move.mutate({ id: selected.id, status: "draft" })}
+          >
+            Return to draft
+          </Button>
+        )}
+        {contentTransitions[selected.status].includes("approved") && (
+          <Button
+            variant="tertiary"
+            disabled={postWorkspaceBusy}
+            onClick={() => move.mutate({ id: selected.id, status: "approved" })}
+          >
+            Return to approved
+          </Button>
+        )}
+        {contentTransitions[selected.status].includes("archived") && (
+          <Button
+            variant="tertiary"
+            disabled={postWorkspaceBusy}
+            onClick={() => move.mutate({ id: selected.id, status: "archived" })}
+          >
+            <Archive /> Archive
+          </Button>
+        )}
+      </div>
+      <div className="cmo-post-workspace-primary-actions">
+        {selected.status === "draft" && (
+          <Button
+            variant="primary"
+            disabled={postWorkspaceBusy}
+            onClick={() => move.mutate({ id: selected.id, status: "review" })}
+          >
+            <Send /> Review
+          </Button>
+        )}
+        {selected.status === "review" && (
+          <Button
+            variant="primary"
+            disabled={postWorkspaceBusy}
+            onClick={() => move.mutate({ id: selected.id, status: "approved" })}
+          >
+            <Check /> Approve
+          </Button>
+        )}
+        {selected.status === "approved" && (
+          <Button
+            variant="primary"
+            disabled={postWorkspaceBusy}
+            onClick={() => setSchedule(selected)}
+          >
+            <Calendar /> Schedule
+          </Button>
+        )}
+        {selectedProviderWriteReady &&
+          ["facebook", "instagram"].includes(selected.channel) &&
+          ["approved", "scheduled", "ready_to_publish"].includes(selected.status) && (
+            <Button
+              variant="primary"
+              disabled={postWorkspaceBusy}
+              onClick={() => preparePublish.mutate(selected)}
+            >
+              <Send /> Prepare publish
+            </Button>
+          )}
+      </div>
+    </div>
+  );
 
   return (
     <>
@@ -2192,274 +2469,268 @@ export function SocialManagementPage() {
           </div>
         )}
       </Card>
-      {selected && (
-        <Modal
-          wide
-          title={selected.title}
-          description={`${selected.channel} · ${selected.status.replaceAll("_", " ")} · version ${selected.version}`}
-          onClose={() => {
-            setSelected(null);
-            setEditing(false);
-            setBriefing(false);
-          }}
-        >
-          <div className="social-preview">
-            <div className="social-preview-brand">
-              <span className="platform-icon">
-                <Sparkles />
-              </span>
-              <div>
-                <strong>Your business</strong>
-                <span>
-                  {selected.ai_generated
-                    ? "AI CMO draft"
-                    : "User-authored draft"}
-                </span>
-              </div>
-            </div>
-            <p>{selected.body}</p>
-          </div>
-          {selected.cta && (
-            <Card>
-              <div className="eyebrow">Call to action</div>
-              <p>{selected.cta}</p>
-            </Card>
-          )}
-          <SectionTitle
-            title="Version history"
-            action={<Badge>{versions.data?.length ?? 0} version(s)</Badge>}
-          />
-          {versions.isLoading && (
-            <p className="subtle">Loading version history…</p>
-          )}
-          {versions.data?.map((version) => (
-            <button
-              className="list-row"
-              key={version.id}
-              onClick={() => setSelected(version)}
-            >
-              <Copy />
-              <div className="row-main">
-                <strong>
-                  Version {version.version} · {version.title}
-                </strong>
-                <div className="row-copy">
-                  {version.ai_generated ? "AI-generated" : "User-authored"} ·{" "}
-                  {new Date(version.created_at).toLocaleString()}
+      <WorkspaceDrawer
+        open={Boolean(selected)}
+        eyebrow="AI CMO"
+        title={
+          postWorkspaceMode === "edit"
+            ? "Edit post"
+            : postWorkspaceMode === "creative_brief"
+              ? "Advanced creative brief"
+              : selected?.title || "Post workspace"
+        }
+        description={
+          !selected
+            ? undefined
+            : postWorkspaceMode === "edit"
+              ? "Create a new immutable version while preserving the current post in history."
+              : postWorkspaceMode === "creative_brief"
+                ? "Prepare grounded visual direction for this post using the existing creative workflow."
+                : `${selected.channel.replaceAll("_", " ")} · ${selected.status.replaceAll("_", " ")} · Version ${selected.version}`
+        }
+        onClose={closePostWorkspace}
+        closeDisabled={postWorkspaceBusy}
+        className="cmo-post-workspace-drawer"
+        testId="cmo-post-workspace-drawer"
+        footer={postWorkspaceFooter}
+      >
+        {selected && postWorkspaceMode === "overview" && (
+          <div className="cmo-post-workspace">
+            <section className="cmo-post-workspace-section" aria-labelledby="cmo-post-preview-heading">
+              <div className="cmo-post-workspace-section-heading">
+                <div>
+                  <div className="eyebrow">Post preview</div>
+                  <h2 id="cmo-post-preview-heading">
+                    {selected.channel.replaceAll("_", " ")} post
+                  </h2>
                 </div>
+                <Badge tone={selected.status === "approved" || selected.status === "ready_to_publish" ? "success" : selected.status === "review" ? "info" : "neutral"}>
+                  {selected.status.replaceAll("_", " ")}
+                </Badge>
               </div>
-              <Badge tone={version.id === selected.id ? "success" : "neutral"}>
-                {version.status.replaceAll("_", " ")}
-              </Badge>
-            </button>
-          ))}
-          <SectionTitle
-            title="Creative assets"
-            action={
-              assets.data?.length ? (
-                <Button className="btn-sm" onClick={() => setBriefing(true)}>
-                  <Sparkles /> Create another brief
-                </Button>
-              ) : undefined
-            }
-          />
-          <CmoCreativePanel
-            creative={assets.data?.[0]}
-            isLoading={assets.isLoading}
-            error={assets.isError ? humanizeApiError(assets.error, "Retry loading creative history.") : null}
-            phase={creativePhase}
-            onCreate={() => setBriefing(true)}
-            onReload={() => void assets.refetch()}
-            onRetry={(asset) => generateVisual.mutate(asset)}
-            onRegenerate={(asset) => regenerateVisual.mutate(asset)}
-          />
-          {assets.data?.slice(1).map((asset) => (
-            <div className="list-row" key={asset.id}>
-              <Sparkles />
-              <div className="row-main">
-                <strong>{asset.asset_type.replaceAll("_", " ")}</strong>
-                <div className="row-copy">
-                  {asset.visual_direction ||
-                    asset.instructions ||
-                    "Creative brief"}
+              <article className="cmo-post-preview" data-testid="cmo-post-preview">
+                <div className="cmo-post-preview-platform">
+                  <span className="platform-icon"><SelectedPlatformIcon /></span>
+                  <div>
+                    <strong>{selected.channel.replaceAll("_", " ")}</strong>
+                    <span>{selected.ai_generated ? "AI CMO generated" : "User authored"} · Version {selected.version}</span>
+                  </div>
                 </div>
-              </div>
-              <Badge
-                tone={
-                  asset.generation_status === "brief_ready"
-                    ? "success"
-                    : "warning"
-                }
-              >
-                {asset.generation_status.replaceAll("_", " ")}
-              </Badge>
-            </div>
-          ))}
-          {assets.data && !assets.data.length && (
-            <p className="subtle">
-              No creative brief or asset is attached to this version.
-            </p>
-          )}
-          <div className="toolbar" style={{ marginTop: 18 }}>
-            <Button onClick={() => setEditing(true)}>
-              <Copy /> Create edited version
-            </Button>
-            <Button
-              disabled={regenerate.isPending}
-              onClick={() => regenerate.mutate(selected)}
-            >
-              <Wand2 />{" "}
-              {regenerate.isPending ? "Regenerating…" : "Regenerate version"}
-            </Button>
-            {contentTransitions[selected.status].map((next) => (
-              <Button
-                key={next}
-                variant={next === "archived" ? "danger" : "green"}
-                disabled={move.isPending}
-                onClick={() => move.mutate({ id: selected.id, status: next })}
-              >
-                {next === "review" ? <Send /> : <Check />}{" "}
-                {next.replaceAll("_", " ")}
-              </Button>
-            ))}
-            {selected.status === "approved" && (
-              <Button variant="primary" onClick={() => setSchedule(selected)}>
-                <Calendar /> Schedule
-              </Button>
-            )}
-            {["facebook", "instagram"].includes(selected.channel) &&
-              ["approved", "scheduled", "ready_to_publish"].includes(
-                selected.status,
-              ) && (
+                <div className="cmo-post-copy">
+                  <div className="eyebrow">Post copy</div>
+                  <h3>{selected.title}</h3>
+                  <div className="cmo-post-caption">
+                    <span>Caption</span>
+                    <p>{selected.body}</p>
+                  </div>
+                  {selected.cta && (
+                    <div className="cmo-post-cta">
+                      <span>CTA</span>
+                      <strong>{selected.cta}</strong>
+                    </div>
+                  )}
+                </div>
+              </article>
+            </section>
+
+            <section className="cmo-post-workspace-section" aria-labelledby="cmo-post-creative-heading">
+              <div className="cmo-post-workspace-section-heading">
+                <div>
+                  <div className="eyebrow">Visual creative</div>
+                  <h2 id="cmo-post-creative-heading">Complete the post</h2>
+                </div>
                 <Button
-                  variant="primary"
-                  disabled={preparePublish.isPending}
-                  onClick={() => preparePublish.mutate(selected)}
+                  variant="tertiary"
+                  className="btn-sm"
+                  onClick={() => {
+                    setError("");
+                    setPostWorkspaceMode("creative_brief");
+                  }}
+                  disabled={postWorkspaceBusy}
                 >
-                  <Send /> Prepare governed publish
+                  Advanced brief
                 </Button>
-              )}
+              </div>
+              <CmoCreativePanel
+                creative={assets.data?.[0]}
+                creatives={assets.data}
+                isLoading={assets.isLoading}
+                error={assets.isError ? humanizeApiError(assets.error, "Retry loading creative history.") : null}
+                actionError={creativeActionError}
+                isPending={postWorkspaceBusy}
+                phase={creativePhase}
+                onCreate={() => startCreativeOperation(() => createCreative.mutate(selected))}
+                onReload={() => void assets.refetch()}
+                onRetry={(asset) => startCreativeOperation(() => generateVisual.mutate(asset))}
+                onRegenerate={(asset) => startCreativeOperation(() => regenerateVisual.mutate(asset))}
+              />
+            </section>
+
+            <section className="cmo-post-workspace-section" aria-labelledby="cmo-post-history-heading">
+              <div className="cmo-post-workspace-section-heading">
+                <div>
+                  <div className="eyebrow">Version history</div>
+                  <h2 id="cmo-post-history-heading">Copy revisions</h2>
+                </div>
+                <span className="cmo-post-workspace-count">{versions.data?.length ?? 0} version{versions.data?.length === 1 ? "" : "s"}</span>
+              </div>
+              {versions.isLoading && <p className="subtle">Loading version history…</p>}
+              <div className="cmo-post-version-list">
+                {versions.data?.map((version) => (
+                  <button
+                    className="cmo-post-version"
+                    key={version.id}
+                    onClick={() => setSelected(version)}
+                    aria-current={version.id === selected.id ? "true" : undefined}
+                  >
+                    <FileClock />
+                    <div className="row-main">
+                      <strong>Version {version.version} · {version.title}</strong>
+                      <span>{version.ai_generated ? "AI-generated" : "User-authored"} · {new Date(version.created_at).toLocaleString()}</span>
+                    </div>
+                    <span className="cmo-post-version-status">{version.status.replaceAll("_", " ")}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="cmo-post-workspace-section" aria-labelledby="cmo-post-governance-heading">
+              <div className="cmo-post-workspace-section-heading">
+                <div>
+                  <div className="eyebrow">Governance</div>
+                  <h2 id="cmo-post-governance-heading">Review and publishing</h2>
+                </div>
+              </div>
+              <div className="cmo-post-governance-grid">
+                <div>
+                  <ShieldCheck />
+                  <strong>Approval status</strong>
+                  <p>{selected.status === "draft" ? "Move this post to review before approval." : selected.status === "review" ? "The post is ready for an approval decision." : `This post is ${selected.status.replaceAll("_", " ")}.`}</p>
+                </div>
+                <div>
+                  <Send />
+                  <strong>Publishing readiness</strong>
+                  <p>{selectedProviderCopy}</p>
+                </div>
+              </div>
+              <p className="cmo-post-governance-note">
+                Publishing requires approval and a supported connected channel. Scheduling creates an internal calendar record until a governed publish action is prepared.
+              </p>
+            </section>
           </div>
-          <div className="ai-banner">
-            <AlertCircle /> Visual creation and external publishing remain separate.
-            Publishing always requires your approval and an available connected channel. {selectedProviderCopy}
-          </div>
-        </Modal>
-      )}
-      {editing && selected && (
-        <Modal
-          title="Create content version"
-          description="The current version remains immutable in history."
-          onClose={() => setEditing(false)}
-        >
-          <form onSubmit={(event) => edit.mutate(event)}>
-            <div className="form-grid">
-              <div className="field full">
-                <label>Title</label>
-                <input name="title" required defaultValue={selected.title} />
+        )}
+        {selected && postWorkspaceMode === "edit" && (
+          <div className="cmo-post-workspace" data-testid="cmo-edit-post-workspace">
+            <section className="cmo-post-workspace-section" aria-labelledby="cmo-edit-post-heading">
+              <div className="cmo-post-workspace-section-heading">
+                <div>
+                  <div className="eyebrow">Edit post</div>
+                  <h2 id="cmo-edit-post-heading">Create the next copy version</h2>
+                </div>
               </div>
-              <div className="field full">
-                <label>Copy</label>
-                <textarea
-                  name="body"
-                  required
-                  maxLength={20000}
-                  defaultValue={selected.body}
-                />
-              </div>
-              <div className="field full">
-                <label>CTA</label>
-                <input
-                  name="cta"
-                  maxLength={300}
-                  defaultValue={selected.cta || ""}
-                />
-              </div>
-            </div>
-            <div className="modal-foot">
-              <Button type="button" onClick={() => setEditing(false)}>
-                Cancel
-              </Button>
-              <Button variant="primary" type="submit" disabled={edit.isPending}>
-                {edit.isPending ? "Saving…" : "Save new version"}
-              </Button>
-            </div>
-          </form>
-        </Modal>
-      )}
-      {briefing && selected && (
-        <Modal
-          title="Create creative brief"
-          description="Prepare grounded visual direction first, then generate a deterministic final branded creative."
-          onClose={() => setBriefing(false)}
-        >
-          <form onSubmit={(event) => createBrief.mutate(event)}>
-            <div className="form-grid">
-              <div className="field">
-                <label>Asset type</label>
-                <select name="asset_type" defaultValue={selectedCreativeFormat.asset_type}>
-                  <option value="social_square">Social square</option>
-                  <option value="story_reel">Story / reel</option>
-                  <option value="landscape_ad">Landscape ad</option>
-                  <option value="display_banner">Display banner</option>
-                  <option value="creative_brief">Creative brief only</option>
-                  <option value="other">Other</option>
-                </select>
-              </div>
-              <div className="field">
-                <label>Aspect ratio</label>
-                <input name="aspect_ratio" maxLength={16} defaultValue={selectedCreativeFormat.aspect_ratio} />
-              </div>
-              <div className="field full">
-                <label>Visual instructions</label>
-                <textarea
-                  name="instructions"
-                  required
-                  maxLength={5000}
-                  placeholder="Describe composition, brand treatment, subject, and constraints using trusted product facts."
-                />
-              </div>
-              <div className="field">
-                <label>Width</label>
-                <input
-                  name="width"
-                  type="number"
-                  min="1"
-                  max="20000"
-                  defaultValue={selectedCreativeFormat.width}
-                />
-              </div>
-              <div className="field">
-                <label>Height</label>
-                <input
-                  name="height"
-                  type="number"
-                  min="1"
-                  max="20000"
-                  defaultValue={selectedCreativeFormat.height}
-                />
-              </div>
-              <div className="field full">
-                <label>Alt text</label>
-                <textarea name="alt_text" maxLength={1000} />
-              </div>
-            </div>
-            <div className="modal-foot">
-              <Button type="button" onClick={() => setBriefing(false)}>
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                type="submit"
-                disabled={createBrief.isPending}
+              <form
+                id="cmo-edit-post-form"
+                className="cmo-drawer-form"
+                onSubmit={submitContentVersion}
               >
-                <Sparkles />{" "}
-                {createBrief.isPending ? "Preparing…" : "Save creative brief"}
-              </Button>
-            </div>
-          </form>
-        </Modal>
-      )}
+                {error && <p className="form-error" role="alert">{error}</p>}
+                <div className="cmo-drawer-grid">
+                  <div className="field full">
+                    <label>Title</label>
+                    <input name="title" required defaultValue={selected.title} />
+                  </div>
+                  <div className="field full">
+                    <label>Copy</label>
+                    <textarea
+                      name="body"
+                      required
+                      maxLength={20000}
+                      defaultValue={selected.body}
+                    />
+                  </div>
+                  <div className="field full">
+                    <label>CTA</label>
+                    <input
+                      name="cta"
+                      maxLength={300}
+                      defaultValue={selected.cta || ""}
+                    />
+                  </div>
+                </div>
+              </form>
+            </section>
+          </div>
+        )}
+        {selected && postWorkspaceMode === "creative_brief" && (
+          <div className="cmo-post-workspace" data-testid="cmo-creative-brief-workspace">
+            <section className="cmo-post-workspace-section" aria-labelledby="cmo-creative-brief-heading">
+              <div className="cmo-post-workspace-section-heading">
+                <div>
+                  <div className="eyebrow">Advanced creative brief</div>
+                  <h2 id="cmo-creative-brief-heading">Prepare creative strategy</h2>
+                </div>
+              </div>
+              <form
+                id="cmo-creative-brief-form"
+                className="cmo-drawer-form"
+                onSubmit={submitCreativeBrief}
+              >
+                {error && <p className="form-error" role="alert">{error}</p>}
+                <div className="cmo-drawer-grid">
+                  <div className="field">
+                    <label>Asset type</label>
+                    <select name="asset_type" defaultValue={selectedCreativeFormat.asset_type}>
+                      <option value="social_square">Social square</option>
+                      <option value="story_reel">Story / reel</option>
+                      <option value="landscape_ad">Landscape ad</option>
+                      <option value="display_banner">Display banner</option>
+                      <option value="creative_brief">Creative brief only</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label>Aspect ratio</label>
+                    <input name="aspect_ratio" maxLength={16} defaultValue={selectedCreativeFormat.aspect_ratio} />
+                  </div>
+                  <div className="field full">
+                    <label>Visual instructions</label>
+                    <textarea
+                      name="instructions"
+                      required
+                      maxLength={5000}
+                      placeholder="Describe composition, brand treatment, subject, and constraints using trusted product facts."
+                    />
+                  </div>
+                  <div className="field">
+                    <label>Width</label>
+                    <input
+                      name="width"
+                      type="number"
+                      min="1"
+                      max="20000"
+                      defaultValue={selectedCreativeFormat.width}
+                    />
+                  </div>
+                  <div className="field">
+                    <label>Height</label>
+                    <input
+                      name="height"
+                      type="number"
+                      min="1"
+                      max="20000"
+                      defaultValue={selectedCreativeFormat.height}
+                    />
+                  </div>
+                  <div className="field full">
+                    <label>Alt text</label>
+                    <textarea name="alt_text" maxLength={1000} />
+                  </div>
+                </div>
+              </form>
+            </section>
+          </div>
+        )}
+      </WorkspaceDrawer>
       {schedule && (
         <Modal
           title="Schedule content"
