@@ -117,15 +117,20 @@ export function CmoPage() {
       }, (request) => marketingApi.content.generate(activeBusinessId, request));
     },
     onSuccess: (outcome) => {
-      const outcomeNotice = channelGenerationNotice(outcome);
-      if (outcomeNotice) {
-        setShowContentGenerator(false);
-        setNotice(outcomeNotice);
-        setError("");
-      } else {
+      if (outcome.successes.length === 0) {
+        const firstFailure = outcome.failures[0]?.reason;
         setNotice("");
-        setError("AI content generation could not be completed. No channel drafts were created.");
+        setError(
+          humanizeApiError(
+            firstFailure,
+            "AI content generation could not be completed. No channel drafts were created.",
+          ),
+        );
+        return;
       }
+      setShowContentGenerator(false);
+      setNotice(channelGenerationNotice(outcome) || "");
+      setError("");
     },
     onError: (reason) => setError(humanizeApiError(reason, "AI content generation could not be completed.")),
     onSettled: () => refresh(),

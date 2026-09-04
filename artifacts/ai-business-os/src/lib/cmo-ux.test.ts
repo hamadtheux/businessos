@@ -6,6 +6,7 @@ import type {
   MarketingChannel,
   MarketingContent,
 } from "../services/api-types.ts";
+import { ApiError, humanizeApiError } from "../services/api-client.ts";
 import {
   AUDIENCE_GUIDANCE_MAX,
   CONTENT_PROMPT_MAX,
@@ -124,10 +125,11 @@ test("multi-platform partial success preserves successful drafts", async () => {
 });
 
 test("an all-channel failure produces no misleading success notice", async () => {
+  const failure = new Error("specific safe failure");
   const outcome = await generateCampaignChannelDrafts(
     { ...campaignInput, channels: ["instagram", "linkedin"] },
     async () => {
-      throw new Error("private provider response");
+      throw failure;
     },
   );
 
@@ -136,7 +138,37 @@ test("an all-channel failure produces no misleading success notice", async () =>
     "instagram",
     "linkedin",
   ]);
+  assert.equal(outcome.failures[0]?.reason, failure);
+  assert.equal(
+    humanizeApiError(
+      outcome.failures[0]?.reason,
+      "AI content generation could not be completed. No channel drafts were created.",
+    ),
+    "AI content generation could not be completed. No channel drafts were created.",
+  );
   assert.equal(channelGenerationNotice(outcome), null);
+});
+
+test("an all-channel ApiError keeps the first failure available to the existing humanizer", async () => {
+  const failure = new ApiError(503, {
+    detail: { code: "provider_unavailable" },
+  });
+  const outcome = await generateCampaignChannelDrafts(
+    { ...campaignInput, channels: ["instagram", "linkedin"] },
+    async () => {
+      throw failure;
+    },
+  );
+
+  assert.deepEqual(outcome.successes, []);
+  assert.equal(outcome.failures[0]?.reason, failure);
+  assert.equal(
+    humanizeApiError(
+      outcome.failures[0]?.reason,
+      "AI content generation could not be completed. No channel drafts were created.",
+    ),
+    "The external provider is temporarily degraded. Your internal data remains available.",
+  );
 });
 
 test("the first success supplies shared direction to later variants", async () => {

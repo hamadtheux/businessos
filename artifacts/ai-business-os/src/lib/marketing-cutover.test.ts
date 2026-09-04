@@ -276,6 +276,19 @@ test("AI CMO creation flows use the accessible responsive workspace drawer", asy
   assert.match(contentDrawer, /open=\{showContentGenerator\}/);
   assert.match(contentDrawer, /testId="cmo-content-workspace-drawer"/);
   assert.match(page, /generateCampaignChannelDrafts/);
+  const generationHandler = page.slice(
+    page.indexOf("const generateContent = useMutation"),
+    page.indexOf("const editContent = useMutation"),
+  );
+  assert.match(generationHandler, /channelGenerationNotice\(outcome\)/);
+  assert.match(generationHandler, /if \(outcome\.successes\.length === 0\)/);
+  assert.match(generationHandler, /setShowContentGenerator\(false\)/);
+  assert.match(generationHandler, /const firstFailure = outcome\.failures\[0\]\?\.reason/);
+  assert.match(
+    generationHandler,
+    /humanizeApiError\(\s*firstFailure,\s*"AI content generation could not be completed\. No channel drafts were created\.",\s*\)/,
+  );
+  assert.match(generationHandler, /onSettled: \(\) => refresh\(\)/);
   assert.doesNotMatch(page, /\{showPlanGenerator && \(\s*<WorkspaceDrawer/);
   assert.doesNotMatch(page, /\{showContentGenerator && \(\s*<WorkspaceDrawer/);
 
