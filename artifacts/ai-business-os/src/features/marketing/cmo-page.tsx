@@ -15,6 +15,7 @@ import {
   creativeResultNotice,
   generateCampaignChannelDrafts,
   runCreativeOperationWithRecovery,
+  type CampaignGenerationInput,
   type CreativeProgress,
 } from "@/lib/cmo-ux";
 import { businessDateRange } from "@/lib/operational-dates";
@@ -96,26 +97,11 @@ export function CmoPage() {
   });
 
   const generateContent = useMutation({
-    mutationFn: async (event: FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-      const form = new FormData(event.currentTarget);
-      const selected = form.getAll("platforms").map(String) as MarketingChannel[];
-      const additional = String(form.get("additional_channel") || "") as MarketingChannel;
-      if (additional) selected.push(additional);
-      const selectedChannels = [...new Set(selected)];
-      if (!selectedChannels.length) throw new Error("Choose at least one platform.");
-      const goal = String(form.get("prompt") || "").trim();
-      const audience = String(form.get("audience") || "").trim();
-      return generateCampaignChannelDrafts({
-        channels: selectedChannels,
-        goal,
-        audience,
-        contentType: String(form.get("content_type") || "social_post") as MarketingContentType,
-        campaignId: String(form.get("campaign_id")) || null,
-        title: String(form.get("title")) || null,
-        language: String(form.get("language") || "en"),
-      }, (request) => marketingApi.content.generate(activeBusinessId, request));
-    },
+    mutationFn: (input: CampaignGenerationInput) =>
+      generateCampaignChannelDrafts(
+        input,
+        (request) => marketingApi.content.generate(activeBusinessId, request),
+      ),
     onSuccess: (outcome) => {
       if (outcome.successes.length === 0) {
         const firstFailure = outcome.failures[0]?.reason;
@@ -135,6 +121,23 @@ export function CmoPage() {
     onError: (reason) => setError(humanizeApiError(reason, "AI content generation could not be completed.")),
     onSettled: () => refresh(),
   });
+  const submitGenerateContent = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const selected = form.getAll("platforms").map(String) as MarketingChannel[];
+    const additional = String(form.get("additional_channel") || "") as MarketingChannel;
+    if (additional) selected.push(additional);
+
+    generateContent.mutate({
+      channels: [...new Set(selected)],
+      goal: String(form.get("prompt") || "").trim(),
+      audience: String(form.get("audience") || "").trim(),
+      contentType: String(form.get("content_type") || "social_post") as MarketingContentType,
+      campaignId: String(form.get("campaign_id")) || null,
+      title: String(form.get("title")) || null,
+      language: String(form.get("language") || "en"),
+    });
+  };
   const editContent = useMutation({
     mutationFn: (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
@@ -416,7 +419,7 @@ export function CmoPage() {
         <form
           id="cmo-content-generator-form"
           className="cmo-drawer-form"
-          onSubmit={(event) => generateContent.mutate(event)}
+          onSubmit={submitGenerateContent}
         >
           <div className="cmo-drawer-intro">
             <div>

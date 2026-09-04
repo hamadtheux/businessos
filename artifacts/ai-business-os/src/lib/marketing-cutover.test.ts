@@ -84,6 +84,35 @@ test("calendar scheduling remains an internal API record", async () => {
   assert.deepEqual(body, { content_id: "content-id", scheduled_for: "2026-08-24T10:00:00Z" });
 });
 
+test("AI content generation uses the tenant-scoped POST endpoint", async () => {
+  let request: { path: string; method: string; body: unknown } | null = null;
+  const api = await authenticated(async (input, init) => {
+    if (String(input).endsWith("/login")) return json(session);
+    request = {
+      path: new URL(String(input)).pathname,
+      method: String(init?.method || "GET"),
+      body: JSON.parse(String(init?.body)),
+    };
+    return json({});
+  });
+  const payload = {
+    prompt: "Create an Instagram launch post",
+    campaign_id: "campaign-one",
+    channel: "instagram" as const,
+    content_type: "social_post" as const,
+    title: "Launch",
+    language: "en",
+  };
+
+  await api.content.generate(businessA, payload);
+
+  assert.deepEqual(request, {
+    path: `/api/v1/businesses/${businessA}/marketing/content/generate`,
+    method: "POST",
+    body: payload,
+  });
+});
+
 test("creative generation and regeneration use tenant-scoped POST endpoints", async () => {
   const requests: Array<{ path: string; method: string }> = [];
   const api = await authenticated(async (input, init) => {
@@ -280,6 +309,38 @@ test("AI CMO creation flows use the accessible responsive workspace drawer", asy
     page.indexOf("const generateContent = useMutation"),
     page.indexOf("const editContent = useMutation"),
   );
+  const mutationHandler = generationHandler.slice(
+    0,
+    generationHandler.indexOf("const submitGenerateContent"),
+  );
+  const submitHandler = generationHandler.slice(
+    generationHandler.indexOf("const submitGenerateContent"),
+  );
+  assert.match(mutationHandler, /mutationFn: \(input: CampaignGenerationInput\)/);
+  assert.match(mutationHandler, /generateCampaignChannelDrafts\(\s*input,/);
+  assert.doesNotMatch(mutationHandler, /FormEvent|FormData|currentTarget|preventDefault/);
+  assert.match(submitHandler, /event\.preventDefault\(\)/);
+  assert.match(submitHandler, /const form = new FormData\(event\.currentTarget\)/);
+  assert.ok(
+    submitHandler.indexOf("new FormData(event.currentTarget)") <
+      submitHandler.indexOf("generateContent.mutate({"),
+  );
+  assert.match(submitHandler, /form\.getAll\("platforms"\)/);
+  assert.match(submitHandler, /form\.get\("additional_channel"\)/);
+  assert.match(submitHandler, /channels: \[\.\.\.new Set\(selected\)\]/);
+  for (const field of [
+    "prompt",
+    "audience",
+    "content_type",
+    "campaign_id",
+    "title",
+    "language",
+  ]) {
+    assert.match(submitHandler, new RegExp(`form\\.get\\("${field}"\\)`), field);
+  }
+  assert.match(contentDrawer, /value=\{channel\}\s+defaultChecked=\{channel === "instagram"\}/);
+  assert.match(contentDrawer, /onSubmit=\{submitGenerateContent\}/);
+  assert.doesNotMatch(page, /generateContent\.mutate\(event\)/);
   assert.match(generationHandler, /channelGenerationNotice\(outcome\)/);
   assert.match(generationHandler, /if \(outcome\.successes\.length === 0\)/);
   assert.match(generationHandler, /setShowContentGenerator\(false\)/);

@@ -96,6 +96,35 @@ test("multi-platform generation completes sequential native variants", async () 
   assert.deepEqual(outcome.failures, []);
 });
 
+test("snapshotted campaign input preserves fields and deduplicates the default channel", async () => {
+  const requests: Parameters<Parameters<typeof generateCampaignChannelDrafts>[1]>[0][] = [];
+  const outcome = await generateCampaignChannelDrafts(
+    {
+      channels: ["instagram", "instagram"],
+      goal: "Promote the autumn collection",
+      audience: "Returning customers",
+      contentType: "email_draft",
+      campaignId: "campaign-autumn",
+      title: "Autumn launch",
+      language: "ur",
+    },
+    async (request) => {
+      requests.push(request);
+      return content(request.channel);
+    },
+  );
+
+  assert.equal(requests.length, 1);
+  assert.deepEqual(outcome.successes.map((item) => item.channel), ["instagram"]);
+  assert.equal(requests[0].channel, "instagram");
+  assert.equal(requests[0].content_type, "email_draft");
+  assert.equal(requests[0].campaign_id, "campaign-autumn");
+  assert.equal(requests[0].title, "Autumn launch");
+  assert.equal(requests[0].language, "ur");
+  assert.match(requests[0].prompt, /Promote the autumn collection/);
+  assert.match(requests[0].prompt, /Returning customers/);
+});
+
 test("multi-platform partial success preserves successful drafts", async () => {
   const privateFailure = new Error("private upstream detail");
   const outcome = await generateCampaignChannelDrafts(
