@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import logging
+import re
 import warnings
 from dataclasses import dataclass
 from io import BytesIO
@@ -17,12 +19,15 @@ from app.core.config import Settings
 DEFAULT_OPENAI_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_CREATIVE_QUALITY: Literal["low", "medium", "high", "auto"] = "medium"
 
+logger = logging.getLogger("aibos.creative_provider")
+
 _MAX_GENERATED_IMAGE_BYTES = 30 * 1024 * 1024
 # GPT-Image-2 current Image API constraints.
 _MIN_IMAGE_PIXELS = 655_360
 _MAX_IMAGE_PIXELS = 8_294_400
 _MAX_IMAGE_EDGE = 3840
 _MAX_EDGE_RATIO = 3.0
+_SAFE_PROVIDER_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,7 +166,44 @@ class OpenAICreativeGenerationProvider:
                 output_format="png",
                 n=1,
             )
-        except OpenAIError:
+        except OpenAIError as exc:
+            failure_metadata: dict[str, str | int | None] = {
+                "provider": _safe_provider_identifier(self.provider_name),
+                "exception_type": _safe_provider_identifier(type(exc).__name__),
+                "model": _safe_provider_identifier(self.model),
+                "quality": _safe_provider_identifier(self.quality),
+                "size": _safe_provider_identifier(size),
+                "status_code": _safe_http_status_code(exc),
+                "provider_request_id": _safe_provider_exception_identifier(
+                    exc,
+                    "request_id",
+                ),
+                "provider_error_code": _safe_provider_exception_identifier(
+                    exc,
+                    "code",
+                ),
+                "provider_error_type": _safe_provider_exception_identifier(
+                    exc,
+                    "type",
+                ),
+            }
+            logger.warning(
+                _format_safe_provider_log_message(
+                    "creative_image_provider_failed",
+                    (
+                        ("provider", failure_metadata["provider"]),
+                        ("exception_type", failure_metadata["exception_type"]),
+                        ("model", failure_metadata["model"]),
+                        ("quality", failure_metadata["quality"]),
+                        ("size", failure_metadata["size"]),
+                        ("status_code", failure_metadata["status_code"]),
+                        ("request_id", failure_metadata["provider_request_id"]),
+                        ("error_code", failure_metadata["provider_error_code"]),
+                        ("error_type", failure_metadata["provider_error_type"]),
+                    ),
+                ),
+                extra=failure_metadata,
+            )
             raise CreativeProviderGenerationError(
                 "Creative image provider could not complete the request"
             ) from None
@@ -174,12 +216,91 @@ class OpenAICreativeGenerationProvider:
         if not isinstance(request_id, str) or not request_id.strip():
             request_id = None
 
+        success_metadata: dict[str, str | int | None] = {
+            "provider": _safe_provider_identifier(self.provider_name),
+            "model": _safe_provider_identifier(self.model),
+            "quality": _safe_provider_identifier(self.quality),
+            "size": _safe_provider_identifier(size),
+            "validated_width": width,
+            "validated_height": height,
+            "provider_request_id": _safe_provider_identifier(request_id),
+        }
+        logger.info(
+            _format_safe_provider_log_message(
+                "creative_image_provider_succeeded",
+                (
+                    ("provider", success_metadata["provider"]),
+                    ("model", success_metadata["model"]),
+                    ("quality", success_metadata["quality"]),
+                    ("size", success_metadata["size"]),
+                    ("width", success_metadata["validated_width"]),
+                    ("height", success_metadata["validated_height"]),
+                    ("request_id", success_metadata["provider_request_id"]),
+                ),
+            ),
+            extra=success_metadata,
+        )
+
         return CreativeGenerationResult(
             content=image_bytes,
             width=width,
             height=height,
             provider_request_id=request_id,
         )
+
+
+def _safe_provider_identifier(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+
+    normalized = value.strip()
+    if not _SAFE_PROVIDER_IDENTIFIER.fullmatch(normalized):
+        return None
+
+    return normalized
+
+
+def _format_safe_provider_log_message(
+    event: str,
+    fields: tuple[tuple[str, str | int | None], ...],
+) -> str:
+    rendered_fields = (
+        f"{name}={value if value is not None else 'none'}"
+        for name, value in fields
+    )
+    return " ".join((event, *rendered_fields))
+
+
+def _safe_provider_exception_attribute(
+    exception: OpenAIError,
+    attribute: str,
+) -> object | None:
+    try:
+        return getattr(exception, attribute, None)
+    except Exception:
+        # Diagnostics must never replace the original safe provider failure.
+        return None
+
+
+def _safe_provider_exception_identifier(
+    exception: OpenAIError,
+    attribute: str,
+) -> str | None:
+    return _safe_provider_identifier(
+        _safe_provider_exception_attribute(exception, attribute)
+    )
+
+
+def _safe_http_status_code(exception: OpenAIError) -> int | None:
+    status_code = _safe_provider_exception_attribute(exception, "status_code")
+    if (
+        isinstance(status_code, int)
+        and not isinstance(status_code, bool)
+        and 100 <= status_code <= 599
+    ):
+        return status_code
+
+    return None
 
 
 def _build_visual_prompt(request: CreativeGenerationRequest) -> str:
@@ -403,7 +524,7 @@ def create_creative_generation_provider(
 
     client = AsyncOpenAI(
         api_key=api_key,
-        timeout=config.openai_timeout_seconds,
+        timeout=config.openai_image_timeout_seconds,
         max_retries=config.openai_max_retries,
     )
 

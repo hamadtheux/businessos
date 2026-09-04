@@ -166,6 +166,12 @@ class Settings(BaseSettings):
         max_length=128,
     )
 
+    openai_image_timeout_seconds: float = Field(
+        default=180.0,
+        ge=30,
+        le=600,
+    )
+
     openai_image_quality: Literal["low", "medium", "high", "auto"] = "medium"
 
     # External integrations
