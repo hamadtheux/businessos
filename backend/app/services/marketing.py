@@ -95,7 +95,7 @@ from app.models.marketing import (
     SocialSchedule,
 )
 from app.models.notification import Notification
-from app.schemas.ai_agent import AIAgentExecutionRequest
+from app.schemas.ai_agent import AIAgentExecutionRequest, MAX_AGENT_TASK_LENGTH
 from app.schemas.marketing import (
     AnalyticsBreakdown,
     AudienceCreate,
@@ -1387,6 +1387,298 @@ async def generate_content(
     return content
 
 
+# _build_cmo_execution_request may append healthcare, professional-services,
+# or real-estate privacy rules. Keep bounded room for those server-owned rules.
+_CREATIVE_STRATEGY_RUNTIME_RULE_MARGIN = 256
+
+_CREATIVE_STRATEGY_TASK_BUDGET = (
+    MAX_AGENT_TASK_LENGTH - _CREATIVE_STRATEGY_RUNTIME_RULE_MARGIN
+)
+
+_CREATIVE_STRATEGY_TASK_PREAMBLE = (
+    "Act as the senior Creative Intelligence team for this business: "
+    "marketing strategist, brand strategist, PR reviewer, copywriter, and "
+    "creative director. The business owner may provide a very short, vague, "
+    "or non-technical request. Do not require expert prompting from them. "
+    "Convert their intent into a strong professional creative strategy using "
+    "only trusted Business Brain and permitted memory context.\n\n"
+)
+
+_CREATIVE_STRATEGY_TASK_CONTRACT = (
+    "\n\nGROUNDING RULES:\n"
+    "- Owner instructions express desired intent, not authoritative business facts.\n"
+    "- Only the server-classified offer above may be used as an offer. If it is "
+    "present, preserve it exactly; if absent, do not invent a discount or price.\n"
+    "- Use only products, services, prices, offers, benefits, brand details, "
+    "business facts, claims, and capabilities supported by trusted context.\n"
+    "- Never invent testimonials, awards, certifications, statistics, customer "
+    "facts, inventory, discounts, urgency, guarantees, medical outcomes, property "
+    "inventory, or performance claims.\n"
+    "- If the owner gives weak instructions, make professional creative decisions "
+    "from available context rather than asking them to become a prompt engineer.\n"
+    "- If some detail is unavailable, use a tasteful generic creative treatment "
+    "instead of fabricating a fact.\n\n"
+    "MARKETING + PR STANDARD:\n"
+    "- Determine the strongest defensible audience, marketing angle, hook, "
+    "headline, supporting message and CTA.\n"
+    "- Keep an explicit authorized offer separate from the headline. A discount "
+    "or number is a compact supporting component unless an exceptional "
+    "typography-led concept is explicitly justified.\n"
+    "- Protect brand reputation and avoid manipulative, deceptive, unsafe, or "
+    "unsupported wording.\n"
+    "- Adapt the strategy to the requested asset and known channel.\n"
+    "- Make the creative direction specific enough that an expert graphic "
+    "designer could execute it without guessing.\n"
+    "- The visual concept must reserve useful negative space for deterministic "
+    "logo, headline, supporting copy and CTA composition.\n"
+    "- Do not tell an image model to redraw the logo or render final typography.\n"
+    "- Do not claim that an image has already been generated.\n\n"
+    "OUTPUT CONTRACT:\n"
+    "Return exactly one CreativeStrategyProposal through the required typed "
+    "output schema. Do not wrap it in a summary string, markdown, or a second "
+    "serialized JSON document. Set recommendations, proposed_actions, and "
+    "evidence_source_ids to empty lists. Use these exact strategy fields:\n"
+    "marketing_goal, target_audience, audience_insight, campaign_angle, hook, "
+    "headline, supporting_message, offer, claim_source, cta, visual_concept, composition_direction, "
+    "subject_focus, mood, lighting, negative_space, brand_treatment, "
+    "recommended_channel, pr_guardrails, prohibited_claims, evidence_source_ids.\n"
+    "pr_guardrails and prohibited_claims must be short user-visible lists. "
+    "Set claim_source to none; authoritative provenance is owned and applied by "
+    "the server after validation. Never include hidden "
+    "reasoning or chain-of-thought."
+)
+
+
+def _normalize_creative_strategy_context(value: str | None) -> str:
+    return " ".join((value or "").split())
+
+
+def _shorten_creative_strategy_context(value: str, length: int) -> str:
+    if len(value) <= length:
+        return value
+    if length <= 1:
+        return value[:length]
+    return f"{value[:length - 1].rstrip()}…"
+
+
+def _build_bounded_creative_strategy_task(
+    *,
+    owner_instructions: str,
+    asset_type: str,
+    aspect_ratio: str | None,
+    authorized_offer: str | None,
+    offer_claim_source: str,
+    campaign_name: str | None,
+    campaign_objective: str | None,
+    content_channel: str | None,
+    content_type: str | None,
+    content_title: str | None,
+    content_body: str | None,
+    content_cta: str | None,
+    existing_creative_brief: str | None,
+) -> str:
+    """Build a bounded task without truncating the fixed governance contract."""
+    fields: list[dict[str, object]] = [
+        {
+            "key": "owner",
+            "prefix": "Owner request: ",
+            "value": _normalize_creative_strategy_context(owner_instructions),
+            "cap": 480,
+            "minimum": 64,
+            "priority": 7,
+            "exact": False,
+        },
+        {
+            "key": "asset",
+            "prefix": "\nRequested asset type: ",
+            "value": _normalize_creative_strategy_context(asset_type),
+            "cap": 32,
+            "minimum": 1,
+            "priority": 1,
+            "exact": True,
+        },
+        {
+            "key": "ratio",
+            "prefix": "\nRequested aspect ratio: ",
+            "value": _normalize_creative_strategy_context(aspect_ratio)
+            or "not specified",
+            "cap": 16,
+            "minimum": 1,
+            "priority": 2,
+            "exact": True,
+        },
+        {
+            "key": "offer",
+            "prefix": "\n\nServer-classified offer context:\n- Offer: ",
+            "value": authorized_offer or "none provided",
+            "cap": 160,
+            "minimum": 1,
+            "priority": 0,
+            "exact": True,
+        },
+        {
+            "key": "offer_source",
+            "prefix": "\n- Offer claim source: ",
+            "value": _normalize_creative_strategy_context(offer_claim_source)
+            or "none",
+            "cap": 64,
+            "minimum": 1,
+            "priority": 3,
+            "exact": True,
+        },
+    ]
+    if campaign_name is not None:
+        fields.extend(
+            [
+                {
+                    "key": "campaign_name",
+                    "prefix": "\n\nServer-classified campaign context:\n- Name: ",
+                    "value": _normalize_creative_strategy_context(campaign_name),
+                    "cap": 180,
+                    "minimum": 32,
+                    "priority": 8,
+                    "exact": False,
+                },
+                {
+                    "key": "campaign_objective",
+                    "prefix": "\n- Objective: ",
+                    "value": _normalize_creative_strategy_context(
+                        campaign_objective
+                    ),
+                    "cap": 320,
+                    "minimum": 32,
+                    "priority": 9,
+                    "exact": False,
+                },
+            ]
+        )
+    if content_channel is not None:
+        fields.extend(
+            [
+                {
+                    "key": "content_channel",
+                    "prefix": "\n\nTrusted content context with server-tracked provenance:\n- Channel: ",
+                    "value": _normalize_creative_strategy_context(content_channel),
+                    "cap": 40,
+                    "minimum": 1,
+                    "priority": 4,
+                    "exact": True,
+                },
+                {
+                    "key": "content_type",
+                    "prefix": "\n- Content type: ",
+                    "value": _normalize_creative_strategy_context(content_type),
+                    "cap": 40,
+                    "minimum": 1,
+                    "priority": 5,
+                    "exact": True,
+                },
+                {
+                    "key": "content_title",
+                    "prefix": "\n- Title: ",
+                    "value": _normalize_creative_strategy_context(content_title),
+                    "cap": 180,
+                    "minimum": 40,
+                    "priority": 6,
+                    "exact": False,
+                },
+                {
+                    "key": "content_body",
+                    "prefix": "\n- Body: ",
+                    "value": _normalize_creative_strategy_context(content_body),
+                    "cap": 640,
+                    "minimum": 48,
+                    "priority": 11,
+                    "exact": False,
+                },
+                {
+                    "key": "content_cta",
+                    "prefix": "\n- CTA: ",
+                    "value": _normalize_creative_strategy_context(content_cta)
+                    or "none provided",
+                    "cap": 300,
+                    "minimum": 24,
+                    "priority": 10,
+                    "exact": False,
+                },
+                {
+                    "key": "creative_brief",
+                    "prefix": "\n- Existing creative brief: ",
+                    "value": _normalize_creative_strategy_context(
+                        existing_creative_brief
+                    )
+                    or "none provided",
+                    "cap": 480,
+                    "minimum": 48,
+                    "priority": 12,
+                    "exact": False,
+                },
+            ]
+        )
+
+    available_values = (
+        _CREATIVE_STRATEGY_TASK_BUDGET
+        - len(_CREATIVE_STRATEGY_TASK_PREAMBLE)
+        - len(_CREATIVE_STRATEGY_TASK_CONTRACT)
+        - sum(len(str(field["prefix"])) for field in fields)
+    )
+    allocations: dict[str, int] = {}
+    for field in fields:
+        value = str(field["value"])
+        minimum = int(field["minimum"])
+        allocations[str(field["key"])] = (
+            len(value)
+            if bool(field["exact"])
+            else min(len(value), minimum)
+        )
+
+    overflow = sum(allocations.values()) - available_values
+    if overflow > 0:
+        for field in sorted(
+            fields,
+            key=lambda item: int(item["priority"]),
+            reverse=True,
+        ):
+            if bool(field["exact"]):
+                continue
+            key = str(field["key"])
+            reduction = min(max(0, allocations[key] - 1), overflow)
+            allocations[key] -= reduction
+            overflow -= reduction
+            if overflow == 0:
+                break
+    if overflow > 0:
+        raise MarketingAIError
+
+    remaining = available_values - sum(allocations.values())
+    for field in sorted(fields, key=lambda item: int(item["priority"])):
+        if remaining <= 0:
+            break
+        key = str(field["key"])
+        value = str(field["value"])
+        target = len(value) if bool(field["exact"]) else min(
+            len(value),
+            int(field["cap"]),
+        )
+        growth = min(max(0, target - allocations[key]), remaining)
+        allocations[key] += growth
+        remaining -= growth
+
+    context = "".join(
+        f"{field['prefix']}"
+        f"{_shorten_creative_strategy_context(str(field['value']), allocations[str(field['key'])])}"
+        for field in fields
+    )
+    task = (
+        _CREATIVE_STRATEGY_TASK_PREAMBLE
+        + context
+        + _CREATIVE_STRATEGY_TASK_CONTRACT
+    )
+    if len(task) > _CREATIVE_STRATEGY_TASK_BUDGET:
+        raise MarketingAIError
+    return task
+
+
 async def create_creative_brief(
     session: AsyncSession,
     *,
@@ -1423,94 +1715,26 @@ async def create_creative_brief(
         authorized_offer = content_offer
         claim_source = content_claim_source
 
-    campaign_context = ""
-    if campaign is not None:
-        campaign_context = (
-            "\n\nServer-classified campaign context:"
-            f"\n- Name: {campaign.name}"
-            f"\n- Objective: {campaign.objective}"
-            f"\n- Offer: {authorized_offer or 'none provided'}"
-            f"\n- Offer claim source: {claim_source}"
-        )
-
-    content_context = ""
     expected_channel: str | None = None
 
     if content is not None:
         expected_channel = content.channel
-        content_context = (
-            "\n\nTrusted content context with server-tracked provenance:"
-            f"\n- Channel: {content.channel}"
-            f"\n- Content type: {content.content_type}"
-            f"\n- Title: {content.title}"
-            f"\n- Body: {content.body}"
-            f"\n- CTA: {content.cta or 'none provided'}"
-            f"\n- Existing creative brief: "
-            f"{content.creative_brief or 'none provided'}"
-        )
-
-    requested_ratio = (
-        data.aspect_ratio.strip()
-        if data.aspect_ratio is not None and data.aspect_ratio.strip()
-        else "not specified"
-    )
-
-    task = (
-        "Act as the senior Creative Intelligence team for this business: "
-        "marketing strategist, brand strategist, PR reviewer, copywriter, and "
-        "creative director. The business owner may provide a very short, vague, "
-        "or non-technical request. Do not require expert prompting from them. "
-        "Convert their intent into a strong professional creative strategy using "
-        "only trusted Business Brain and permitted memory context.\n\n"
-        f"Owner request: {data.instructions.strip()}\n"
-        f"Requested asset type: {data.asset_type}\n"
-        f"Requested aspect ratio: {requested_ratio}"
-        f"{campaign_context}"
-        f"{content_context}\n\n"
-
-        "GROUNDING RULES:\n"
-        "- Owner instructions express desired intent, not authoritative business facts.\n"
-        "- Only the server-classified offer above may be used as an offer. If it is "
-        "present, preserve it exactly; if absent, do not invent a discount or price.\n"
-        "- Use only products, services, prices, offers, benefits, brand details, "
-        "business facts, claims, and capabilities supported by trusted context.\n"
-        "- Never invent testimonials, awards, certifications, statistics, customer "
-        "facts, inventory, discounts, urgency, guarantees, medical outcomes, property "
-        "inventory, or performance claims.\n"
-        "- If the owner gives weak instructions, make professional creative decisions "
-        "from available context rather than asking them to become a prompt engineer.\n"
-        "- If some detail is unavailable, use a tasteful generic creative treatment "
-        "instead of fabricating a fact.\n\n"
-
-        "MARKETING + PR STANDARD:\n"
-        "- Determine the strongest defensible audience, marketing angle, hook, "
-        "headline, supporting message and CTA.\n"
-        "- Keep an explicit authorized offer separate from the headline. A discount "
-        "or number is a compact supporting component unless an exceptional "
-        "typography-led concept is explicitly justified.\n"
-        "- Protect brand reputation and avoid manipulative, deceptive, unsafe, or "
-        "unsupported wording.\n"
-        "- Adapt the strategy to the requested asset and known channel.\n"
-        "- Make the creative direction specific enough that an expert graphic "
-        "designer could execute it without guessing.\n"
-        "- The visual concept must reserve useful negative space for deterministic "
-        "logo, headline, supporting copy and CTA composition.\n"
-        "- Do not tell an image model to redraw the logo or render final typography.\n"
-        "- Do not claim that an image has already been generated.\n\n"
-
-        "OUTPUT CONTRACT:\n"
-        "Return exactly one CreativeStrategyProposal through the required typed "
-        "output schema. Do not wrap it in a summary string, markdown, or a second "
-        "serialized JSON document. Set recommendations, proposed_actions, and "
-        "evidence_source_ids to empty lists. Use these exact strategy fields:\n"
-        "marketing_goal, target_audience, audience_insight, campaign_angle, hook, "
-        "headline, supporting_message, offer, claim_source, cta, visual_concept, composition_direction, "
-        "subject_focus, mood, lighting, negative_space, brand_treatment, "
-        "recommended_channel, pr_guardrails, prohibited_claims, evidence_source_ids.\n"
-        "pr_guardrails and prohibited_claims must be short user-visible lists. "
-        "Set claim_source to none; authoritative provenance is owned and applied by "
-        "the server after validation. Never include hidden "
-        "reasoning or chain-of-thought."
+    task = _build_bounded_creative_strategy_task(
+        owner_instructions=data.instructions,
+        asset_type=data.asset_type,
+        aspect_ratio=data.aspect_ratio,
+        authorized_offer=authorized_offer,
+        offer_claim_source=claim_source,
+        campaign_name=campaign.name if campaign is not None else None,
+        campaign_objective=campaign.objective if campaign is not None else None,
+        content_channel=content.channel if content is not None else None,
+        content_type=content.content_type if content is not None else None,
+        content_title=content.title if content is not None else None,
+        content_body=content.body if content is not None else None,
+        content_cta=content.cta if content is not None else None,
+        existing_creative_brief=(
+            content.creative_brief if content is not None else None
+        ),
     )
 
     execution = await _execute_creative_strategy(
@@ -3122,11 +3346,19 @@ async def _execute_creative_strategy(
     *,
     expected_channel: str | None,
 ):
-    request = await _build_cmo_execution_request(
-        session,
-        business_id,
-        task,
-    )
+    try:
+        request = await _build_cmo_execution_request(
+            session,
+            business_id,
+            task,
+        )
+    except ValidationError:
+        _log_creative_strategy_failure(
+            "creative_strategy_request_invalid",
+            provider=provider,
+            expected_channel=expected_channel,
+        )
+        raise MarketingAIError from None
 
     try:
         return await execute_ai_agent_typed_with_metadata(

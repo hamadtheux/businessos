@@ -24,7 +24,10 @@ from app.models.business_branding import BusinessBranding  # noqa: E402
 from app.models.catalog_item import CatalogItem  # noqa: E402
 from app.models.marketing import Campaign, CampaignChannelPlan, Competitor, CompetitorObservation, CreativeAsset, MarketingContent, MarketingPlan, MarketingTrend, SocialSchedule  # noqa: E402
 from app.models.opportunity import Opportunity  # noqa: E402
-from app.schemas.ai_agent import AIAgentProposedAction  # noqa: E402
+from app.schemas.ai_agent import (  # noqa: E402
+    AIAgentProposedAction,
+    MAX_AGENT_TASK_LENGTH,
+)
 from app.schemas.marketing import CampaignCreate, CampaignGenerateRequest, CampaignUpdate, ChannelPlanCreate, ContentCreate, ContentGenerateRequest, ContentVersionCreate, CreativeBriefCreate, CreativeStrategyProposal, PerformanceCreate, PlanGenerateRequest, ScheduleCreate, TrendOpportunityRequest  # noqa: E402
 from app.services.creative_provider import (
     CreativeGenerationResult,
@@ -37,7 +40,10 @@ from app.services.creative_visual_review import (  # noqa: E402
     CreativeVisualReviewResult,
 )
 from app.services.marketing import (  # noqa: E402
+    _CREATIVE_STRATEGY_RUNTIME_RULE_MARGIN,
+    _CREATIVE_STRATEGY_TASK_BUDGET,
     _allocate_budget,
+    _execute_creative_strategy,
     _page,
     _term,
     analyze_competitor,
@@ -780,6 +786,18 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
+            "Owner request: make post for my product",
+            prompt,
+        )
+        self.assertIn(
+            "- Title: Product launch",
+            prompt,
+        )
+        self.assertIn(
+            "- Existing creative brief: Premium product-led creative.",
+            prompt,
+        )
+        self.assertIn(
             "Never include hidden reasoning",
             prompt,
         )
@@ -787,6 +805,126 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
             runtime.await_args.kwargs["expected_channel"],
             "instagram",
         )
+
+    async def test_creative_strategy_task_bounds_long_dynamic_context(self) -> None:
+        authorized_offer = "50% off annual plan"
+        owner_instructions = (
+            "Build a premium launch around trusted business automation. "
+            + "Detailed owner intent and visual preference. " * 90
+        ).strip()
+        content = MarketingContent(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            campaign_id=None,
+            channel="instagram",
+            content_type="social_post",
+            title="Critical launch title",
+            body="Trusted long-form body evidence. " * 700,
+            cta="Explore the platform",
+            language="en",
+            status="draft",
+            ai_generated=True,
+            version=1,
+            parent_content_id=None,
+            root_content_id=uuid4(),
+            created_by_user_id=USER_ID,
+            creative_brief="Existing detailed visual direction. " * 300,
+            source_evidence=[
+                {
+                    "classification": "claim_provenance",
+                    "claim_type": "offer",
+                    "claim_source": "owner_provided_campaign_input",
+                    "claim_value": authorized_offer,
+                }
+            ],
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        strategy_values = _creative_strategy()
+        strategy_values.update({"offer": None, "claim_source": "none"})
+        execution = SimpleNamespace(
+            provider_metadata=SimpleNamespace(
+                provider_request_id="req-creative-long-context",
+            ),
+            output=CreativeStrategyProposal.model_validate(strategy_values),
+        )
+
+        with patch(
+            "app.services.marketing._execute_creative_strategy",
+            new=AsyncMock(return_value=execution),
+        ) as runtime:
+            asset = await create_creative_brief(
+                _ScalarSession([content]),
+                business_id=BUSINESS_ID,
+                actor_user_id=USER_ID,
+                data=CreativeBriefCreate(
+                    content_id=content.id,
+                    asset_type="social_square",
+                    instructions=owner_instructions,
+                    aspect_ratio="1:1",
+                ),
+                provider=SimpleNamespace(),
+            )
+
+        task = runtime.await_args.args[2]
+        self.assertEqual(asset.generation_status, "brief_ready")
+        self.assertLessEqual(len(task), _CREATIVE_STRATEGY_TASK_BUDGET)
+        self.assertLessEqual(
+            len(task) + _CREATIVE_STRATEGY_RUNTIME_RULE_MARGIN,
+            MAX_AGENT_TASK_LENGTH,
+        )
+        self.assertIn("GROUNDING RULES:", task)
+        self.assertIn(
+            "Only the server-classified offer above may be used as an offer.",
+            task,
+        )
+        self.assertIn("Never invent testimonials", task)
+        self.assertIn("MARKETING + PR STANDARD:", task)
+        self.assertIn("OUTPUT CONTRACT:", task)
+        self.assertIn("Return exactly one CreativeStrategyProposal", task)
+        self.assertIn("Never include hidden reasoning or chain-of-thought.", task)
+        self.assertIn(f"- Offer: {authorized_offer}", task)
+        self.assertIn("- Channel: instagram", task)
+        self.assertIn("- Content type: social_post", task)
+        self.assertIn("- Title: Critical launch title", task)
+        self.assertIn("Requested asset type: social_square", task)
+        self.assertIn("Requested aspect ratio: 1:1", task)
+        self.assertIn(
+            "Build a premium launch around trusted business automation.",
+            task,
+        )
+        self.assertNotIn(owner_instructions, task)
+        self.assertNotIn(content.body, task)
+        self.assertNotIn(content.creative_brief, task)
+        self.assertIn("…", task)
+        self.assertEqual(
+            runtime.await_args.kwargs["expected_channel"],
+            "instagram",
+        )
+        strategy = json.loads(asset.visual_direction)
+        self.assertEqual(strategy["offer"], authorized_offer)
+        self.assertEqual(
+            strategy["claim_source"],
+            "owner_provided_campaign_input",
+        )
+
+    async def test_creative_strategy_request_validation_maps_to_marketing_ai_error(self) -> None:
+        provider = SimpleNamespace(provider_name="test")
+
+        with patch(
+            "app.services.marketing.execute_ai_agent_typed_with_metadata",
+            new=AsyncMock(),
+        ) as runtime:
+            with self.assertRaises(MarketingAIError):
+                await _execute_creative_strategy(
+                    SimpleNamespace(),
+                    BUSINESS_ID,
+                    "x" * (MAX_AGENT_TASK_LENGTH + 1),
+                    provider,
+                    expected_channel="instagram",
+                )
+
+        runtime.assert_not_awaited()
 
 
     async def test_creative_intelligence_rejects_wrong_content_channel(self) -> None:
