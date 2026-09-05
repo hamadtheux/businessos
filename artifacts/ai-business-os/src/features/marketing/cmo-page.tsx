@@ -3,11 +3,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, BarChart3, Calendar, Check, Globe2, RefreshCw, Sparkles, Target, TrendingUp, Wand2, WandSparkles, X } from "lucide-react";
 import { useBusiness } from "@/business-context";
 import { Badge, Button, Card, Modal, PageHeader, SectionTitle, WorkspaceDrawer } from "@/components/product-ui";
+import { CmoContentGeneratorDrawer } from "@/features/marketing/cmo-content-generator-drawer";
 import { CmoContentStudioCard } from "@/features/marketing/cmo-content-studio";
 import { CmoDepartmentNav } from "@/features/marketing/marketing-pages";
 import {
-  AUDIENCE_GUIDANCE_MAX,
-  OWNER_GOAL_MAX,
   channelGenerationNotice,
   createCreativeWithRecovery,
   creativeFormatForContent,
@@ -20,7 +19,7 @@ import {
 } from "@/lib/cmo-ux";
 import { businessDateRange } from "@/lib/operational-dates";
 import { humanizeApiError } from "@/services/api-client";
-import type { CreativeAsset, MarketingChannel, MarketingContent, MarketingContentType } from "@/services/api-types";
+import type { CreativeAsset, MarketingChannel, MarketingContent } from "@/services/api-types";
 import { marketingApi } from "@/services/marketing";
 
 function Kpi({ title, value, foot, icon, tone }: { title: string; value: string; foot: string; icon: ReactNode; tone: string }) {
@@ -28,27 +27,48 @@ function Kpi({ title, value, foot, icon, tone }: { title: string; value: string;
 }
 
 const channels: MarketingChannel[] = ["instagram", "facebook", "linkedin", "tiktok", "email", "whatsapp", "website", "meta", "google_ads"];
-const contentTypes: MarketingContentType[] = ["social_post", "ad_copy", "email_draft", "whatsapp_draft", "blog_draft", "landing_page_copy", "headline", "cta", "content_package"];
-const primaryPlatforms: MarketingChannel[] = ["instagram", "facebook", "linkedin", "tiktok"];
 const channelLabels: Record<MarketingChannel, string> = {
-  meta: "Meta",
-  google_ads: "Google Ads",
-  instagram: "Instagram",
-  facebook: "Facebook",
-  linkedin: "LinkedIn",
-  tiktok: "TikTok",
-  email: "Email",
-  whatsapp: "WhatsApp",
-  website: "Website",
-  other: "Other",
+  meta: "Meta", google_ads: "Google Ads", instagram: "Instagram",
+  facebook: "Facebook", linkedin: "LinkedIn", tiktok: "TikTok",
+  email: "Email", whatsapp: "WhatsApp", website: "Website", other: "Other",
 };
 
 function channelLabel(channel: MarketingChannel) {
   return channelLabels[channel];
 }
 
+type ScheduleContentValues = {
+  contentId: string;
+  scheduledFor: string;
+};
+
+type GeneratePlanValues = {
+  goal: string;
+  title: string | null;
+  target_audience: string;
+  channels: MarketingChannel[];
+  budget_guidance: string | null;
+  period_start: string | null;
+  period_end: string | null;
+};
+
+type UpdatePlanValues = {
+  planId: string;
+  title: string;
+  objective: string;
+  target_audience: string;
+  positioning: string;
+  key_message: string;
+  offer: string | null;
+  content_strategy: string | null;
+  measurement_goals: string[];
+};
+
 export function CmoPage() {
   const { activeBusinessId, activeBusiness } = useBusiness();
+  const canAuthorizeOffer = ["owner", "admin"].includes(
+    activeBusiness?.membershipRole ?? "",
+  );
   const queryClient = useQueryClient();
   const activeTab = new URLSearchParams(window.location.search).get("tab") ?? "Overview";
   const [showContentGenerator, setShowContentGenerator] = useState(false);
@@ -121,57 +141,24 @@ export function CmoPage() {
     onError: (reason) => setError(humanizeApiError(reason, "AI content generation could not be completed.")),
     onSettled: () => refresh(),
   });
-  const submitGenerateContent = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const selected = form.getAll("platforms").map(String) as MarketingChannel[];
-    const additional = String(form.get("additional_channel") || "") as MarketingChannel;
-    if (additional) selected.push(additional);
-
-    generateContent.mutate({
-      channels: [...new Set(selected)],
-      goal: String(form.get("prompt") || "").trim(),
-      audience: String(form.get("audience") || "").trim(),
-      contentType: String(form.get("content_type") || "social_post") as MarketingContentType,
-      campaignId: String(form.get("campaign_id")) || null,
-      title: String(form.get("title")) || null,
-      language: String(form.get("language") || "en"),
-    });
-  };
   const editContent = useMutation({
-    mutationFn: (event: FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-
-      if (!editingContent) {
-        throw new Error("Choose content to edit.");
-      }
-
-      const form = new FormData(event.currentTarget);
-      const title = String(form.get("title") || "").trim();
-      const body = String(form.get("body") || "").trim();
-      const cta = String(form.get("cta") || "").trim();
-
-      if (!title || !body) {
-        throw new Error("Title and content are required.");
-      }
-
-      return marketingApi.content.edit(
-        activeBusinessId,
-        editingContent.id,
-        {
-          title,
-          body,
-          cta: cta || null,
-        },
-      );
-    },
-    onSuccess: (item) => {
+    mutationFn: (values: {
+      contentId: string;
+      title: string;
+      body: string;
+      cta: string | null;
+    }) => marketingApi.content.edit(activeBusinessId, values.contentId, {
+      title: values.title,
+      body: values.body,
+      cta: values.cta,
+    }),
+    onSuccess: async (item) => {
       setEditingContent(null);
       setNotice(
         `Version ${item.version} was saved as a manual revision. Previous versions remain unchanged.`,
       );
       setError("");
-      void refresh();
+      await refresh();
     },
     onError: (reason) =>
       setError(
@@ -181,6 +168,28 @@ export function CmoPage() {
         ),
       ),
   });
+  const submitContentEdit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!editingContent) {
+      setError("Choose content to edit.");
+      return;
+    }
+    const form = new FormData(event.currentTarget);
+    const title = String(form.get("title") || "").trim();
+    const body = String(form.get("body") || "").trim();
+    const cta = String(form.get("cta") || "").trim();
+    if (!title || !body) {
+      setError("Title and content are required.");
+      return;
+    }
+    setError("");
+    editContent.mutate({
+      contentId: editingContent.id,
+      title,
+      body,
+      cta: cta || null,
+    });
+  };
 
   const regenerate = useMutation({
     mutationFn: (item: MarketingContent) => marketingApi.content.generate(activeBusinessId, { prompt: `Regenerate this approved marketing direction as a distinct, fact-grounded variant: ${item.body}`, channel: item.channel, content_type: item.content_type, campaign_id: item.campaign_id, title: item.title, language: item.language, parent_content_id: item.id }),
@@ -199,37 +208,98 @@ export function CmoPage() {
     onError: (reason) => setError(humanizeApiError(reason, "Content could not be approved.")),
   });
   const createSchedule = useMutation({
-    mutationFn: (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const value = new FormData(event.currentTarget).get("scheduled_for"); return marketingApi.calendar.create(activeBusinessId, schedule!.id, new Date(String(value)).toISOString()); },
+    mutationFn: (values: ScheduleContentValues) =>
+      marketingApi.calendar.create(
+        activeBusinessId,
+        values.contentId,
+        values.scheduledFor,
+      ),
     onSuccess: () => { setSchedule(null); setNotice("Content was added to the internal calendar. External connection is still required to publish."); setError(""); void refresh(); },
     onError: (reason) => setError(humanizeApiError(reason, "Content could not be scheduled. Approve it first.")),
   });
+  const submitSchedule = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!schedule) {
+      setError("Choose content to schedule.");
+      return;
+    }
+    const form = new FormData(event.currentTarget);
+    const scheduledValue = String(form.get("scheduled_for") || "").trim();
+    const scheduledDate = new Date(scheduledValue);
+    if (!scheduledValue || Number.isNaN(scheduledDate.getTime())) {
+      setError("Choose a valid date and time.");
+      return;
+    }
+    setError("");
+    createSchedule.mutate({
+      contentId: schedule.id,
+      scheduledFor: scheduledDate.toISOString(),
+    });
+  };
   const generatePlan = useMutation({
-    mutationFn: (event: FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-      const form = new FormData(event.currentTarget);
-      const selected = form.getAll("channels").map(String) as MarketingChannel[];
-      if (!selected.length) throw new Error("Choose at least one channel.");
-      return marketingApi.plans.generate(activeBusinessId, { goal: String(form.get("goal")), title: String(form.get("title")) || null, target_audience: String(form.get("audience")), channels: selected, budget_guidance: String(form.get("budget")) || null, period_start: String(form.get("period_start")) || null, period_end: String(form.get("period_end")) || null });
-    },
+    mutationFn: (values: GeneratePlanValues) =>
+      marketingApi.plans.generate(activeBusinessId, values),
     onSuccess: (plan) => { setShowPlanGenerator(false); setNotice(`AI CMO plan “${plan.title}” is ready for review.`); setError(""); void refresh(); },
     onError: (reason) => setError(humanizeApiError(reason, "AI CMO strategy generation could not be completed.")),
   });
+  const submitGeneratePlan = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const selected = form.getAll("channels").map(String) as MarketingChannel[];
+    if (!selected.length) {
+      setError("Choose at least one channel.");
+      return;
+    }
+    setError("");
+    generatePlan.mutate({
+      goal: String(form.get("goal")),
+      title: String(form.get("title")) || null,
+      target_audience: String(form.get("audience")),
+      channels: selected,
+      budget_guidance: String(form.get("budget")) || null,
+      period_start: String(form.get("period_start")) || null,
+      period_end: String(form.get("period_end")) || null,
+    });
+  };
   const updatePlan = useMutation({
-    mutationFn: (event: FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-      const current = plans.data!.items[0];
-      const form = new FormData(event.currentTarget);
-      return marketingApi.plans.update(activeBusinessId, current.id, {
-        title: String(form.get("title")), objective: String(form.get("objective")),
-        target_audience: String(form.get("target_audience")), positioning: String(form.get("positioning")),
-        key_message: String(form.get("key_message")), offer: String(form.get("offer")) || null,
-        content_strategy: String(form.get("content_strategy")) || null,
-        measurement_goals: String(form.get("measurement_goals") || "").split("\n").map((item) => item.trim()).filter(Boolean),
-      });
-    },
+    mutationFn: (values: UpdatePlanValues) =>
+      marketingApi.plans.update(activeBusinessId, values.planId, {
+        title: values.title,
+        objective: values.objective,
+        target_audience: values.target_audience,
+        positioning: values.positioning,
+        key_message: values.key_message,
+        offer: values.offer,
+        content_strategy: values.content_strategy,
+        measurement_goals: values.measurement_goals,
+      }),
     onSuccess: () => { setEditingPlan(false); setNotice("Marketing plan changes were saved."); setError(""); void refresh(); },
     onError: (reason) => setError(humanizeApiError(reason, "Marketing plan could not be updated.")),
   });
+  const submitUpdatePlan = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const current = plans.data?.items[0];
+    if (!current) {
+      setError("Choose a marketing plan to update.");
+      return;
+    }
+    const form = new FormData(event.currentTarget);
+    setError("");
+    updatePlan.mutate({
+      planId: current.id,
+      title: String(form.get("title")),
+      objective: String(form.get("objective")),
+      target_audience: String(form.get("target_audience")),
+      positioning: String(form.get("positioning")),
+      key_message: String(form.get("key_message")),
+      offer: String(form.get("offer")) || null,
+      content_strategy: String(form.get("content_strategy")) || null,
+      measurement_goals: String(form.get("measurement_goals") || "")
+        .split("\n")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    });
+  };
   const movePlan = useMutation({
     mutationFn: (status: "active" | "completed" | "archived") => marketingApi.plans.status(activeBusinessId, plans.data!.items[0].id, status),
     onSuccess: (plan) => { setNotice(`Marketing plan is now ${plan.status}.`); setError(""); void refresh(); },
@@ -375,284 +445,22 @@ export function CmoPage() {
         />
         <Card><SectionTitle title="Content calendar" action={<Badge>{calendar.data?.length ?? 0} upcoming</Badge>} />{calendar.isError ? <div className="empty"><AlertCircle /><h3>Calendar could not load</h3><p>{humanizeApiError(calendar.error, "Retry the internal calendar.")}</p><Button onClick={() => void calendar.refetch()}>Retry calendar</Button></div> : calendar.isLoading ? <div className="empty"><RefreshCw className="spin" /><p>Loading calendar…</p></div> : <>{calendar.data?.slice(0, 8).map((item) => { const contentItem = content.data?.items.find((value) => value.id === item.content_id); return <div className="list-row" key={item.id}><div style={{ width: 86, color: "#938c83", fontSize: 10 }}>{new Date(item.scheduled_for).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}</div><div className="row-main"><div className="row-title">{contentItem?.title || `${item.channel} content`}</div><div className="row-copy">{new Date(item.scheduled_for).toLocaleTimeString()} · {item.timezone}</div></div><Badge tone="success">{item.status.replaceAll("_", " ")}</Badge></div>; })}{!calendar.data?.length && <div className="empty"><Calendar /><h3>No content scheduled</h3><p>Approved content can be added to the internal calendar without a publishing provider.</p></div>}</>}</Card></div>
     </>}
-    <WorkspaceDrawer
-        open={showContentGenerator}
-        eyebrow="AI CMO"
-        title="Create campaign content"
-        description="Share the goal in plain language. 9D Brain handles the marketing strategy, copy, and channel adaptation."
-        onClose={() => setShowContentGenerator(false)}
-        closeDisabled={generateContent.isPending}
-        testId="cmo-content-workspace-drawer"
-        footer={
-          <div className="cmo-drawer-footer-actions">
-            <Button
-              type="button"
-              disabled={generateContent.isPending}
-              onClick={() => {
-                setShowContentGenerator(false);
-                setError("");
-              }}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="primary"
-              type="submit"
-              form="cmo-content-generator-form"
-              disabled={generateContent.isPending}
-            >
-              {generateContent.isPending ? (
-                <>
-                  <RefreshCw className="spin" />
-                  Creating draft…
-                </>
-              ) : (
-                <>
-                  <Sparkles />
-                  Create campaign content
-                </>
-              )}
-            </Button>
-          </div>
-        }
-      >
-        <form
-          id="cmo-content-generator-form"
-          className="cmo-drawer-form"
-          onSubmit={submitGenerateContent}
-        >
-          <div className="cmo-drawer-intro">
-            <div>
-              <div className="eyebrow">Grounded generation</div>
-              <h3>
-                {activeBusiness?.name
-                  ? `Create for ${activeBusiness.name}`
-                  : "Create marketing content"}
-              </h3>
-              <p>
-                AI CMO uses trusted Business Brain context and permitted memory.
-                Industry privacy rules remain enforced automatically.
-              </p>
-            </div>
-
-            <div className="chip-list">
-              <Badge tone="info">
-                <Sparkles />
-                AI CMO
-              </Badge>
-              <Badge tone="success">
-                <Check />
-                Review first
-              </Badge>
-            </div>
-          </div>
-
-          <section className="cmo-form-section" aria-labelledby="cmo-content-brief-heading">
-            <div className="cmo-form-section-heading">
-              <h3 id="cmo-content-brief-heading">Campaign brief</h3>
-              <p>Set the outcome and add audience guidance only when you need to.</p>
-            </div>
-            <div className="cmo-drawer-grid">
-            <div className="field full">
-              <label htmlFor="cmo-content-prompt">
-                What do you want to achieve?
-              </label>
-              <textarea
-                id="cmo-content-prompt"
-                name="prompt"
-                required
-                maxLength={OWNER_GOAL_MAX}
-                autoFocus
-                placeholder="Example: Promote our new shoes"
-                className="cmo-goal-input"
-              />
-              <span className="cmo-field-help">
-                A short request is enough. Only business facts supported by
-                trusted context will be used.
-              </span>
-            </div>
-
-            <div className="field full">
-              <label htmlFor="cmo-content-audience">
-                Audience <span className="cmo-optional">optional</span>
-              </label>
-              <input
-                id="cmo-content-audience"
-                name="audience"
-                maxLength={AUDIENCE_GUIDANCE_MAX}
-                placeholder="Let 9D Brain choose"
-              />
-            </div>
-            </div>
-          </section>
-
-          <section className="cmo-form-section" aria-labelledby="cmo-content-platforms-heading">
-            <div className="cmo-form-section-heading">
-              <h3 id="cmo-content-platforms-heading">Platforms</h3>
-              <p>Each selected platform receives its own native copy variant.</p>
-            </div>
-              <div className="cmo-channel-grid" aria-label="Campaign platforms">
-                {primaryPlatforms.map((channel) => (
-                  <label className="cmo-channel-option" key={channel}>
-                    <input
-                      type="checkbox"
-                      name="platforms"
-                      value={channel}
-                      defaultChecked={channel === "instagram"}
-                    />
-                    <span>{channelLabel(channel)}</span>
-                  </label>
-                ))}
-              </div>
-          </section>
-
-            <details
-              className="cmo-advanced-controls"
-            >
-              <summary>
-                Advanced controls
-              </summary>
-              <div className="cmo-drawer-grid">
-
-            <div className="field">
-              <label htmlFor="cmo-content-campaign">Campaign</label>
-              <select
-                id="cmo-content-campaign"
-                name="campaign_id"
-                disabled={campaigns.isLoading}
-                defaultValue=""
-              >
-                <option value="">
-                  {campaigns.isLoading
-                    ? "Loading campaigns…"
-                    : "Standalone content"}
-                </option>
-                {campaigns.data?.items.map((campaign) => (
-                  <option value={campaign.id} key={campaign.id}>
-                    {campaign.name}
-                  </option>
-                ))}
-              </select>
-              <span className="cmo-field-help">
-                Optional campaign context
-              </span>
-            </div>
-
-            <div className="field">
-              <label htmlFor="cmo-content-channel">Additional channel</label>
-              <select
-                id="cmo-content-channel"
-                name="additional_channel"
-                defaultValue=""
-              >
-                <option value="">None</option>
-                {channels.map((channel) => (
-                  <option key={channel} value={channel}>
-                    {channelLabel(channel)}
-                  </option>
-                ))}
-              </select>
-              <span className="cmo-field-help">
-                Email, website, ads, and other supported formats remain available
-              </span>
-            </div>
-
-            <div className="field">
-              <label htmlFor="cmo-content-type">Content type</label>
-              <select
-                id="cmo-content-type"
-                name="content_type"
-                defaultValue="social_post"
-              >
-                {contentTypes.map((type) => (
-                  <option key={type} value={type}>
-                    {type.replaceAll("_", " ")}
-                  </option>
-                ))}
-              </select>
-              <span className="cmo-field-help">
-                Choose the format you need
-              </span>
-            </div>
-
-            <div className="field">
-              <label htmlFor="cmo-content-language">Language</label>
-              <input
-                id="cmo-content-language"
-                name="language"
-                defaultValue={activeBusiness?.locale || "en"}
-                maxLength={16}
-                spellCheck={false}
-              />
-              <span className="cmo-field-help">
-                Uses your business locale by default
-              </span>
-            </div>
-
-            <div className="field full">
-              <label htmlFor="cmo-content-title">
-                Title override
-                <span className="cmo-optional">
-                  optional
-                </span>
-              </label>
-              <input
-                id="cmo-content-title"
-                name="title"
-                maxLength={180}
-                placeholder="Leave blank and let AI CMO create the title"
-              />
-            </div>
-              </div>
-            </details>
-
-          <div className="cmo-assurance-grid">
-            <div className="cmo-assurance-item">
-              <div className="cmo-assurance-title">
-                <Check size={13} />
-                Business Brain
-              </div>
-              <p>
-                Uses trusted business facts and branding available to the CMO.
-              </p>
-            </div>
-
-            <div className="cmo-assurance-item">
-              <div className="cmo-assurance-title">
-                <Target size={13} />
-                Campaign aware
-              </div>
-              <p>
-                Selected campaign objectives and authorized offers are considered.
-              </p>
-            </div>
-
-            <div className="cmo-assurance-item">
-              <div className="cmo-assurance-title">
-                <AlertCircle size={13} />
-                Approval protected
-              </div>
-              <p>
-                Generation creates a draft only. Nothing is published automatically.
-              </p>
-            </div>
-          </div>
-
-          {campaigns.isError && (
-            <div className="ai-banner warning">
-              <AlertCircle />
-              Campaigns could not load. You can still create standalone content.
-            </div>
-          )}
-
-          {error && (
-            <p className="form-error">
-              {error}
-            </p>
-          )}
-
-        </form>
-      </WorkspaceDrawer>
+    <CmoContentGeneratorDrawer
+      open={showContentGenerator}
+      canAuthorizeOffer={canAuthorizeOffer}
+      businessName={activeBusiness?.name}
+      businessLocale={activeBusiness?.locale}
+      campaigns={campaigns.data?.items}
+      campaignsLoading={campaigns.isLoading}
+      campaignsError={campaigns.isError}
+      pending={generateContent.isPending}
+      error={error}
+      onClose={() => {
+        setShowContentGenerator(false);
+        setError("");
+      }}
+      onSubmit={(input) => generateContent.mutate(input)}
+    />
     {editingContent && (
       <Modal
         wide
@@ -663,7 +471,7 @@ export function CmoPage() {
           setError("");
         }}
       >
-        <form onSubmit={(event) => editContent.mutate(event)}>
+        <form onSubmit={submitContentEdit}>
           <div
             className="ai-banner"
             style={{ marginBottom: 18 }}
@@ -977,7 +785,7 @@ export function CmoPage() {
         <form
           id="cmo-strategy-generator-form"
           className="cmo-drawer-form"
-          onSubmit={(event) => generatePlan.mutate(event)}
+          onSubmit={submitGeneratePlan}
         >
           <div className="ai-banner">
             <Sparkles />
@@ -1082,8 +890,8 @@ export function CmoPage() {
           {error && <p className="form-error">{error}</p>}
         </form>
       </WorkspaceDrawer>
-    {editingPlan && plans.data?.items[0] && <Modal wide title="Review marketing plan" description="Edit the usable AI conclusions before activating the strategy." onClose={() => setEditingPlan(false)}><form onSubmit={(event) => updatePlan.mutate(event)}><div className="form-grid"><div className="field full"><label>Title</label><input name="title" required defaultValue={plans.data.items[0].title} /></div><div className="field full"><label>Objective</label><textarea name="objective" required maxLength={1000} defaultValue={plans.data.items[0].objective} /></div><div className="field full"><label>Target audience</label><textarea name="target_audience" required maxLength={2000} defaultValue={plans.data.items[0].target_audience} /></div><div className="field full"><label>Positioning</label><textarea name="positioning" required maxLength={3000} defaultValue={plans.data.items[0].positioning} /></div><div className="field full"><label>Key message</label><textarea name="key_message" required maxLength={3000} defaultValue={plans.data.items[0].key_message} /></div><div className="field full"><label>Offer</label><textarea name="offer" maxLength={2000} defaultValue={plans.data.items[0].offer || ""} /></div><div className="field full"><label>Content strategy</label><textarea name="content_strategy" maxLength={5000} defaultValue={plans.data.items[0].content_strategy || ""} /></div><div className="field full"><label>Measurement goals (one per line)</label><textarea name="measurement_goals" defaultValue={plans.data.items[0].measurement_goals.join("\n")} /></div></div><div className="modal-foot"><Button type="button" onClick={() => setEditingPlan(false)}>Cancel</Button><Button variant="primary" type="submit" disabled={updatePlan.isPending}>{updatePlan.isPending ? "Saving…" : "Save reviewed plan"}</Button></div></form></Modal>}
-    {schedule && <Modal title="Schedule content" description="Creates an internal calendar item; no social platform is contacted." onClose={() => setSchedule(null)}><form onSubmit={(event) => createSchedule.mutate(event)}><div className="field"><label>Date and time</label><input name="scheduled_for" type="datetime-local" required /></div><div className="modal-foot"><Button type="button" onClick={() => setSchedule(null)}>Cancel</Button><Button variant="primary" type="submit" disabled={createSchedule.isPending}><Calendar /> Schedule internally</Button></div></form></Modal>}
+    {editingPlan && plans.data?.items[0] && <Modal wide title="Review marketing plan" description="Edit the usable AI conclusions before activating the strategy." onClose={() => setEditingPlan(false)}><form onSubmit={submitUpdatePlan}><div className="form-grid"><div className="field full"><label>Title</label><input name="title" required defaultValue={plans.data.items[0].title} /></div><div className="field full"><label>Objective</label><textarea name="objective" required maxLength={1000} defaultValue={plans.data.items[0].objective} /></div><div className="field full"><label>Target audience</label><textarea name="target_audience" required maxLength={2000} defaultValue={plans.data.items[0].target_audience} /></div><div className="field full"><label>Positioning</label><textarea name="positioning" required maxLength={3000} defaultValue={plans.data.items[0].positioning} /></div><div className="field full"><label>Key message</label><textarea name="key_message" required maxLength={3000} defaultValue={plans.data.items[0].key_message} /></div><div className="field full"><label>Offer</label><textarea name="offer" maxLength={2000} defaultValue={plans.data.items[0].offer || ""} /></div><div className="field full"><label>Content strategy</label><textarea name="content_strategy" maxLength={5000} defaultValue={plans.data.items[0].content_strategy || ""} /></div><div className="field full"><label>Measurement goals (one per line)</label><textarea name="measurement_goals" defaultValue={plans.data.items[0].measurement_goals.join("\n")} /></div></div><div className="modal-foot"><Button type="button" onClick={() => setEditingPlan(false)}>Cancel</Button><Button variant="primary" type="submit" disabled={updatePlan.isPending}>{updatePlan.isPending ? "Saving…" : "Save reviewed plan"}</Button></div></form></Modal>}
+    {schedule && <Modal title="Schedule content" description="Creates an internal calendar item; no social platform is contacted." onClose={() => setSchedule(null)}><form onSubmit={submitSchedule}><div className="field"><label>Date and time</label><input name="scheduled_for" type="datetime-local" required /></div><div className="modal-foot"><Button type="button" onClick={() => setSchedule(null)}>Cancel</Button><Button variant="primary" type="submit" disabled={createSchedule.isPending}><Calendar /> Schedule internally</Button></div></form></Modal>}
   </>;
 }
 

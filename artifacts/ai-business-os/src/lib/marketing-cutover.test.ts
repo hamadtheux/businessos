@@ -154,12 +154,13 @@ test("creative briefing, generation, and regeneration use tenant-scoped POST end
 });
 
 test("CMO creative studio exposes honest visual lifecycle states and immutable regeneration", async () => {
-  const [panel, studio, page, social, helpers] = await Promise.all([
+  const [panel, studio, page, social, helpers, contentDrawer] = await Promise.all([
     readFile(new URL("../features/marketing/cmo-creative-panel.tsx", import.meta.url), "utf8"),
     readFile(new URL("../features/marketing/cmo-content-studio.tsx", import.meta.url), "utf8"),
     readFile(new URL("../features/marketing/cmo-page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../features/marketing/marketing-pages.tsx", import.meta.url), "utf8"),
     readFile(new URL("./cmo-ux.ts", import.meta.url), "utf8"),
+    readFile(new URL("../features/marketing/cmo-content-generator-drawer.tsx", import.meta.url), "utf8"),
   ]);
 
   for (const state of [
@@ -199,10 +200,10 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
   assert.match(studio, /creatives=\{creatives\}/);
   assert.match(page, /Saving creates a new immutable version/);
   assert.doesNotMatch(page, /editingContent\.version \+ 1/);
-  assert.match(page, /primaryPlatforms/);
+  assert.match(contentDrawer, /primaryPlatforms/);
   assert.match(page, /generateCampaignChannelDrafts/);
-  assert.match(page, /maxLength=\{OWNER_GOAL_MAX\}/);
-  assert.match(page, /maxLength=\{AUDIENCE_GUIDANCE_MAX\}/);
+  assert.match(contentDrawer, /maxLength=\{OWNER_GOAL_MAX\}/);
+  assert.match(contentDrawer, /maxLength=\{AUDIENCE_GUIDANCE_MAX\}/);
   assert.doesNotMatch(page, /Promise\.all\(selectedChannels\.map/);
   assert.match(page, /createCreativeWithRecovery/);
   assert.match(page, /runCreativeOperationWithRecovery/);
@@ -354,6 +355,25 @@ test("AI CMO content details use a governed right-side post workspace", async ()
   assert.match(editSubmit, /event\.preventDefault\(\)/);
   assert.match(editSubmit, /contentId: selected\.id/);
 
+  const scheduleBlock = social.slice(
+    social.indexOf("const createSchedule = useMutation", social.indexOf("export function SocialManagementPage")),
+    social.indexOf("const reschedule = useMutation", social.indexOf("export function SocialManagementPage")),
+  );
+  const scheduleMutation = scheduleBlock.slice(0, scheduleBlock.indexOf("const submitSchedule"));
+  const scheduleSubmit = scheduleBlock.slice(scheduleBlock.indexOf("const submitSchedule"));
+  assert.match(scheduleMutation, /mutationFn: \(values: ContentScheduleFormValues\)/);
+  assert.match(scheduleMutation, /values\.contentId/);
+  assert.match(scheduleMutation, /values\.scheduledFor/);
+  assert.doesNotMatch(scheduleMutation, /FormEvent|FormData|currentTarget|preventDefault/);
+  assert.match(scheduleSubmit, /event\.preventDefault\(\)/);
+  assert.match(scheduleSubmit, /const form = new FormData\(event\.currentTarget\)/);
+  assert.ok(scheduleSubmit.indexOf("new FormData(event.currentTarget)") < scheduleSubmit.indexOf("createSchedule.mutate({"));
+  assert.match(scheduleSubmit, /const scheduledValue = String\(form\.get\("scheduled_for"\)/);
+  assert.match(scheduleSubmit, /scheduledFor: scheduledDate\.toISOString\(\)/);
+  assert.match(scheduleSubmit, /contentId: schedule\.id/);
+  assert.match(social, /<form onSubmit=\{submitSchedule\}>/);
+  assert.doesNotMatch(social, /createSchedule\.mutate\(event\)/);
+
   const briefSubmit = social.slice(
     social.indexOf("const submitCreativeBrief"),
     social.indexOf("const SelectedPlatformIcon", social.indexOf("const submitCreativeBrief")),
@@ -409,10 +429,11 @@ test("AI CMO content details use a governed right-side post workspace", async ()
 });
 
 test("AI CMO creation flows use the accessible responsive workspace drawer", async () => {
-  const [page, studio, social, productUi, sheet, styles] = await Promise.all([
+  const [page, studio, social, contentDrawer, productUi, sheet, styles] = await Promise.all([
     readFile(new URL("../features/marketing/cmo-page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../features/marketing/cmo-content-studio.tsx", import.meta.url), "utf8"),
     readFile(new URL("../features/marketing/marketing-pages.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../features/marketing/cmo-content-generator-drawer.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/product-ui.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/ui/sheet.tsx", import.meta.url), "utf8"),
     readFile(new URL("../index.css", import.meta.url), "utf8"),
@@ -490,35 +511,85 @@ test("AI CMO creation flows use the accessible responsive workspace drawer", asy
   assert.match(page, /goal: String\(form\.get\("goal"\)\)/);
   assert.match(page, /target_audience: String\(form\.get\("audience"\)\)/);
 
-  const contentOpen = page.indexOf("open={showContentGenerator}");
-  const contentStart = page.lastIndexOf("<WorkspaceDrawer", contentOpen);
-  const contentEnd = page.indexOf("{editingContent", contentStart);
-  const contentDrawer = page.slice(contentStart, contentEnd);
+  const pageScheduleBlock = page.slice(
+    page.indexOf("const createSchedule = useMutation"),
+    page.indexOf("const generatePlan = useMutation"),
+  );
+  const pageScheduleMutation = pageScheduleBlock.slice(
+    0,
+    pageScheduleBlock.indexOf("const submitSchedule"),
+  );
+  const pageScheduleSubmit = pageScheduleBlock.slice(
+    pageScheduleBlock.indexOf("const submitSchedule"),
+  );
+  assert.match(pageScheduleMutation, /mutationFn: \(values: ScheduleContentValues\)/);
+  assert.match(pageScheduleMutation, /values\.contentId/);
+  assert.match(pageScheduleMutation, /values\.scheduledFor/);
+  assert.doesNotMatch(pageScheduleMutation, /FormEvent|FormData|currentTarget|preventDefault/);
+  assert.match(pageScheduleSubmit, /const form = new FormData\(event\.currentTarget\)/);
+  assert.ok(pageScheduleSubmit.indexOf("new FormData(event.currentTarget)") < pageScheduleSubmit.indexOf("createSchedule.mutate({"));
+  assert.match(pageScheduleSubmit, /scheduledFor: scheduledDate\.toISOString\(\)/);
+  assert.match(page, /<form onSubmit=\{submitSchedule\}>/);
+
+  const generatePlanBlock = page.slice(
+    page.indexOf("const generatePlan = useMutation"),
+    page.indexOf("const updatePlan = useMutation"),
+  );
+  const generatePlanMutation = generatePlanBlock.slice(
+    0,
+    generatePlanBlock.indexOf("const submitGeneratePlan"),
+  );
+  const generatePlanSubmit = generatePlanBlock.slice(
+    generatePlanBlock.indexOf("const submitGeneratePlan"),
+  );
+  assert.match(generatePlanMutation, /mutationFn: \(values: GeneratePlanValues\)/);
+  assert.doesNotMatch(generatePlanMutation, /FormEvent|FormData|currentTarget|preventDefault/);
+  assert.match(generatePlanSubmit, /const form = new FormData\(event\.currentTarget\)/);
+  assert.ok(generatePlanSubmit.indexOf("new FormData(event.currentTarget)") < generatePlanSubmit.indexOf("generatePlan.mutate({"));
+  assert.match(generatePlanSubmit, /form\.getAll\("channels"\)\.map\(String\)/);
+  assert.match(generatePlanSubmit, /if \(!selected\.length\)/);
+  assert.match(generatePlanSubmit, /channels: selected/);
+  assert.match(page, /onSubmit=\{submitGeneratePlan\}/);
+
+  const updatePlanBlock = page.slice(
+    page.indexOf("const updatePlan = useMutation"),
+    page.indexOf("const movePlan = useMutation"),
+  );
+  const updatePlanMutation = updatePlanBlock.slice(
+    0,
+    updatePlanBlock.indexOf("const submitUpdatePlan"),
+  );
+  const updatePlanSubmit = updatePlanBlock.slice(
+    updatePlanBlock.indexOf("const submitUpdatePlan"),
+  );
+  assert.match(updatePlanMutation, /mutationFn: \(values: UpdatePlanValues\)/);
+  assert.match(updatePlanMutation, /values\.planId/);
+  assert.doesNotMatch(updatePlanMutation, /FormEvent|FormData|currentTarget|preventDefault/);
+  assert.match(updatePlanSubmit, /const form = new FormData\(event\.currentTarget\)/);
+  assert.ok(updatePlanSubmit.indexOf("new FormData(event.currentTarget)") < updatePlanSubmit.indexOf("updatePlan.mutate({"));
+  assert.match(updatePlanSubmit, /form\.get\("measurement_goals"\)/);
+  assert.match(updatePlanSubmit, /\.split\("\\n"\)[\s\S]*\.map\(\(item\) => item\.trim\(\)\)[\s\S]*\.filter\(Boolean\)/);
+  assert.match(page, /<form onSubmit=\{submitUpdatePlan\}>/);
+  assert.doesNotMatch(page, /(?:createSchedule|generatePlan|updatePlan)\.mutate\(event\)/);
+
   assert.match(contentDrawer, /<WorkspaceDrawer/);
   assert.doesNotMatch(contentDrawer, /<Modal/);
-  assert.match(contentDrawer, /open=\{showContentGenerator\}/);
+  assert.match(contentDrawer, /open=\{open\}/);
+  assert.match(page, /<CmoContentGeneratorDrawer[\s\S]*open=\{showContentGenerator\}/);
   assert.match(contentDrawer, /testId="cmo-content-workspace-drawer"/);
   assert.match(page, /generateCampaignChannelDrafts/);
   const generationHandler = page.slice(
     page.indexOf("const generateContent = useMutation"),
     page.indexOf("const editContent = useMutation"),
   );
-  const mutationHandler = generationHandler.slice(
-    0,
-    generationHandler.indexOf("const submitGenerateContent"),
-  );
-  const submitHandler = generationHandler.slice(
-    generationHandler.indexOf("const submitGenerateContent"),
-  );
+  const mutationHandler = generationHandler;
+  const submitHandler = contentDrawer.slice(contentDrawer.indexOf("const submit"));
   assert.match(mutationHandler, /mutationFn: \(input: CampaignGenerationInput\)/);
   assert.match(mutationHandler, /generateCampaignChannelDrafts\(\s*input,/);
   assert.doesNotMatch(mutationHandler, /FormEvent|FormData|currentTarget|preventDefault/);
   assert.match(submitHandler, /event\.preventDefault\(\)/);
   assert.match(submitHandler, /const form = new FormData\(event\.currentTarget\)/);
-  assert.ok(
-    submitHandler.indexOf("new FormData(event.currentTarget)") <
-      submitHandler.indexOf("generateContent.mutate({"),
-  );
+  assert.ok(submitHandler.indexOf("new FormData(event.currentTarget)") >= 0);
   assert.match(submitHandler, /form\.getAll\("platforms"\)/);
   assert.match(submitHandler, /form\.get\("additional_channel"\)/);
   assert.match(submitHandler, /channels: \[\.\.\.new Set\(selected\)\]/);
@@ -533,7 +604,7 @@ test("AI CMO creation flows use the accessible responsive workspace drawer", asy
     assert.match(submitHandler, new RegExp(`form\\.get\\("${field}"\\)`), field);
   }
   assert.match(contentDrawer, /value=\{channel\}\s+defaultChecked=\{channel === "instagram"\}/);
-  assert.match(contentDrawer, /onSubmit=\{submitGenerateContent\}/);
+  assert.match(contentDrawer, /onSubmit=\{submit\}/);
   assert.doesNotMatch(page, /generateContent\.mutate\(event\)/);
   assert.match(generationHandler, /channelGenerationNotice\(outcome\)/);
   assert.match(generationHandler, /if \(outcome\.successes\.length === 0\)/);
@@ -546,6 +617,26 @@ test("AI CMO creation flows use the accessible responsive workspace drawer", asy
   assert.match(generationHandler, /onSettled: \(\) => refresh\(\)/);
   assert.doesNotMatch(page, /\{showPlanGenerator && \(\s*<WorkspaceDrawer/);
   assert.doesNotMatch(page, /\{showContentGenerator && \(\s*<WorkspaceDrawer/);
+
+  const editMutation = page.slice(
+    page.indexOf("const editContent = useMutation"),
+    page.indexOf("const regenerate = useMutation"),
+  );
+  assert.match(editMutation, /mutationFn: \(values: \{/);
+  assert.match(editMutation, /marketingApi\.content\.edit\(activeBusinessId, values\.contentId/);
+  assert.match(editMutation, /title: values\.title/);
+  assert.match(editMutation, /body: values\.body/);
+  assert.match(editMutation, /cta: values\.cta/);
+  const editMutationSetup = editMutation.slice(0, editMutation.indexOf("const submitContentEdit"));
+  assert.doesNotMatch(editMutationSetup, /mutationFn: async \(event|new FormData\(event\.currentTarget\)/);
+  const editSubmit = editMutation.slice(editMutation.indexOf("const submitContentEdit"));
+  assert.match(editSubmit, /event\.preventDefault\(\)/);
+  assert.match(editSubmit, /const form = new FormData\(event\.currentTarget\)/);
+  assert.ok(editSubmit.indexOf("new FormData(event.currentTarget)") < editSubmit.indexOf("editContent.mutate({"));
+  assert.match(editSubmit, /cta: cta \|\| null/);
+  assert.match(editMutation, /onSuccess: async \(item\)/);
+  assert.match(editMutation, /setEditingContent\(null\)/);
+  assert.match(editMutation, /await refresh\(\)/);
 
   assert.match(productUi, /open: boolean/);
   assert.match(productUi, /<Sheet open=\{open\} modal/);
@@ -597,10 +688,36 @@ test("AI CMO creation flows use the accessible responsive workspace drawer", asy
   assert.match(page, /onClick=\{openStrategyDrawer\}/);
   assert.match(page, /onClick=\{openContentDrawer\}/);
 
-  assert.match(social, /button-advanced-create-draft/);
+  assert.match(social, /button-new-content/);
   assert.match(social, /cmo-compact-action/);
-  assert.match(social, /Create draft/);
-  assert.match(social, /Advanced/);
+  assert.match(social, /New content/);
+  assert.match(social, /setShowContentGenerator\(true\)/);
+  assert.match(social, /<CmoContentGeneratorDrawer/);
+  assert.match(page, /const canAuthorizeOffer = \["owner", "admin"\]\.includes\([\s\S]*activeBusiness\?\.membershipRole/);
+  assert.match(social, /const canAuthorizeOffer = \["owner", "admin"\]\.includes\([\s\S]*activeBusiness\?\.membershipRole/);
+  assert.match(page, /<CmoContentGeneratorDrawer[\s\S]*canAuthorizeOffer=\{canAuthorizeOffer\}/);
+  assert.match(social, /<CmoContentGeneratorDrawer[\s\S]*canAuthorizeOffer=\{canAuthorizeOffer\}/);
+  assert.match(contentDrawer, /canAuthorizeOffer: boolean/);
+  assert.match(contentDrawer, /disabled=\{!canAuthorizeOffer\}/);
+  assert.match(contentDrawer, /\{canAuthorizeOffer && \(/);
+  assert.match(contentDrawer, /Owner or administrator access is required to authorize a promotional offer\./);
+  assert.match(contentDrawer, /offer_authorized/);
+  assert.match(contentDrawer, /I confirm this offer is authorized for this business\./);
+  assert.doesNotMatch(contentDrawer, /business-owner|authenticated owner|owner campaign input/i);
+  assert.match(contentDrawer, /if \(offer && !offerAuthorized\)/);
+  assert.match(contentDrawer, /Confirm that this offer is authorized for this business\./);
+  assert.ok(submitHandler.indexOf("if (offer && !offerAuthorized)") < submitHandler.indexOf("onSubmit({"));
+
+  const socialGeneration = social.slice(
+    social.indexOf("const generateContent = useMutation", social.indexOf("export function SocialManagementPage")),
+    social.indexOf("const createSchedule = useMutation", social.indexOf("export function SocialManagementPage")),
+  );
+  assert.match(socialGeneration, /const first = outcome\.successes\[0\]/);
+  assert.match(socialGeneration, /if \(!first\)[\s\S]*return;/);
+  assert.match(socialGeneration, /setShowContentGenerator\(false\)/);
+  assert.match(socialGeneration, /setSelected\(first\)/);
+  assert.ok(socialGeneration.indexOf("if (!first)") < socialGeneration.indexOf("setSelected(first)"));
+  assert.ok(socialGeneration.indexOf("setShowContentGenerator(false)") < socialGeneration.indexOf("setSelected(first)"));
 });
 
 test("completed marketing screens contain no workspace or localStorage dependency", async () => {

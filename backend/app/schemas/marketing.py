@@ -318,6 +318,14 @@ class ContentGenerateRequest(MarketingSchema):
     title: str | None = Field(default=None, max_length=180)
     language: str = Field(default="en", pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$")
     parent_content_id: UUID | None = None
+    offer: str | None = Field(default=None, max_length=160)
+    offer_authorized: bool = False
+
+    @model_validator(mode="after")
+    def authorized_owner_offer_only(self) -> "ContentGenerateRequest":
+        if self.offer and not self.offer_authorized:
+            raise ValueError("An explicit content offer requires owner authorization")
+        return self
 
 
 class ScheduledContentProposal(MarketingSchema):
@@ -326,6 +334,7 @@ class ScheduledContentProposal(MarketingSchema):
     title: str = Field(min_length=1, max_length=180)
     body: str = Field(min_length=1, max_length=20000)
     cta: str | None = Field(default=None, max_length=300)
+    offer: str | None = Field(default=None, max_length=160)
     creative_brief: str | None = Field(default=None, max_length=5000)
     recommended_channel: Channel
     generation_reasoning: str = Field(min_length=1, max_length=3000)
@@ -413,6 +422,12 @@ class CreativeStrategyProposal(MarketingSchema):
     # separate prevents a numeric promotion from automatically becoming the
     # headline or the raw generated visual's hero.
     offer: str | None = Field(default=None, max_length=160)
+    claim_source: Literal[
+        "none",
+        "authoritative_business_context",
+        "owner_provided_campaign_input",
+        "ai_inferred_or_generated_claim",
+    ] = "none"
     cta: str | None = Field(default=None, max_length=300)
 
     visual_concept: str = Field(min_length=1, max_length=900)

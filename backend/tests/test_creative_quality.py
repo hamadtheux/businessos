@@ -218,6 +218,31 @@ class CreativeLayoutAndQualityTests(TestCase):
         self.assertFalse(assessment.approved_for_delivery)
         self.assertEqual(assessment.failure_kind, "layout")
 
+    def test_awkward_short_headline_wrap_is_a_layout_hard_failure(self) -> None:
+        result = _composition(_visual())
+        awkward = replace(
+            result.quality,
+            rendered_text={
+                **result.quality.rendered_text,
+                "headline": "Meet\n9D\nBrain.",
+            },
+            line_counts={**result.quality.line_counts, "headline": 3},
+            headline_wrap_quality=0,
+            headline_wrap_violations=(
+                "excessive_lines_for_short_headline",
+                "brand_or_product_name_split",
+            ),
+        )
+        assessment = assess_creative_quality(
+            replace(result, quality=awkward),
+            threshold=82,
+        )
+
+        self.assertFalse(assessment.approved_for_delivery)
+        self.assertEqual(assessment.failure_kind, "layout")
+        self.assertIn("unnatural_headline_wrapping", assessment.hard_failures)
+        self.assertLess(assessment.typography_quality, 60)
+
     def test_extreme_whitespace_requires_explicit_intent(self) -> None:
         result = _composition(_visual())
         extreme = replace(

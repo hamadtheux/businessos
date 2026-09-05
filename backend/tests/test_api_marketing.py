@@ -22,7 +22,7 @@ from app.api.v1.marketing import _mutate as marketing_mutate  # noqa: E402
 from app.db.session import get_db_session  # noqa: E402
 from app.exceptions.marketing import MarketingStateError  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models.marketing import Campaign, MarketingPlan  # noqa: E402
+from app.models.marketing import Campaign, MarketingContent, MarketingPlan  # noqa: E402
 from app.services.marketing import (  # noqa: E402
     _register_creative_storage_compensation,
 )
@@ -37,6 +37,7 @@ NOW = datetime(2026, 8, 23, 12, tzinfo=UTC)
 class MarketingApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.session = _FakeSession()
+        self.membership_role = "member"
         self.original = app.dependency_overrides.copy()
 
         async def override_session():
@@ -45,7 +46,7 @@ class MarketingApiTests(unittest.IsolatedAsyncioTestCase):
         async def override_access(business_id: UUID):
             if business_id != BUSINESS_ID:
                 raise HTTPException(404, "Business not found.")
-            return BusinessAccessContext(user=SimpleNamespace(id=USER_ID), business=SimpleNamespace(id=business_id, status="active", currency="USD", timezone="UTC"), membership=SimpleNamespace(business_id=business_id, user_id=USER_ID, status="active"))
+            return BusinessAccessContext(user=SimpleNamespace(id=USER_ID), business=SimpleNamespace(id=business_id, status="active", currency="USD", timezone="UTC"), membership=SimpleNamespace(business_id=business_id, user_id=USER_ID, status="active", role=self.membership_role))
 
         self.override_access = override_access
         app.dependency_overrides[get_db_session] = override_session
@@ -97,6 +98,215 @@ class MarketingApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertNotIn("private state", response.text)
         self.assertEqual(self.session.rollback_calls, 1)
+
+    async def test_content_version_passes_validated_fields_and_tenant_then_commits(self) -> None:
+        content_id = uuid4()
+        version = _content(
+            content_id=uuid4(),
+            parent_content_id=content_id,
+            root_content_id=content_id,
+            title="Revised title",
+            body="Revised body",
+            cta=None,
+            version=2,
+        )
+        with patch(
+            "app.api.v1.marketing.service.create_content_version",
+            new=AsyncMock(return_value=version),
+        ) as service:
+            response = await self.client.post(
+                self._url(f"content/{content_id}/versions"),
+                json={"title": "Revised title", "body": "Revised body", "cta": None},
+            )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["version"], 2)
+        self.assertEqual(response.json()["status"], "draft")
+        self.assertEqual(service.await_args.kwargs["business_id"], BUSINESS_ID)
+        self.assertEqual(service.await_args.kwargs["content_id"], content_id)
+        self.assertEqual(service.await_args.kwargs["actor_user_id"], USER_ID)
+        data = service.await_args.kwargs["data"]
+        self.assertEqual((data.title, data.body, data.cta), ("Revised title", "Revised body", None))
+        self.assertEqual(self.session.commit_calls, 1)
+        self.assertEqual(self.session.rollback_calls, 0)
+
+    async def test_content_version_persistence_failure_is_safe_and_rolls_back(self) -> None:
+        content_id = uuid4()
+        with patch(
+            "app.api.v1.marketing.service.create_content_version",
+            new=AsyncMock(side_effect=SQLAlchemyError("private persistence detail")),
+        ):
+            response = await self.client.post(
+                self._url(f"content/{content_id}/versions"),
+                json={"title": "Revised title", "body": "Revised body", "cta": "Review"},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn("private persistence detail", response.text)
+        self.assertEqual(self.session.commit_calls, 0)
+        self.assertEqual(self.session.rollback_calls, 1)
+
+    async def test_member_content_generation_without_offer_remains_allowed(self) -> None:
+        content = _content(
+            content_id=uuid4(),
+            parent_content_id=None,
+            root_content_id=uuid4(),
+            title="Generated title",
+            body="Generated body",
+            cta=None,
+            version=1,
+        )
+        with patch(
+            "app.api.v1.marketing.service.generate_content",
+            new=AsyncMock(return_value=content),
+        ) as service:
+            response = await self.client.post(
+                self._url("content/generate"),
+                json={
+                    "prompt": "Create an Instagram post",
+                    "channel": "instagram",
+                    "content_type": "social_post",
+                },
+            )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(service.await_args.kwargs["business_id"], BUSINESS_ID)
+        self.assertIsNone(service.await_args.kwargs["offer_authorization_role"])
+        self.assertEqual(self.session.commit_calls, 1)
+
+    async def test_member_cannot_forge_content_offer_authorization(self) -> None:
+        with patch(
+            "app.api.v1.marketing.service.generate_content",
+            new=AsyncMock(),
+        ) as service:
+            response = await self.client.post(
+                self._url("content/generate"),
+                json={
+                    "prompt": "Create an Instagram post",
+                    "channel": "instagram",
+                    "content_type": "social_post",
+                    "offer": "50% off",
+                    "offer_authorized": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"]["code"], "permission_missing")
+        service.assert_not_awaited()
+        self.assertEqual(self.session.commit_calls, 0)
+
+    async def test_owner_and_admin_can_attest_content_offer(self) -> None:
+        for role in ("owner", "admin"):
+            with self.subTest(role=role):
+                self.membership_role = role
+                self.session = _FakeSession()
+                content_id = uuid4()
+                content = _content(
+                    content_id=content_id,
+                    parent_content_id=None,
+                    root_content_id=content_id,
+                    title="Authorized offer",
+                    body="50% off",
+                    cta="Explore",
+                    version=1,
+                )
+                with patch(
+                    "app.api.v1.marketing.service.generate_content",
+                    new=AsyncMock(return_value=content),
+                ) as service:
+                    response = await self.client.post(
+                        self._url("content/generate"),
+                        json={
+                            "prompt": "Create an Instagram post",
+                            "channel": "instagram",
+                            "content_type": "social_post",
+                            "offer": "50% off",
+                            "offer_authorized": True,
+                        },
+                    )
+
+                self.assertEqual(response.status_code, 201)
+                self.assertEqual(
+                    service.await_args.kwargs["offer_authorization_role"],
+                    role,
+                )
+                self.assertEqual(self.session.commit_calls, 1)
+
+    async def test_owner_offer_without_attestation_remains_invalid(self) -> None:
+        self.membership_role = "owner"
+        with patch(
+            "app.api.v1.marketing.service.generate_content",
+            new=AsyncMock(),
+        ) as service:
+            response = await self.client.post(
+                self._url("content/generate"),
+                json={
+                    "prompt": "Create an Instagram post",
+                    "channel": "instagram",
+                    "content_type": "social_post",
+                    "offer": "50% off",
+                    "offer_authorized": False,
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        service.assert_not_awaited()
+
+    async def test_member_cannot_forge_campaign_offer_authorization(self) -> None:
+        with patch(
+            "app.api.v1.marketing.service.generate_campaign",
+            new=AsyncMock(),
+        ) as service:
+            response = await self.client.post(
+                self._url("campaigns/generate"),
+                json={
+                    "goal": "Promote the seasonal offer",
+                    "channels": ["instagram"],
+                    "offer": "50% off",
+                    "offer_authorized": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"]["code"], "permission_missing")
+        service.assert_not_awaited()
+        self.assertEqual(self.session.commit_calls, 0)
+
+    async def test_owner_and_admin_can_attest_campaign_offer(self) -> None:
+        for role in ("owner", "admin"):
+            with self.subTest(role=role):
+                self.membership_role = role
+                self.session = _FakeSession()
+                campaign = _campaign()
+                campaign.offer = "50% off"
+                campaign.offer_source = "owner_authorized"
+                campaign.offer_authorized = True
+                with (
+                    patch(
+                        "app.api.v1.marketing.service.generate_campaign",
+                        new=AsyncMock(return_value=campaign),
+                    ) as service,
+                    patch(
+                        "app.api.v1.marketing.service.campaign_detail",
+                        new=AsyncMock(return_value=_campaign_detail(campaign)),
+                    ),
+                ):
+                    response = await self.client.post(
+                        self._url("campaigns/generate"),
+                        json={
+                            "goal": "Promote the seasonal offer",
+                            "channels": ["instagram"],
+                            "offer": "50% off",
+                            "offer_authorized": True,
+                        },
+                    )
+
+                self.assertEqual(response.status_code, 201)
+                self.assertEqual(
+                    service.await_args.kwargs["offer_authorization_role"],
+                    role,
+                )
+                self.assertEqual(self.session.commit_calls, 1)
 
     async def test_performance_rejects_client_derived_metrics(self) -> None:
         payload = {"campaign_id": str(uuid4()), "channel": "instagram", "period_start": "2026-08-01", "period_end": "2026-08-07", "impressions": 100, "clicks": 10, "ctr": "10"}
@@ -266,5 +476,51 @@ def _campaign() -> Campaign:
     return Campaign(id=uuid4(), business_id=BUSINESS_ID, marketing_plan_id=None, audience_id=None, name="Summer", objective="Grow", description=None, offer=None, audience_definition="Customers", geographic_targeting=[], channels=["instagram"], start_date=None, end_date=None, planned_budget=Decimal("2000"), currency="USD", budget_mode="lifetime", status="draft", created_by_user_id=USER_ID, ai_generated=False, created_at=NOW, updated_at=NOW)
 
 
+def _campaign_detail(campaign: Campaign) -> dict[str, object]:
+    value = {
+        column.name: getattr(campaign, column.name)
+        for column in campaign.__table__.columns
+    }
+    value["channel_plans"] = []
+    value["catalog_item_ids"] = []
+    return value
+
+
 def _plan() -> MarketingPlan:
     return MarketingPlan(id=uuid4(), business_id=BUSINESS_ID, audience_id=None, title="Summer", objective="Grow", target_audience="Customers", positioning="Grounded", key_message="Quality", offer=None, channels=["instagram"], budget_guidance=Decimal("2000"), currency="USD", period_start=None, period_end=None, content_strategy="Useful content", measurement_goals=["Conversions"], status="ready", generated_by="ai", created_by_user_id=USER_ID, created_at=NOW, updated_at=NOW)
+
+
+def _content(
+    *,
+    content_id: UUID,
+    parent_content_id: UUID | None,
+    root_content_id: UUID,
+    title: str,
+    body: str,
+    cta: str | None,
+    version: int,
+) -> MarketingContent:
+    return MarketingContent(
+        id=content_id,
+        business_id=BUSINESS_ID,
+        campaign_id=None,
+        channel="instagram",
+        content_type="social_post",
+        title=title,
+        body=body,
+        cta=cta,
+        language="en",
+        status="draft",
+        ai_generated=False,
+        version=version,
+        parent_content_id=parent_content_id,
+        root_content_id=root_content_id,
+        created_by_user_id=USER_ID,
+        proposal_key=None,
+        creative_brief="Trusted brief",
+        generation_reasoning="Owner revision",
+        recommended_for="Instagram",
+        source_evidence=[],
+        created_at=NOW,
+        updated_at=NOW,
+    )

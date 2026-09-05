@@ -36,12 +36,16 @@ import {
 import {
   CmoCreativePanel,
 } from "@/features/marketing/cmo-creative-panel";
+import { CmoContentGeneratorDrawer } from "@/features/marketing/cmo-content-generator-drawer";
 import {
+  channelGenerationNotice,
   createCreativeWithRecovery,
   creativeFormatForContent,
   creativePhaseForDisplay,
   creativeResultNotice,
+  generateCampaignChannelDrafts,
   runCreativeOperationWithRecovery,
+  type CampaignGenerationInput,
   type CreativeProgress,
 } from "@/lib/cmo-ux";
 import { humanizeApiError } from "@/services/api-client";
@@ -161,10 +165,12 @@ function EmptyCard({
   icon,
   title,
   copy,
+  action,
 }: {
   icon: React.ReactNode;
   title: string;
   copy: string;
+  action?: React.ReactNode;
 }) {
   return (
     <Card>
@@ -172,6 +178,7 @@ function EmptyCard({
         {icon}
         <h3>{title}</h3>
         <p>{copy}</p>
+        {action}
       </div>
     </Card>
   );
@@ -1463,6 +1470,11 @@ type ContentVersionFormValues = {
   cta: string | null;
 };
 
+type ContentScheduleFormValues = {
+  contentId: string;
+  scheduledFor: string;
+};
+
 type CreativeBriefFormValues = {
   campaignId: string | null;
   contentId: string;
@@ -1476,10 +1488,14 @@ type CreativeBriefFormValues = {
 
 export function SocialManagementPage() {
   const [location] = useLocation();
-  const { activeBusinessId } = useBusiness();
+  const { activeBusinessId, activeBusiness } = useBusiness();
+  const canAuthorizeOffer = ["owner", "admin"].includes(
+    activeBusiness?.membershipRole ?? "",
+  );
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<MarketingContentStatus | "">("");
   const [selected, setSelected] = useState<MarketingContent | null>(null);
+  const [showContentGenerator, setShowContentGenerator] = useState(false);
   const [schedule, setSchedule] = useState<MarketingContent | null>(null);
   const [postWorkspaceMode, setPostWorkspaceMode] =
     useState<PostWorkspaceMode>("overview");
@@ -1632,16 +1648,48 @@ export function SocialManagementPage() {
         humanizeApiError(reason, "A new content version could not be saved."),
       ),
   });
-  const createSchedule = useMutation({
-    mutationFn: (event: FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-      const value = new FormData(event.currentTarget).get("scheduled_for");
-      return marketingApi.calendar.create(
-        activeBusinessId,
-        schedule!.id,
-        new Date(String(value)).toISOString(),
-      );
+  const generateContent = useMutation({
+    mutationFn: (input: CampaignGenerationInput) =>
+      generateCampaignChannelDrafts(
+        input,
+        (request) => marketingApi.content.generate(activeBusinessId, request),
+      ),
+    onSuccess: (outcome) => {
+      const first = outcome.successes[0];
+      if (!first) {
+        setNotice("");
+        setError(
+          humanizeApiError(
+            outcome.failures[0]?.reason,
+            "AI content generation could not be completed. No drafts were created.",
+          ),
+        );
+        return;
+      }
+      setShowContentGenerator(false);
+      setStatus("");
+      setPage(1);
+      setSelected(first);
+      setPostWorkspaceMode("overview");
+      setNotice(channelGenerationNotice(outcome) || "");
+      setError("");
+      void invalidate();
     },
+    onError: (reason) =>
+      setError(
+        humanizeApiError(
+          reason,
+          "AI content generation could not be completed. No draft was created.",
+        ),
+      ),
+  });
+  const createSchedule = useMutation({
+    mutationFn: (values: ContentScheduleFormValues) =>
+      marketingApi.calendar.create(
+        activeBusinessId,
+        values.contentId,
+        values.scheduledFor,
+      ),
     onSuccess: () => {
       setSchedule(null);
       setNotice(
@@ -1658,6 +1706,25 @@ export function SocialManagementPage() {
         ),
       ),
   });
+  const submitSchedule = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!schedule) {
+      setError("Choose content to schedule.");
+      return;
+    }
+    const form = new FormData(event.currentTarget);
+    const scheduledValue = String(form.get("scheduled_for") || "").trim();
+    const scheduledDate = new Date(scheduledValue);
+    if (!scheduledValue || Number.isNaN(scheduledDate.getTime())) {
+      setError("Choose a valid date and time.");
+      return;
+    }
+    setError("");
+    createSchedule.mutate({
+      contentId: schedule.id,
+      scheduledFor: scheduledDate.toISOString(),
+    });
+  };
   const reschedule = useMutation({
     mutationFn: ({ item, value }: { item: SocialSchedule; value: string }) =>
       marketingApi.calendar.reschedule(
@@ -2097,15 +2164,18 @@ export function SocialManagementPage() {
         subtitle="Review AI recommendations, upcoming drafts, approval state, calendar slots, and measured results."
         actionClassName="cmo-content-header-actions"
         action={
-          <Link
-            href="/marketing/content"
-            className="btn btn-secondary cmo-compact-action"
-            data-testid="button-advanced-create-draft"
+          <Button
+            variant="primary"
+            className="cmo-compact-action"
+            data-testid="button-new-content"
+            onClick={() => {
+              setError("");
+              setShowContentGenerator(true);
+            }}
           >
             <Plus />
-            <span>Create draft</span>
-            <span className="cmo-action-context">Advanced</span>
-          </Link>
+            <span>New content</span>
+          </Button>
         }
       />
       <CmoDepartmentNav
@@ -2339,7 +2409,15 @@ export function SocialManagementPage() {
               <EmptyCard
                 icon={<Wand2 />}
                 title="No content in this view"
-                copy="Run the bounded weekly content plan. It creates only provider-grounded proposals and never publishes automatically."
+                copy="Create a grounded channel draft. Nothing is saved until you submit, and nothing publishes automatically."
+                action={
+                  <Button variant="primary" onClick={() => {
+                    setError("");
+                    setShowContentGenerator(true);
+                  }}>
+                    <Plus /> New content
+                  </Button>
+                }
               />
             )}
           </div>
@@ -2469,6 +2547,22 @@ export function SocialManagementPage() {
           </div>
         )}
       </Card>
+      <CmoContentGeneratorDrawer
+        open={showContentGenerator}
+        canAuthorizeOffer={canAuthorizeOffer}
+        businessName={activeBusiness?.name}
+        businessLocale={activeBusiness?.locale}
+        campaigns={campaigns.data?.items}
+        campaignsLoading={campaigns.isLoading}
+        campaignsError={campaigns.isError}
+        pending={generateContent.isPending}
+        error={error}
+        onClose={() => {
+          setShowContentGenerator(false);
+          setError("");
+        }}
+        onSubmit={(input) => generateContent.mutate(input)}
+      />
       <WorkspaceDrawer
         open={Boolean(selected)}
         eyebrow="AI CMO"
@@ -2737,7 +2831,7 @@ export function SocialManagementPage() {
           description="This creates an internal calendar record only."
           onClose={() => setSchedule(null)}
         >
-          <form onSubmit={(event) => createSchedule.mutate(event)}>
+          <form onSubmit={submitSchedule}>
             <div className="field">
               <label>Date and time</label>
               <input name="scheduled_for" type="datetime-local" required />

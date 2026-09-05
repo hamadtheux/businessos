@@ -212,6 +212,43 @@ class CreativeDirectionTests(TestCase):
         self.assertIn("DO NOT GENERATE words, letters, numbers", prompt)
         self.assertIn("do not imitate or reproduce", prompt)
 
+    def test_ai_business_os_offer_concepts_keep_product_story_without_image_text(self) -> None:
+        strategy = _strategy()
+        context = _context()
+        plan = build_creative_direction(
+            strategy=strategy,
+            research=degraded_research_bundle(
+                build_research_request(context, max_results=12),
+                provider="internal",
+            ),
+            context=context,
+        )
+        prompt = build_visual_art_direction(
+            strategy=strategy,
+            direction=plan,
+            context=context,
+            aspect_ratio="1:1",
+            primary_color="#114CAC",
+            secondary_color=None,
+            accent_color=None,
+        )
+
+        self.assertEqual(strategy.offer, "50% OFF")
+        self.assertTrue(
+            all(candidate.scorecard.product_relevance >= 60 for candidate in plan.candidates)
+        )
+        self.assertIn("AI Business OS", plan.selected_concept.hero_subject)
+        self.assertIn("supported offering", plan.selected_concept.product_story.casefold())
+        self.assertIn("Product or service story:", prompt)
+        self.assertIn("Immediate visual hook:", prompt)
+        for exact_copy in (
+            strategy.headline,
+            strategy.supporting_message,
+            strategy.offer,
+            strategy.cta,
+        ):
+            self.assertNotIn(exact_copy or "[missing]", prompt)
+
 
 class CreativeDirectorRuntimeTests(IsolatedAsyncioTestCase):
     def _inputs(self):

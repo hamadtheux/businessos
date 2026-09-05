@@ -125,6 +125,39 @@ test("snapshotted campaign input preserves fields and deduplicates the default c
   assert.match(requests[0].prompt, /Returning customers/);
 });
 
+test("authorized business offer is sent as explicit provenance-bearing input", async () => {
+  const requests: Parameters<Parameters<typeof generateCampaignChannelDrafts>[1]>[0][] = [];
+  await generateCampaignChannelDrafts(
+    {
+      ...campaignInput,
+      channels: ["instagram"],
+      offer: "50% off",
+      offerAuthorized: true,
+    },
+    async (request) => {
+      requests.push(request);
+      return content(request.channel);
+    },
+  );
+  assert.equal(requests[0].offer, "50% off");
+  assert.equal(requests[0].offer_authorized, true);
+});
+
+test("unconfirmed business offer is rejected before any API request", async () => {
+  let calls = 0;
+  await assert.rejects(
+    generateCampaignChannelDrafts(
+      { ...campaignInput, channels: ["instagram"], offer: "50% off" },
+      async (request) => {
+        calls += 1;
+        return content(request.channel);
+      },
+    ),
+    /Confirm that this offer is authorized for this business/,
+  );
+  assert.equal(calls, 0);
+});
+
 test("multi-platform partial success preserves successful drafts", async () => {
   const privateFailure = new Error("private upstream detail");
   const outcome = await generateCampaignChannelDrafts(

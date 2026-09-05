@@ -19,6 +19,8 @@ export type CampaignGenerationInput = {
   channels: MarketingChannel[];
   goal: string;
   audience?: string;
+  offer?: string;
+  offerAuthorized?: boolean;
   contentType: MarketingContentType;
   campaignId?: string | null;
   title?: string | null;
@@ -32,6 +34,8 @@ export type ChannelDraftRequest = {
   campaign_id: string | null;
   title: string | null;
   language: string;
+  offer: string | null;
+  offer_authorized: boolean;
 };
 
 export type CreativeFormat = {
@@ -56,6 +60,7 @@ export type CreativeProgress = {
 export const CONTENT_PROMPT_MAX = 4000;
 export const OWNER_GOAL_MAX = 2400;
 export const AUDIENCE_GUIDANCE_MAX = 400;
+export const OFFER_MAX = 160;
 export const SHARED_DIRECTION_MAX = 700;
 
 const DEFAULT_AUDIENCE_GUIDANCE =
@@ -148,7 +153,19 @@ function validateCampaignInput(input: CampaignGenerationInput) {
     );
   }
 
-  return { ...input, goal, audience };
+  const offer = input.offer?.trim() || undefined;
+  if (offer && offer.length > OFFER_MAX) {
+    throw new Error(
+      `Keep the offer to ${OFFER_MAX.toLocaleString("en-US")} characters or fewer.`,
+    );
+  }
+  if (offer && !input.offerAuthorized) {
+    throw new Error(
+      "Confirm that this offer is authorized for this business.",
+    );
+  }
+
+  return { ...input, goal, audience, offer };
 }
 
 function campaignPrompt(
@@ -200,6 +217,10 @@ export async function generateCampaignChannelDrafts(
         campaign_id: input.campaignId || null,
         title: input.title || null,
         language: input.language,
+        offer: normalizedInput.offer || null,
+        offer_authorized: Boolean(
+          normalizedInput.offer && normalizedInput.offerAuthorized,
+        ),
       });
       outcome.successes.push(content);
       sharedDirection ??= content;

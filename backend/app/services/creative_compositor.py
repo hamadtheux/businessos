@@ -81,6 +81,8 @@ class CreativeCompositionInput:
     cta_treatment: str = "filled brand CTA"
     concept_name: str = ""
     visual_density: str = "medium"
+    focal_area: str = ""
+    brand_expression: str = ""
 
     def __post_init__(self) -> None:
         if not self.raw_visual or len(self.raw_visual) > MAX_RAW_VISUAL_BYTES:
@@ -125,8 +127,12 @@ class CreativeQualityReport:
     text_side: TextSide
     rendered_text: dict[str, str]
     font_sizes: dict[str, int]
+    line_counts: dict[str, int]
+    headline_wrap_quality: int
+    headline_wrap_violations: tuple[str, ...]
     cta_contrast_ratio: float | None
     offer_contrast_ratio: float | None
+    cta_fill_color: str | None
     target_dimensions: tuple[int, int]
     visual_complexity: float
     saliency_region: str
@@ -305,6 +311,7 @@ class CreativeCompositor:
             bool(value.cta),
             bool(value.offer),
             text_side,
+            value,
         )
         canvas = Image.new("RGB", (width, height), palette[1])
         focal = _focal_center(value.negative_space, value.composition_direction)
@@ -342,6 +349,7 @@ class CreativeCompositor:
         component_bounds: dict[str, Box] = {}
         rendered_text: dict[str, str] = {}
         font_sizes: dict[str, int] = {}
+        line_counts: dict[str, int] = {}
         identity_fit: _TextFit | None = None
         logo_bounds: Box | None = None
         logo_treatment: LogoTreatment = "none"
@@ -368,6 +376,7 @@ class CreativeCompositor:
             text_bounds["business_name"] = identity_fit.bounds
             rendered_text["business_name"] = identity_fit.text
             font_sizes["business_name"] = identity_fit.font_size
+            line_counts["business_name"] = identity_fit.line_count
 
         offer_contrast: float | None = None
         if value.offer and plan.offer_box is not None:
@@ -388,6 +397,7 @@ class CreativeCompositor:
             component_bounds["offer"] = offer_panel
             rendered_text["offer"] = actual_offer
             font_sizes["offer"] = offer_size
+            line_counts["offer"] = actual_offer.count("\n") + 1
 
         headline_fit = self._fit_text(
             canvas,
@@ -402,6 +412,11 @@ class CreativeCompositor:
         text_bounds["headline"] = headline_fit.bounds
         rendered_text["headline"] = headline_fit.text
         font_sizes["headline"] = headline_fit.font_size
+        line_counts["headline"] = headline_fit.line_count
+        headline_wrap_quality, headline_wrap_violations = _headline_wrap_assessment(
+            value.headline,
+            headline_fit.text,
+        )
 
         supporting_fit = self._fit_text(
             canvas,
@@ -419,6 +434,7 @@ class CreativeCompositor:
         text_bounds["supporting_copy"] = supporting_fit.bounds
         rendered_text["supporting_copy"] = supporting_fit.text
         font_sizes["supporting_copy"] = supporting_fit.font_size
+        line_counts["supporting_copy"] = supporting_fit.line_count
 
         # Capture the prepared background before drawing any typography so
         # foreground pixels can never inflate the measured contrast score.
@@ -448,6 +464,7 @@ class CreativeCompositor:
         _draw_text_fit(ImageDraw.Draw(canvas), supporting_fit, text_color)
 
         cta_contrast: float | None = None
+        cta_fill: RGB | None = None
         if value.cta and plan.cta_box is not None:
             (
                 cta_bounds,
@@ -455,6 +472,7 @@ class CreativeCompositor:
                 cta_contrast,
                 actual_cta,
                 cta_size,
+                cta_fill,
             ) = self._draw_cta(
                 canvas,
                 value.cta,
@@ -466,6 +484,7 @@ class CreativeCompositor:
             component_bounds["cta"] = cta_panel
             rendered_text["cta"] = actual_cta
             font_sizes["cta"] = cta_size
+            line_counts["cta"] = actual_cta.count("\n") + 1
 
         safe_box = (margin, safe_top, width - margin, height - safe_bottom)
         _validate_element_bounds(
@@ -532,6 +551,7 @@ class CreativeCompositor:
             largest_empty_edge_ratio=largest_empty_edge_ratio,
             intentional_negative_space=intentional_negative_space,
             platform_fit=platform_fit,
+            headline_wrap_quality=headline_wrap_quality,
         )
         quality = CreativeQualityReport(
             valid_png=True,
@@ -559,11 +579,19 @@ class CreativeCompositor:
             text_side=text_side,
             rendered_text=rendered_text,
             font_sizes=font_sizes,
+            line_counts=line_counts,
+            headline_wrap_quality=headline_wrap_quality,
+            headline_wrap_violations=headline_wrap_violations,
             cta_contrast_ratio=(
                 round(cta_contrast, 3) if cta_contrast is not None else None
             ),
             offer_contrast_ratio=(
                 round(offer_contrast, 3) if offer_contrast is not None else None
+            ),
+            cta_fill_color=(
+                "#{:02X}{:02X}{:02X}".format(*cta_fill)
+                if cta_fill is not None
+                else None
             ),
             target_dimensions=(width, height),
             visual_complexity=analysis.overall_complexity,
@@ -688,7 +716,7 @@ class CreativeCompositor:
         box: Box,
         palette: tuple[RGB, RGB, RGB],
         treatment: str,
-    ) -> tuple[Box, Box, float, str, int]:
+    ) -> tuple[Box, Box, float, str, int, RGB]:
         width, height = _box_size(box)
         padding_x = max(14, round(canvas.width * 0.018))
         padding_y = max(9, round(canvas.height * 0.009))
@@ -759,6 +787,7 @@ class CreativeCompositor:
             _contrast_ratio(fill, cta_text),
             adjusted.text,
             adjusted.font_size,
+            fill,
         )
 
     def _draw_offer(
@@ -877,6 +906,46 @@ def _bounded_text(value: str, label: str, maximum: int) -> None:
 
 def _normalize_whitespace(value: str) -> str:
     return " ".join(value.split())
+
+
+def _headline_wrap_assessment(
+    original: str,
+    rendered: str,
+) -> tuple[int, tuple[str, ...]]:
+    words = _normalize_whitespace(original).split(" ")
+    lines = [line.split() for line in rendered.splitlines() if line.strip()]
+    violations: list[str] = []
+    if len(words) <= 6 and len(lines) > 2:
+        violations.append("excessive_lines_for_short_headline")
+    if len(words) >= 3 and any(len(line) == 1 for line in lines):
+        violations.append("orphaned_headline_word")
+    if len(words) <= 8 and len(lines) >= 3 and all(len(line) <= 2 for line in lines):
+        violations.append("narrow_copy_zone_fragmentation")
+
+    word_line: list[int] = []
+    for line_index, line in enumerate(lines):
+        word_line.extend([line_index] * len(line))
+    for index, word in enumerate(words[:-1]):
+        next_word = words[index + 1]
+        if (
+            index + 1 < len(word_line)
+            and word_line[index] != word_line[index + 1]
+            and any(character.isdigit() for character in word)
+            and next_word[:1].isupper()
+        ):
+            violations.append("brand_or_product_name_split")
+            break
+
+    score = 100
+    penalties = {
+        "excessive_lines_for_short_headline": 34,
+        "orphaned_headline_word": 24,
+        "narrow_copy_zone_fragmentation": 24,
+        "brand_or_product_name_split": 28,
+    }
+    for violation in dict.fromkeys(violations):
+        score -= penalties[violation]
+    return max(0, score), tuple(dict.fromkeys(violations))
 
 
 def _verify_exact_copy(label: str, expected: str, actual: str) -> None:
@@ -1092,12 +1161,25 @@ def _validate_dimensions(width: int, height: int) -> None:
 
 
 def _palette(value: CreativeCompositionInput) -> tuple[RGB, RGB, RGB]:
-    neutral = ((30, 31, 34), (244, 242, 237), (142, 126, 112))
-    return (
-        _parse_color(value.primary_color) or neutral[0],
-        _parse_color(value.secondary_color) or neutral[1],
-        _parse_color(value.accent_color) or neutral[2],
+    neutral_dark = (30, 31, 34)
+    primary = _parse_color(value.primary_color) or neutral_dark
+    secondary = _parse_color(value.secondary_color) or _blend_color(
+        primary,
+        (255, 255, 255),
+        0.91,
     )
+    # A missing accent derives from the tenant's actual primary identity. This
+    # avoids introducing the former unrelated brown fallback into CTAs.
+    accent = _parse_color(value.accent_color) or primary
+    return primary, secondary, accent
+
+
+def _blend_color(first: RGB, second: RGB, second_weight: float) -> RGB:
+    weight = max(0.0, min(1.0, second_weight))
+    return tuple(
+        round(first[index] * (1 - weight) + second[index] * weight)
+        for index in range(3)
+    )  # type: ignore[return-value]
 
 
 def _parse_color(value: str | None) -> RGB | None:
@@ -1189,6 +1271,7 @@ def _post_render_layout_score(
     largest_empty_edge_ratio: float,
     intentional_negative_space: bool,
     platform_fit: bool,
+    headline_wrap_quality: int,
 ) -> float:
     headline = font_sizes.get("headline", 0)
     supporting = font_sizes.get("supporting_copy", 0)
@@ -1223,7 +1306,7 @@ def _post_render_layout_score(
         else max(45.0, 98.0 - largest_empty_edge_ratio * 85)
     )
     metrics = (
-        pre_render_score * 0.34,
+        pre_render_score * 0.29,
         hierarchy_score * 0.10,
         typography_score * 0.11,
         contrast_score * 0.11,
@@ -1232,6 +1315,7 @@ def _post_render_layout_score(
         occupation_score * 0.07,
         empty_edge_score * 0.05,
         (94.0 if platform_fit else 55.0) * 0.06,
+        headline_wrap_quality * 0.05,
     )
     return round(max(0.0, min(100.0, sum(metrics))), 3)
 
@@ -1409,12 +1493,15 @@ def _layout_plan(
     has_cta: bool,
     has_offer: bool,
     text_side: TextSide,
+    value: CreativeCompositionInput,
 ) -> _LayoutPlan:
     safe_left, safe_right = margin, width - margin
     safe_end = height - safe_bottom
+    copy_fraction = _adaptive_copy_fraction(value)
+    vertical_anchor = _adaptive_vertical_anchor(value)
 
     if family == "editorial_split":
-        panel_width = max(round(width * 0.40), 360)
+        panel_width = max(round(width * copy_fraction), 360)
         panel_width = min(panel_width, width - margin * 3)
         panel_on_left = text_side == "left"
         if panel_on_left:
@@ -1446,7 +1533,7 @@ def _layout_plan(
         )
 
     if family == "framed_campaign":
-        image_bottom = round(height * 0.55)
+        image_bottom = round(height * _adaptive_image_fraction(value))
         image_box = (margin, safe_top, width - margin, image_bottom)
         text_top = image_bottom + margin
         available = max(1, safe_end - text_top)
@@ -1470,9 +1557,14 @@ def _layout_plan(
         )
 
     if family == "vertical_story":
-        text_top = round(height * 0.48)
+        text_top = round(height * vertical_anchor)
         available = safe_end - text_top
-        left, right = _copy_horizontal_bounds(width, margin, 0.78, text_side)
+        left, right = _copy_horizontal_bounds(
+            width,
+            margin,
+            max(0.68, min(0.82, copy_fraction + 0.20)),
+            text_side,
+        )
         surface = (
             0 if text_side == "left" else round(width * 0.16),
             0,
@@ -1498,7 +1590,7 @@ def _layout_plan(
         )
 
     if family == "minimal_hero":
-        left, right = _copy_horizontal_bounds(width, margin, 0.54, text_side)
+        left, right = _copy_horizontal_bounds(width, margin, copy_fraction, text_side)
         available = safe_end - safe_top
         surface = (
             0 if text_side == "left" else round(width * 0.32),
@@ -1525,7 +1617,12 @@ def _layout_plan(
         )
 
     available = safe_end - safe_top
-    left, right = _copy_horizontal_bounds(width, margin, 0.58, text_side)
+    left, right = _copy_horizontal_bounds(
+        width,
+        margin,
+        max(0.52, copy_fraction),
+        text_side,
+    )
     surface = (
         0 if text_side == "left" else round(width * 0.24),
         0,
@@ -1549,6 +1646,38 @@ def _layout_plan(
         panel_color=None,
         text_color=None,
     )
+
+
+def _adaptive_copy_fraction(value: CreativeCompositionInput) -> float:
+    words = len(_normalize_whitespace(value.headline).split(" "))
+    fraction = 0.58 if words <= 6 else 0.62
+    intent = (
+        f"{value.composition_direction} {value.negative_space} "
+        f"{value.visual_density} {value.focal_area}"
+    ).casefold()
+    if any(marker in intent for marker in ("image dominant", "image-led", "oversized crop")):
+        fraction -= 0.06
+    if any(marker in intent for marker in ("wide copy", "editorial", "copy-led")):
+        fraction += 0.03
+    return max(0.50, min(0.65, fraction))
+
+
+def _adaptive_image_fraction(value: CreativeCompositionInput) -> float:
+    intent = f"{value.composition_direction} {value.visual_density}".casefold()
+    if any(marker in intent for marker in ("image dominant", "image-led", "cinematic", "energetic")):
+        return 0.60
+    if any(marker in intent for marker in ("copy-led", "restrained", "low density")):
+        return 0.50
+    return 0.55
+
+
+def _adaptive_vertical_anchor(value: CreativeCompositionInput) -> float:
+    intent = f"{value.composition_direction} {value.negative_space} {value.focal_area}".casefold()
+    if any(marker in intent for marker in ("upper", "top", "copy above")):
+        return 0.38
+    if any(marker in intent for marker in ("lower", "bottom", "copy below")):
+        return 0.54
+    return 0.46
 
 
 def _draw_layout_frame(

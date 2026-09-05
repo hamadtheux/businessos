@@ -16,6 +16,7 @@ class CreativeQualityAssessment(BaseModel):
 
     brand_consistency: int = Field(ge=0, le=100)
     hierarchy: int = Field(ge=0, le=100)
+    typography_quality: int = Field(ge=0, le=100)
     readability: int = Field(ge=0, le=100)
     visual_balance: int = Field(ge=0, le=100)
     subject_clarity: int = Field(ge=0, le=100)
@@ -108,6 +109,8 @@ def assess_creative_quality(
         }
     ):
         failures.append("raw_visual_too_complex")
+    if report.headline_wrap_quality < 60:
+        failures.append("unnatural_headline_wrapping")
 
     minimum_edge = max(1, min(result.width, result.height))
     headline_size = report.font_sizes.get("headline", 0)
@@ -118,6 +121,17 @@ def assess_creative_quality(
         if 1.45 <= hierarchy_ratio <= 4.2
         else _bounded(90 - abs(hierarchy_ratio - 2.2) * 20)
     )
+    typography_quality = _bounded(
+        hierarchy * 0.48
+        + report.headline_wrap_quality * 0.42
+        + min(100, report.minimum_contrast_ratio / 4.5 * 100) * 0.10
+    )
+    if "cta" in report.font_sizes and (
+        report.font_sizes["cta"] / max(1, headline_size) < 0.20
+    ):
+        failures.append("cta_visually_insignificant")
+    if supporting_size and supporting_size / minimum_edge < 0.014:
+        failures.append("supporting_copy_too_small")
     support_legibility = supporting_size / minimum_edge
     readability = _bounded(
         58
@@ -180,6 +194,7 @@ def assess_creative_quality(
     dimensions = {
         "brand_consistency": brand_consistency,
         "hierarchy": hierarchy,
+        "typography_quality": typography_quality,
         "readability": readability,
         "visual_balance": visual_balance,
         "subject_clarity": subject_clarity,
@@ -312,6 +327,12 @@ def _improvements(
         actions.append("rebalance the hero and copy zones")
     if "extreme_meaningless_whitespace" in failures:
         actions.append("reduce the extreme unused edge and rebalance campaign content")
+    if "unnatural_headline_wrapping" in failures:
+        actions.append("use a wider copy zone and keep short product headlines to one or two lines")
+    if "cta_visually_insignificant" in failures:
+        actions.append("strengthen CTA scale while keeping it subordinate to the headline")
+    if "supporting_copy_too_small" in failures:
+        actions.append("increase supporting-copy legibility without competing with the headline")
     if "component_outside_safe_area" in failures:
         actions.append("move the complete CTA or offer component inside the safe area")
     if not actions and score < threshold:

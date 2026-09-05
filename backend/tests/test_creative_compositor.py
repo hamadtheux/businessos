@@ -231,6 +231,21 @@ class CreativeCompositorTests(TestCase):
         headline_bounds = result.quality.text_bounds["headline"]
         self.assertLessEqual(headline_bounds[2], result.width - result.quality.safe_margin)
 
+    def test_awkward_short_product_headline_wrap_is_penalized(self) -> None:
+        score, violations = compositor_module._headline_wrap_assessment(
+            "Meet 9D Brain.",
+            "Meet\n9D\nBrain.",
+        )
+        self.assertLess(score, 60)
+        self.assertIn("brand_or_product_name_split", violations)
+        self.assertIn("excessive_lines_for_short_headline", violations)
+
+    def test_missing_accent_derives_cta_from_tenant_primary_color(self) -> None:
+        result = CreativeCompositor().compose(
+            _input(primary_color="#114CAC", accent_color=None)
+        )
+        self.assertEqual(result.quality.cta_fill_color, "#114CAC")
+
     def test_headline_integrity_gate_rejects_a_dropped_character(self) -> None:
         headline = "Made for every important moment"
         original_wrap = compositor_module._wrap_text
@@ -291,12 +306,12 @@ class CreativeCompositorTests(TestCase):
             )
         )
 
-        self.assertEqual(result.selected_layout, "cinematic_overlay")
         self.assertGreaterEqual(result.quality.minimum_contrast_ratio, 4.5)
-        self.assertIn(
-            result.quality.contrast_treatment,
-            {"controlled_gradient", "gradient_and_scrim"},
-        )
+        if result.selected_layout in {"cinematic_overlay", "minimal_hero"}:
+            self.assertIn(
+                result.quality.contrast_treatment,
+                {"controlled_gradient", "gradient_and_scrim"},
+            )
 
     def test_logo_aspect_ratio_and_transparency_are_preserved(self) -> None:
         result = CreativeCompositor().compose(

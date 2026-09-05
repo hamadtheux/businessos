@@ -195,8 +195,19 @@ async def create_campaign(data: CampaignCreate, access: BusinessAccessDependency
 
 @router.post("/campaigns/generate", response_model=CampaignDetail, status_code=status.HTTP_201_CREATED)
 async def generate_campaign(data: CampaignGenerateRequest, access: BusinessAccessDependency, response: Response, session: SessionDependency, provider: AIAgentProviderDependency):
+    offer_authorization_role = None
+    if data.offer and data.offer.strip():
+        require_business_role(access)
+        offer_authorization_role = access.membership.role
     await _guard(session, access.business.id, "campaigns", ai=True)
-    campaign = await _mutate(None, session, service.generate_campaign(session, business_id=access.business.id, actor_user_id=access.user.id, data=data, provider=provider))
+    campaign = await _mutate(None, session, service.generate_campaign(
+        session,
+        business_id=access.business.id,
+        actor_user_id=access.user.id,
+        data=data,
+        provider=provider,
+        offer_authorization_role=offer_authorization_role,
+    ))
     return await _read(response, service.campaign_detail(session, business_id=access.business.id, campaign=campaign))
 
 
@@ -287,8 +298,19 @@ async def create_content(data: ContentCreate, access: BusinessAccessDependency, 
 
 @router.post("/content/generate", response_model=ContentResponse, status_code=status.HTTP_201_CREATED)
 async def generate_content(data: ContentGenerateRequest, access: BusinessAccessDependency, response: Response, session: SessionDependency, provider: AIAgentProviderDependency):
+    offer_authorization_role = None
+    if data.offer and data.offer.strip():
+        require_business_role(access)
+        offer_authorization_role = access.membership.role
     await _guard(session, access.business.id, "marketing_cmo", ai=True)
-    return await _mutate(response, session, service.generate_content(session, business_id=access.business.id, actor_user_id=access.user.id, data=data, provider=provider))
+    return await _mutate(response, session, service.generate_content(
+        session,
+        business_id=access.business.id,
+        actor_user_id=access.user.id,
+        data=data,
+        provider=provider,
+        offer_authorization_role=offer_authorization_role,
+    ))
 
 
 @router.get("/content/{content_id}", response_model=ContentResponse)

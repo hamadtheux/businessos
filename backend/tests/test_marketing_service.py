@@ -25,7 +25,7 @@ from app.models.catalog_item import CatalogItem  # noqa: E402
 from app.models.marketing import Campaign, CampaignChannelPlan, Competitor, CompetitorObservation, CreativeAsset, MarketingContent, MarketingPlan, MarketingTrend, SocialSchedule  # noqa: E402
 from app.models.opportunity import Opportunity  # noqa: E402
 from app.schemas.ai_agent import AIAgentProposedAction  # noqa: E402
-from app.schemas.marketing import CampaignCreate, CampaignGenerateRequest, ChannelPlanCreate, ContentCreate, ContentGenerateRequest, ContentVersionCreate, CreativeBriefCreate, CreativeStrategyProposal, PerformanceCreate, PlanGenerateRequest, ScheduleCreate, TrendOpportunityRequest  # noqa: E402
+from app.schemas.marketing import CampaignCreate, CampaignGenerateRequest, CampaignUpdate, ChannelPlanCreate, ContentCreate, ContentGenerateRequest, ContentVersionCreate, CreativeBriefCreate, CreativeStrategyProposal, PerformanceCreate, PlanGenerateRequest, ScheduleCreate, TrendOpportunityRequest  # noqa: E402
 from app.services.creative_provider import (
     CreativeGenerationResult,
     CreativeProviderGenerationError,
@@ -61,6 +61,7 @@ from app.services.marketing import (  # noqa: E402
     reschedule,
     trend_to_opportunity,
     unschedule,
+    update_campaign,
     _run_cmo,
 )
 from app.storage.base import StorageOperationError  # noqa: E402
@@ -196,10 +197,19 @@ def _visual_review(**updates: object) -> CreativeVisualReview:
         "hierarchy": 90,
         "composition": 90,
         "brand_consistency": 88,
+        "logo_identity_quality": 88,
         "readability": 94,
         "cta_clarity": 90,
         "offer_clarity": 90,
         "focal_relevance": 87,
+        "product_relevance": 89,
+        "originality": 86,
+        "scroll_stopping_strength": 85,
+        "message_coherence": 90,
+        "whitespace_balance": 88,
+        "typography_quality": 91,
+        "visual_sophistication": 87,
+        "campaign_alignment": 90,
         "visual_polish": 89,
         "generic_template_risk": 20,
         "accidental_generated_text": False,
@@ -207,6 +217,12 @@ def _visual_review(**updates: object) -> CreativeVisualReview:
         "excessive_whitespace": False,
         "overcrowding": False,
         "irrelevant_visual": False,
+        "irrelevant_decorative_art": False,
+        "meaningless_focal_story": False,
+        "unnatural_headline_wrapping": False,
+        "generic_template_output": False,
+        "weak_brand_cta": False,
+        "excessive_dead_panel_space": False,
         "hard_failures": (),
         "approved": True,
         "repair_class": "none",
@@ -221,10 +237,38 @@ def _visual_review(**updates: object) -> CreativeVisualReview:
             "excessive_whitespace",
             "overcrowding",
             "irrelevant_visual",
+            "irrelevant_decorative_art",
+            "meaningless_focal_story",
+            "unnatural_headline_wrapping",
+            "generic_template_output",
+            "weak_brand_cta",
+            "excessive_dead_panel_space",
         )
         if values[name]
     )
     return CreativeVisualReview.model_validate(values)
+
+
+def _visual_review_at_score(score: int) -> CreativeVisualReview:
+    return _visual_review(
+        hierarchy=score,
+        composition=score,
+        brand_consistency=score,
+        logo_identity_quality=score,
+        readability=score,
+        cta_clarity=score,
+        offer_clarity=score,
+        focal_relevance=score,
+        product_relevance=score,
+        originality=score,
+        scroll_stopping_strength=score,
+        message_coherence=score,
+        whitespace_balance=score,
+        typography_quality=score,
+        visual_sophistication=score,
+        campaign_alignment=score,
+        visual_polish=score,
+    )
 
 
 def _visual_result(review: CreativeVisualReview) -> CreativeVisualReviewResult:
@@ -365,6 +409,40 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(MarketingValidationError):
             await create_content(_ScalarSession([parent.campaign_id]), business_id=BUSINESS_ID, actor_user_id=USER_ID, parent_content_id=parent.id, parent_content=parent, data=ContentCreate(campaign_id=parent.campaign_id, channel="email", content_type="social_post", title="Changed", body="Changed"))
 
+    async def test_content_version_supports_each_editable_field_and_empty_cta(self) -> None:
+        cases = (
+            ("Edited title", "Original body", "Explore now"),
+            ("Original title", "Edited body", "Explore now"),
+            ("Original title", "Original body", "Start today"),
+            ("Original title", "Original body", None),
+        )
+        for title, body, cta in cases:
+            with self.subTest(title=title, body=body, cta=cta):
+                root_id = uuid4()
+                parent = MarketingContent(
+                    id=root_id, business_id=BUSINESS_ID, campaign_id=None,
+                    channel="instagram", content_type="social_post",
+                    title="Original title", body="Original body", cta="Explore now",
+                    language="en", status="approved", ai_generated=True, version=1,
+                    parent_content_id=None, root_content_id=root_id,
+                    created_by_user_id=USER_ID, source_evidence=[],
+                    created_at=NOW, updated_at=NOW,
+                )
+                child = await create_content_version(
+                    _ScalarSession([parent, 1]),
+                    business_id=BUSINESS_ID,
+                    content_id=parent.id,
+                    actor_user_id=USER_ID,
+                    data=ContentVersionCreate(title=title, body=body, cta=cta),
+                )
+                self.assertEqual((child.title, child.body, child.cta), (title, body, cta))
+                self.assertEqual(
+                    (parent.title, parent.body, parent.cta),
+                    ("Original title", "Original body", "Explore now"),
+                )
+                self.assertEqual(child.status, "draft")
+                self.assertEqual(child.version, 2)
+
     async def test_ai_campaign_generation_preserves_budget_and_ignores_external_actions(self) -> None:
         business = Business(id=BUSINESS_ID, name="Acme", slug="acme", business_type="retail", status="active", timezone="UTC", currency="USD", locale="en", created_at=NOW, updated_at=NOW)
         session = _ScalarSession([business])
@@ -384,6 +462,126 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(type(item).__name__ == "AIAction" for item in session.added))
         self.assertEqual(campaign.audience_hypothesis_id, audience.id)
         self.assertIn("External execution remains unavailable", campaign.risks[-1])
+
+    async def test_campaign_offer_requires_server_authorization_before_provider_use(self) -> None:
+        data = CampaignGenerateRequest(
+            goal="Promote the seasonal offer",
+            channels=["instagram"],
+            offer="50% off",
+            offer_authorized=True,
+        )
+        session = _ScalarSession([])
+        provider = SimpleNamespace()
+        with (
+            patch(
+                "app.services.marketing.build_audience_hypothesis",
+                new=AsyncMock(),
+            ) as audience,
+            patch("app.services.marketing._run_cmo", new=AsyncMock()) as runtime,
+        ):
+            with self.assertRaises(MarketingValidationError):
+                await generate_campaign(
+                    session,
+                    business_id=BUSINESS_ID,
+                    actor_user_id=USER_ID,
+                    data=data,
+                    provider=provider,
+                )
+
+        audience.assert_not_awaited()
+        runtime.assert_not_awaited()
+        self.assertEqual(session.added, [])
+
+    async def test_owner_and_admin_campaign_offers_are_server_authorized(self) -> None:
+        for role in ("owner", "admin"):
+            with self.subTest(role=role):
+                business = _business_record()
+                audience = SimpleNamespace(
+                    id=uuid4(),
+                    preferred_channels=["instagram"],
+                    summary="Qualified business owners",
+                    evidence=[],
+                    confidence=Decimal("0.650"),
+                    geographic_areas=[],
+                    campaign_id=None,
+                )
+                output = SimpleNamespace(
+                    summary="Grounded campaign plan",
+                    recommendations=["Product-led creative direction"],
+                    proposed_actions=[],
+                )
+                session = _ScalarSession([business])
+                with (
+                    patch(
+                        "app.services.marketing.build_audience_hypothesis",
+                        new=AsyncMock(return_value=audience),
+                    ),
+                    patch(
+                        "app.services.marketing._run_cmo",
+                        new=AsyncMock(return_value=output),
+                    ),
+                ):
+                    campaign = await generate_campaign(
+                        session,
+                        business_id=BUSINESS_ID,
+                        actor_user_id=USER_ID,
+                        data=CampaignGenerateRequest(
+                            goal="Promote the seasonal offer",
+                            channels=["instagram"],
+                            offer="50% off",
+                            offer_authorized=True,
+                        ),
+                        provider=SimpleNamespace(),
+                        offer_authorization_role=role,
+                    )
+
+                self.assertEqual(campaign.offer, "50% off")
+                self.assertEqual(campaign.offer_source, "owner_authorized")
+                self.assertTrue(campaign.offer_authorized)
+                self.assertEqual(
+                    campaign.normalized_proposal["offer"],
+                    {
+                        "description": "50% off",
+                        "source": "owner_authorized",
+                        "approved": True,
+                    },
+                )
+
+    async def test_campaign_offer_edit_cannot_inherit_prior_authorization(self) -> None:
+        campaign = _campaign("draft")
+        campaign.offer = "50% off"
+        campaign.offer_source = "owner_authorized"
+        campaign.offer_authorized = True
+
+        updated = await update_campaign(
+            _ScalarSession([campaign, Decimal("0")]),
+            business_id=BUSINESS_ID,
+            campaign_id=campaign.id,
+            actor_user_id=USER_ID,
+            data=CampaignUpdate(offer="60% off"),
+        )
+
+        self.assertEqual(updated.offer, "60% off")
+        self.assertEqual(updated.offer_source, "none")
+        self.assertFalse(updated.offer_authorized)
+
+    async def test_manual_campaign_offer_is_persisted_as_untrusted_input(self) -> None:
+        campaign = await create_campaign(
+            _ScalarSession([_business_record()]),
+            business_id=BUSINESS_ID,
+            actor_user_id=USER_ID,
+            data=CampaignCreate(
+                name="Seasonal campaign",
+                objective="Promote the seasonal offer",
+                offer="50% off",
+                audience_definition="Existing customers",
+                channels=["instagram"],
+            ),
+        )
+
+        self.assertEqual(campaign.offer, "50% off")
+        self.assertEqual(campaign.offer_source, "none")
+        self.assertFalse(campaign.offer_authorized)
 
     async def test_ai_campaign_persists_selected_product_context_without_lazy_loading(self) -> None:
         business = Business(id=BUSINESS_ID, name="Acme", slug="acme", business_type="retail", status="active", timezone="UTC", currency="USD", locale="en", created_at=NOW, updated_at=NOW)
@@ -574,7 +772,7 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
             prompt.lower(),
         )
         self.assertIn(
-            "Authoritative content context",
+            "Trusted content context with server-tracked provenance",
             prompt,
         )
         self.assertIn(
@@ -1052,6 +1250,181 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image_provider.generate_draft.await_count, 1)
         self.assertEqual(reviewer.review.await_count, 2)
         self.assertEqual(storage.put.await_args.args[1], second.content)
+
+    async def test_semantic_threshold_miss_uses_next_local_candidate_without_new_image(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        first = _composed_candidate("minimal_hero", color=(10, 20, 30))
+        second = _composed_candidate("framed_campaign", color=(30, 40, 50))
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
+        )
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(
+                side_effect=[
+                    _visual_result(_visual_review_at_score(81)),
+                    _visual_result(_visual_review_at_score(82)),
+                ]
+            ),
+        )
+
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(first, second),
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None, asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                storage=storage,
+                quality_threshold=82,
+            )
+
+        self.assertEqual(generated.generation_status, "ready")
+        self.assertEqual(image_provider.generate_draft.await_count, 1)
+        self.assertEqual(reviewer.review.await_count, 2)
+        storage.put.assert_awaited_once()
+        self.assertEqual(storage.put.await_args.args[1], second.content)
+
+    async def test_all_semantic_candidates_below_runtime_threshold_fail_quality(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        candidates = (
+            _composed_candidate("minimal_hero", color=(10, 20, 30)),
+            _composed_candidate("framed_campaign", color=(30, 40, 50)),
+        )
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
+        )
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(
+                side_effect=[
+                    _visual_result(_visual_review_at_score(81)),
+                    _visual_result(_visual_review_at_score(81)),
+                ]
+            ),
+        )
+
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=candidates,
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                storage=storage,
+                quality_threshold=82,
+            )
+
+        self.assertEqual(generated.generation_status, "failed")
+        self.assertEqual(image_provider.generate_draft.await_count, 1)
+        self.assertEqual(reviewer.review.await_count, 2)
+        storage.put.assert_not_awaited()
+
+    async def test_threshold_rejected_candidate_is_not_revived_by_budget_degradation(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        rejected = _composed_candidate("minimal_hero", color=(10, 20, 30))
+        unreviewed = _composed_candidate("framed_campaign", color=(30, 40, 50))
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
+        )
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(
+                return_value=_visual_result(_visual_review_at_score(81))
+            ),
+        )
+
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(rejected, unreviewed),
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
+            self.assertLogs("aibos.marketing", level="WARNING") as captured,
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None, asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                storage=storage,
+                max_visual_review_calls=1,
+                quality_threshold=82,
+            )
+
+        self.assertEqual(generated.generation_status, "ready")
+        self.assertEqual(image_provider.generate_draft.await_count, 1)
+        self.assertEqual(reviewer.review.await_count, 1)
+        storage.put.assert_awaited_once()
+        self.assertEqual(storage.put.await_args.args[1], unreviewed.content)
+        self.assertNotEqual(storage.put.await_args.args[1], rejected.content)
+        logs = " ".join(captured.output)
+        self.assertIn("creative_visual_review_degraded", logs)
+        self.assertIn("reason=budget_exhausted", logs)
 
     async def test_deterministic_layout_failure_uses_next_local_candidate(self) -> None:
         asset = _creative_asset()
@@ -2068,6 +2441,204 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             any(isinstance(item, SocialSchedule) for item in session.added)
         )
+
+    async def test_owner_authorized_offer_survives_content_and_creative_strategy(self) -> None:
+        content_execution = SimpleNamespace(
+            context_revision="f" * 64,
+            business_brain_source_count=1,
+            memory_source_count=0,
+            output=SimpleNamespace(
+                summary=json.dumps({
+                    "title": "Run your business with an AI team",
+                    "body": "Coordinate marketing, sales, and customer operations.",
+                    "cta": "Explore 9D Brain",
+                    "offer": "50% off",
+                    "creative_brief": "Premium product-led AI operations story.",
+                    "recommended_channel": "instagram",
+                    "generation_reasoning": "Use a conversion-focused product story.",
+                    "evidence_source_ids": [],
+                }),
+                recommendations=[],
+                proposed_actions=[],
+            ),
+        )
+        content_session = _ScalarSession([])
+        with patch(
+            "app.services.marketing._execute_cmo",
+            new=AsyncMock(return_value=content_execution),
+        ) as content_runtime:
+            content = await generate_content(
+                content_session,
+                business_id=BUSINESS_ID,
+                actor_user_id=USER_ID,
+                data=ContentGenerateRequest(
+                    prompt="Create a premium conversion-focused AI Business OS post",
+                    channel="instagram",
+                    content_type="social_post",
+                    offer="50% off",
+                    offer_authorized=True,
+                ),
+                provider=SimpleNamespace(),
+                offer_authorization_role="owner",
+            )
+
+        self.assertEqual(content.status, "draft")
+        self.assertIn("50% off", content.body)
+        claim = next(
+            item for item in content.source_evidence
+            if item.get("classification") == "claim_provenance"
+        )
+        self.assertEqual(claim["claim_source"], "owner_provided_campaign_input")
+        self.assertEqual(claim["claim_value"], "50% off")
+        self.assertTrue(claim["requires_approval"])
+        self.assertEqual(
+            claim["source_type"],
+            "authenticated_authorized_business_input",
+        )
+        self.assertEqual(claim["authorization_role"], "owner")
+        self.assertIn("Authenticated campaign offer: 50% off", content_runtime.await_args.args[2])
+
+        strategy_values = _creative_strategy()
+        strategy_values.update({"offer": None, "claim_source": "none"})
+        strategy_execution = SimpleNamespace(
+            provider_metadata=SimpleNamespace(provider_request_id="req-owner-offer"),
+            output=CreativeStrategyProposal.model_validate(strategy_values),
+        )
+        with patch(
+            "app.services.marketing._execute_creative_strategy",
+            new=AsyncMock(return_value=strategy_execution),
+        ):
+            asset = await create_creative_brief(
+                _ScalarSession([content]),
+                business_id=BUSINESS_ID,
+                actor_user_id=USER_ID,
+                data=CreativeBriefCreate(
+                    content_id=content.id,
+                    asset_type="social_square",
+                    instructions="Create the premium campaign visual.",
+                    aspect_ratio="1:1",
+                ),
+                provider=SimpleNamespace(),
+            )
+        strategy = json.loads(asset.visual_direction)
+        self.assertEqual(strategy["offer"], "50% off")
+        self.assertEqual(strategy["claim_source"], "owner_provided_campaign_input")
+
+    async def test_content_offer_requires_server_authorization_before_ai_use(self) -> None:
+        session = _ScalarSession([])
+        with patch(
+            "app.services.marketing._execute_cmo",
+            new=AsyncMock(),
+        ) as runtime:
+            with self.assertRaises(MarketingValidationError):
+                await generate_content(
+                    session,
+                    business_id=BUSINESS_ID,
+                    actor_user_id=USER_ID,
+                    data=ContentGenerateRequest(
+                        prompt="Create an Instagram post",
+                        channel="instagram",
+                        content_type="social_post",
+                        offer="50% off",
+                        offer_authorized=True,
+                    ),
+                    provider=SimpleNamespace(),
+                )
+
+        runtime.assert_not_awaited()
+        self.assertFalse(
+            any(isinstance(item, MarketingContent) for item in session.added)
+        )
+
+    async def test_admin_offer_uses_role_accurate_server_provenance(self) -> None:
+        execution = SimpleNamespace(
+            context_revision="9" * 64,
+            business_brain_source_count=1,
+            memory_source_count=0,
+            output=SimpleNamespace(
+                summary=json.dumps({
+                    "title": "Coordinate your business",
+                    "body": "Bring daily operations into one focused system.",
+                    "cta": "Explore 9D Brain",
+                    "offer": "50% off",
+                    "creative_brief": "Use a premium product-led scene.",
+                    "recommended_channel": "instagram",
+                    "generation_reasoning": "Lead with the authorized campaign offer.",
+                    "evidence_source_ids": [],
+                }),
+                recommendations=[],
+                proposed_actions=[],
+            ),
+        )
+        with patch(
+            "app.services.marketing._execute_cmo",
+            new=AsyncMock(return_value=execution),
+        ):
+            content = await generate_content(
+                _ScalarSession([]),
+                business_id=BUSINESS_ID,
+                actor_user_id=USER_ID,
+                data=ContentGenerateRequest(
+                    prompt="Create an Instagram post",
+                    channel="instagram",
+                    content_type="social_post",
+                    offer="50% off",
+                    offer_authorized=True,
+                ),
+                provider=SimpleNamespace(),
+                offer_authorization_role="admin",
+            )
+
+        claim = next(
+            item for item in content.source_evidence
+            if item.get("classification") == "claim_provenance"
+        )
+        self.assertEqual(
+            claim["source_type"],
+            "authenticated_authorized_business_input",
+        )
+        self.assertEqual(claim["authorization_role"], "admin")
+        self.assertNotEqual(claim["source_type"], "authenticated_owner_input")
+        self.assertTrue(claim["requires_approval"])
+
+    async def test_ai_invented_discount_without_classified_source_is_rejected(self) -> None:
+        execution = SimpleNamespace(
+            context_revision="0" * 64,
+            business_brain_source_count=1,
+            memory_source_count=0,
+            output=SimpleNamespace(
+                summary=json.dumps({
+                    "title": "Save today",
+                    "body": "Get 50% off today.",
+                    "cta": "Claim offer",
+                    "offer": "50% off",
+                    "creative_brief": "Promotional visual.",
+                    "recommended_channel": "instagram",
+                    "generation_reasoning": "Lead with urgency.",
+                    "evidence_source_ids": [],
+                }),
+                recommendations=[],
+                proposed_actions=[],
+            ),
+        )
+        session = _ScalarSession([])
+        with patch(
+            "app.services.marketing._execute_cmo",
+            new=AsyncMock(return_value=execution),
+        ):
+            with self.assertRaises(MarketingAIError):
+                await generate_content(
+                    session,
+                    business_id=BUSINESS_ID,
+                    actor_user_id=USER_ID,
+                    data=ContentGenerateRequest(
+                        prompt="Create a product post",
+                        channel="instagram",
+                        content_type="social_post",
+                    ),
+                    provider=SimpleNamespace(),
+                )
+        self.assertFalse(any(isinstance(item, MarketingContent) for item in session.added))
 
     async def test_ai_content_generation_rejects_wrong_generated_channel(self) -> None:
         execution = SimpleNamespace(

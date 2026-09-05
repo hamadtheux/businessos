@@ -6,7 +6,7 @@ import re
 from copy import deepcopy
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -66,6 +66,7 @@ from app.services.creative_visual_review import (
     CreativeVisualReviewProvider,
     CreativeVisualReviewRequest,
     CreativeVisualReviewResult,
+    semantic_visual_review_meets_threshold,
 )
 from app.models.business import Business
 from app.models.business_branding import BusinessBranding
@@ -140,6 +141,95 @@ logger = logging.getLogger("aibos.marketing")
 _SAFE_AI_DIAGNOSTIC_IDENTIFIER = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
 )
+_PROMOTIONAL_CLAIM = re.compile(
+    r"\b\d{1,3}(?:\.\d+)?\s*%\s*(?:off|discount)\b",
+    re.IGNORECASE,
+)
+_CLAIM_SOURCES = {
+    "authoritative_business_context",
+    "owner_provided_campaign_input",
+}
+OfferAuthorizationRole = Literal["owner", "admin"]
+_OFFER_AUTHORIZATION_ROLES = frozenset({"owner", "admin"})
+
+
+def _normalized_claim(value: str | None) -> str | None:
+    normalized = " ".join((value or "").split())
+    return normalized or None
+
+
+def _campaign_offer_claim(campaign: Campaign | None) -> tuple[str | None, str]:
+    if campaign is None:
+        return None, "none"
+    offer = _normalized_claim(campaign.offer)
+    if not offer:
+        return None, "none"
+    if campaign.offer_source == "authoritative_promotion":
+        return offer, "authoritative_business_context"
+    if campaign.offer_source == "owner_authorized" and campaign.offer_authorized:
+        return offer, "owner_provided_campaign_input"
+    return None, "none"
+
+
+def _content_offer_claim(content: MarketingContent | None) -> tuple[str | None, str]:
+    if content is None:
+        return None, "none"
+    for evidence in content.source_evidence or []:
+        if not isinstance(evidence, dict) or evidence.get("claim_type") != "offer":
+            continue
+        source = evidence.get("claim_source")
+        value = evidence.get("claim_value")
+        if source in _CLAIM_SOURCES and isinstance(value, str):
+            normalized = _normalized_claim(value)
+            if normalized:
+                return normalized, str(source)
+    return None, "none"
+
+
+def _verified_offer_authorization_role(
+    offer: str | None,
+    *,
+    attested: bool,
+    server_role: OfferAuthorizationRole | None,
+) -> OfferAuthorizationRole | None:
+    if _normalized_claim(offer) is None:
+        return None
+    if not attested or server_role not in _OFFER_AUTHORIZATION_ROLES:
+        raise MarketingValidationError("owner_offer_authorization_required")
+    return server_role
+
+
+def _offer_evidence(
+    offer: str,
+    claim_source: str,
+    *,
+    authorization_role: OfferAuthorizationRole | None = None,
+) -> dict[str, object]:
+    evidence: dict[str, object] = {
+        "classification": "claim_provenance",
+        "source_type": (
+            "authenticated_authorized_business_input"
+            if claim_source == "owner_provided_campaign_input"
+            else "trusted_business_context"
+        ),
+        "source_id": "current_campaign_request",
+        "summary": "A server-classified campaign offer was supplied to content generation.",
+        "provenance_role": "provided_to_model",
+        "claim_type": "offer",
+        "claim_source": claim_source,
+        "claim_value": offer,
+        "requires_approval": claim_source == "owner_provided_campaign_input",
+    }
+    if (
+        claim_source == "owner_provided_campaign_input"
+        and authorization_role in _OFFER_AUTHORIZATION_ROLES
+    ):
+        evidence["authorization_role"] = authorization_role
+    return evidence
+
+
+def _contains_unclassified_promotional_claim(*values: str | None) -> bool:
+    return any(_PROMOTIONAL_CLAIM.search(value or "") for value in values)
 
 
 def _page(page: int, page_size: int) -> tuple[int, int]:
@@ -363,7 +453,8 @@ async def create_campaign(session: AsyncSession, *, business_id: UUID, actor_use
     value = Campaign(
         business_id=business_id, currency=business.currency,
         created_by_user_id=actor_user_id, ai_generated=ai_generated,
-        product_selections=[], **data.model_dump(),
+        product_selections=[], offer_source="none", offer_authorized=False,
+        **data.model_dump(),
     )
     session.add(value)
     await _flush(session)
@@ -392,6 +483,12 @@ async def update_campaign(session: AsyncSession, *, business_id: UUID, campaign_
     if configured_channels.difference(changes.get("channels", value.channels)):
         raise MarketingValidationError
     before_budget = value.planned_budget
+    if "offer" in changes:
+        # The update contract has no explicit offer attestation or server role
+        # capability. Replacing an offer must therefore clear any authorization
+        # attached to the previous text instead of silently carrying it forward.
+        value.offer_source = "none"
+        value.offer_authorized = False
     for key, item in changes.items():
         setattr(value, key, item)
     await _flush(session)
@@ -479,7 +576,22 @@ async def create_channel_plan(session: AsyncSession, *, business_id: UUID, campa
     return value
 
 
-async def generate_campaign(session: AsyncSession, *, business_id: UUID, actor_user_id: UUID | None, data: CampaignGenerateRequest, provider: AIAgentProvider, origin_type: str = "ai_on_demand", proposal_key: str | None = None) -> Campaign:
+async def generate_campaign(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    actor_user_id: UUID | None,
+    data: CampaignGenerateRequest,
+    provider: AIAgentProvider,
+    origin_type: str = "ai_on_demand",
+    proposal_key: str | None = None,
+    offer_authorization_role: OfferAuthorizationRole | None = None,
+) -> Campaign:
+    verified_offer_role = _verified_offer_authorization_role(
+        data.offer,
+        attested=data.offer_authorized,
+        server_role=offer_authorization_role,
+    )
     if contains_sensitive_targeting(data.goal, data.audience_definition or ""):
         raise MarketingValidationError("sensitive_targeting_prohibited")
     selected_products: list[CatalogItem] = []
@@ -593,8 +705,8 @@ async def generate_campaign(session: AsyncSession, *, business_id: UUID, actor_u
         campaign.landing_destination = product.product_url
     campaign.recommended_provider = commerce_context["provider"]
     campaign.campaign_type = execution_campaign_type
-    campaign.offer_source = "owner_authorized" if data.offer else "none"
-    campaign.offer_authorized = bool(data.offer and data.offer_authorized)
+    campaign.offer_source = "owner_authorized" if verified_offer_role else "none"
+    campaign.offer_authorized = verified_offer_role is not None
     campaign.proposal_confidence = Decimal("0.80") if selected_products and commerce_context["provider"] else Decimal("0.55")
     total_exposure = data.planned_budget
     if data.budget_mode == "daily" and data.start_date and data.end_date:
@@ -629,8 +741,8 @@ async def generate_campaign(session: AsyncSession, *, business_id: UUID, actor_u
         },
         "offer": {
             "description": data.offer,
-            "source": "owner_authorized" if data.offer else "none",
-            "approved": bool(data.offer and data.offer_authorized),
+            "source": "owner_authorized" if verified_offer_role else "none",
+            "approved": verified_offer_role is not None,
         },
         "creative": {
             "angle": campaign.creative_brief,
@@ -1024,7 +1136,7 @@ async def create_content(session: AsyncSession, *, business_id: UUID, actor_user
             raise MarketingValidationError
         root_id = parent.root_content_id
         version = int(await session.scalar(select(func.coalesce(func.max(MarketingContent.version), 0)).where(MarketingContent.business_id == business_id, MarketingContent.root_content_id == root_id)) or 0) + 1
-    value = MarketingContent(id=value_id, business_id=business_id, created_by_user_id=actor_user_id, ai_generated=ai_generated, version=version, parent_content_id=parent_content_id, root_content_id=root_id, **data.model_dump())
+    value = MarketingContent(id=value_id, business_id=business_id, created_by_user_id=actor_user_id, ai_generated=ai_generated, status="draft", version=version, parent_content_id=parent_content_id, root_content_id=root_id, **data.model_dump())
     session.add(value)
     await _flush(session)
     record_audit(session, business_id=business_id, actor_user_id=actor_user_id, event_type="marketing.content_created" if version == 1 else "marketing.content_version_created", entity_type="marketing_content", entity_id=value.id, summary=f"Created content {value.title} version {version}; nothing was published externally.")
@@ -1098,8 +1210,24 @@ async def generate_content(
     actor_user_id: UUID,
     data: ContentGenerateRequest,
     provider: AIAgentProvider,
+    offer_authorization_role: OfferAuthorizationRole | None = None,
 ) -> MarketingContent:
+    verified_offer_role = _verified_offer_authorization_role(
+        data.offer,
+        attested=data.offer_authorized,
+        server_role=offer_authorization_role,
+    )
     campaign_context = ""
+    campaign: Campaign | None = None
+    parent = (
+        await get_content(
+            session,
+            business_id=business_id,
+            content_id=data.parent_content_id,
+        )
+        if data.parent_content_id is not None
+        else None
+    )
     recommended_for = (
         f"{data.channel.replace('_', ' ')} "
         f"{data.content_type.replace('_', ' ')}"
@@ -1111,19 +1239,39 @@ async def generate_content(
             business_id=business_id,
             campaign_id=data.campaign_id,
         )
+    authorized_offer, claim_source = _campaign_offer_claim(campaign)
+    parent_offer, parent_claim_source = _content_offer_claim(parent)
+    if parent_offer is not None:
+        authorized_offer = parent_offer
+        claim_source = parent_claim_source
+    explicit_owner_offer = _normalized_claim(data.offer)
+    if explicit_owner_offer is not None:
+        authorized_offer = explicit_owner_offer
+        claim_source = "owner_provided_campaign_input"
+
+    if campaign is not None:
         campaign_context = (
             "\nCampaign context:"
             f"\n- Name: {campaign.name}"
             f"\n- Objective: {campaign.objective}"
-            f"\n- Offer: {campaign.offer or 'none provided'}"
+            f"\n- Server-classified offer: {authorized_offer or 'none provided'}"
+            f"\n- Offer claim source: {claim_source}"
         )
         recommended_for = f"{campaign.name} · {data.channel.replace('_', ' ')}"
+
+    offer_direction = (
+        f"\nAuthenticated campaign offer: {authorized_offer}\n"
+        "Preserve this exact offer in the offer field and use it naturally in the "
+        "review draft. It is server-classified input, not a model inference."
+        if authorized_offer is not None
+        else "\nNo server-classified offer was supplied. Set offer to null and do not invent a promotion."
+    )
 
     task = (
         f"Prepare one review-ready {data.content_type} draft for "
         f"{data.channel} in language {data.language}.\n"
         f"Owner request: {data.prompt.strip()}"
-        f"{campaign_context}\n\n"
+        f"{campaign_context}{offer_direction}\n\n"
         "Use only trusted Business Brain and permitted memory context. "
         "Do not invent products, prices, offers, claims, testimonials, customer facts, "
         "business facts, or capabilities that are not supported by the provided context. "
@@ -1134,7 +1282,7 @@ async def generate_content(
         "generation_reasoning must be a short user-visible rationale explaining the "
         "marketing direction; never provide hidden chain-of-thought or private reasoning. "
         "Return recommendations as an empty list and put exactly one JSON object in "
-        "summary with these named fields: title, body, cta, creative_brief, "
+        "summary with these named fields: title, body, cta, offer, creative_brief, "
         "recommended_channel, generation_reasoning, evidence_source_ids. "
         "Set evidence_source_ids to an empty list because authoritative context provenance "
         "is attached by the server. "
@@ -1164,6 +1312,18 @@ async def generate_content(
     ):
         raise MarketingAIError
 
+    returned_offer = _normalized_claim(proposal.offer)
+    if authorized_offer is not None:
+        if returned_offer != authorized_offer:
+            raise MarketingAIError
+    elif returned_offer is not None or _contains_unclassified_promotional_claim(
+        proposal.title,
+        proposal.body,
+        proposal.cta,
+    ):
+        # The model cannot convert an unsupported discount into an accepted fact.
+        raise MarketingAIError
+
     title = (
         data.title.strip()
         if data.title is not None and data.title.strip()
@@ -1182,18 +1342,25 @@ async def generate_content(
         "provenance_role": "provided_to_model",
     }
 
+    body = proposal.body
+    if authorized_offer is not None and authorized_offer.casefold() not in (
+        f"{title} {proposal.body} {proposal.cta or ''}".casefold()
+    ):
+        body = f"{proposal.body.rstrip()}\n\n{authorized_offer}"
+
     content = await create_content(
         session,
         business_id=business_id,
         actor_user_id=actor_user_id,
         parent_content_id=data.parent_content_id,
+        parent_content=parent,
         ai_generated=True,
         data=ContentCreate(
             campaign_id=data.campaign_id,
             channel=data.channel,
             content_type=data.content_type,
             title=title,
-            body=proposal.body,
+            body=body,
             cta=proposal.cta,
             language=data.language,
         ),
@@ -1203,6 +1370,18 @@ async def generate_content(
     content.generation_reasoning = proposal.generation_reasoning
     content.recommended_for = recommended_for[:500]
     content.source_evidence = [context_evidence]
+    if authorized_offer is not None:
+        content.source_evidence.append(
+            _offer_evidence(
+                authorized_offer,
+                claim_source,
+                authorization_role=(
+                    verified_offer_role
+                    if explicit_owner_offer is not None
+                    else None
+                ),
+            )
+        )
     await _flush(session)
 
     return content
@@ -1238,13 +1417,20 @@ async def create_creative_brief(
     if campaign and content and content.campaign_id != campaign.id:
         raise MarketingValidationError
 
+    authorized_offer, claim_source = _campaign_offer_claim(campaign)
+    content_offer, content_claim_source = _content_offer_claim(content)
+    if content_offer is not None:
+        authorized_offer = content_offer
+        claim_source = content_claim_source
+
     campaign_context = ""
     if campaign is not None:
         campaign_context = (
-            "\n\nAuthoritative campaign context:"
+            "\n\nServer-classified campaign context:"
             f"\n- Name: {campaign.name}"
             f"\n- Objective: {campaign.objective}"
-            f"\n- Offer: {campaign.offer or 'none provided'}"
+            f"\n- Offer: {authorized_offer or 'none provided'}"
+            f"\n- Offer claim source: {claim_source}"
         )
 
     content_context = ""
@@ -1253,7 +1439,7 @@ async def create_creative_brief(
     if content is not None:
         expected_channel = content.channel
         content_context = (
-            "\n\nAuthoritative content context:"
+            "\n\nTrusted content context with server-tracked provenance:"
             f"\n- Channel: {content.channel}"
             f"\n- Content type: {content.content_type}"
             f"\n- Title: {content.title}"
@@ -1284,6 +1470,8 @@ async def create_creative_brief(
 
         "GROUNDING RULES:\n"
         "- Owner instructions express desired intent, not authoritative business facts.\n"
+        "- Only the server-classified offer above may be used as an offer. If it is "
+        "present, preserve it exactly; if absent, do not invent a discount or price.\n"
         "- Use only products, services, prices, offers, benefits, brand details, "
         "business facts, claims, and capabilities supported by trusted context.\n"
         "- Never invent testimonials, awards, certifications, statistics, customer "
@@ -1316,11 +1504,12 @@ async def create_creative_brief(
         "serialized JSON document. Set recommendations, proposed_actions, and "
         "evidence_source_ids to empty lists. Use these exact strategy fields:\n"
         "marketing_goal, target_audience, audience_insight, campaign_angle, hook, "
-        "headline, supporting_message, offer, cta, visual_concept, composition_direction, "
+        "headline, supporting_message, offer, claim_source, cta, visual_concept, composition_direction, "
         "subject_focus, mood, lighting, negative_space, brand_treatment, "
         "recommended_channel, pr_guardrails, prohibited_claims, evidence_source_ids.\n"
         "pr_guardrails and prohibited_claims must be short user-visible lists. "
-        "Authoritative provenance is owned by the server. Never include hidden "
+        "Set claim_source to none; authoritative provenance is owned and applied by "
+        "the server after validation. Never include hidden "
         "reasoning or chain-of-thought."
     )
 
@@ -1368,6 +1557,47 @@ async def create_creative_brief(
     if strategy.evidence_source_ids:
         _log_creative_strategy_failure(
             "creative_strategy_evidence_ids_rejected",
+            provider=provider,
+            expected_channel=expected_channel,
+            returned_channel=strategy.recommended_channel,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
+        raise MarketingAIError
+
+    returned_offer = _normalized_claim(strategy.offer)
+    if strategy.claim_source != "none":
+        _log_creative_strategy_failure(
+            "creative_strategy_claim_source_rejected",
+            provider=provider,
+            expected_channel=expected_channel,
+            returned_channel=strategy.recommended_channel,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
+        raise MarketingAIError
+    if authorized_offer is not None:
+        if returned_offer not in {None, authorized_offer}:
+            _log_creative_strategy_failure(
+                "creative_strategy_offer_mismatch",
+                provider=provider,
+                expected_channel=expected_channel,
+                returned_channel=strategy.recommended_channel,
+                provider_request_id=_creative_strategy_request_id(execution),
+            )
+            raise MarketingAIError
+        try:
+            strategy = CreativeStrategyProposal.model_validate({
+                **strategy.model_dump(),
+                "offer": authorized_offer,
+                "claim_source": claim_source,
+            })
+        except ValidationError:
+            raise MarketingAIError from None
+    elif returned_offer is not None or _contains_unclassified_promotional_claim(
+        strategy.headline,
+        strategy.supporting_message,
+    ):
+        _log_creative_strategy_failure(
+            "creative_strategy_unsupported_offer_rejected",
             provider=provider,
             expected_channel=expected_channel,
             returned_channel=strategy.recommended_channel,
@@ -1920,6 +2150,8 @@ async def _generate_creative_asset_value(
                 cta_treatment=direction.selected_concept.cta_treatment,
                 concept_name=direction.selected_concept.concept_name,
                 visual_density=direction.selected_concept.visual_density,
+                focal_area=direction.selected_concept.focal_area,
+                brand_expression=direction.selected_concept.brand_expression,
             )
             compositor = CreativeCompositor(
                 max_candidates=max_composition_attempts,
@@ -2033,6 +2265,11 @@ async def _generate_creative_asset_value(
                 campaign_objective=research_context.campaign_objective,
                 channel=research_context.channel,
                 concept_name=direction.selected_concept.concept_name,
+                concept_expectations=(
+                    f"Hero: {direction.selected_concept.hero_subject}. "
+                    f"Relevance: {direction.selected_concept.hero_relevance}. "
+                    f"Product story: {direction.selected_concept.product_story}."
+                )[:600],
                 expected_headline=strategy.headline,
                 expected_offer=strategy.offer,
                 expected_cta=strategy.cta,
@@ -2079,9 +2316,18 @@ async def _generate_creative_asset_value(
                 ),
                 after_value=_provider_usage_audit_value(review_result.metadata),
             )
-            if review.approved:
+            if semantic_visual_review_meets_threshold(
+                review,
+                threshold=quality_threshold,
+            ):
                 final, quality = candidate, assessment
                 break
+            if review.approved:
+                # The typed response clears the fixed per-dimension floor, but
+                # this candidate missed the server-owned overall quality target.
+                # Continue locally without converting the miss into a raw-image
+                # repair or allowing this reviewed candidate to degrade later.
+                continue
             if review.repair_class == "raw_visual":
                 critic_raw_failure = True
                 correction = _raw_visual_regeneration_correction(review)

@@ -335,6 +335,8 @@ export function createMarketingApi(client: ApiClient) {
           title?: string | null;
           language?: string;
           parent_content_id?: string | null;
+          offer?: string | null;
+          offer_authorized?: boolean;
         },
       ) =>
         client.request<MarketingContent>(

@@ -65,6 +65,7 @@ class CreativeConceptScorecard(DirectionSchema):
     distinctiveness: int = Field(ge=0, le=100)
     visual_sophistication: int = Field(ge=0, le=100)
     audience_relevance: int = Field(ge=0, le=100)
+    product_relevance: int = Field(ge=0, le=100)
     platform_suitability: int = Field(ge=0, le=100)
     offer_clarity: int = Field(ge=0, le=100)
     cta_clarity: int = Field(ge=0, le=100)
@@ -81,6 +82,9 @@ class CreativeConceptProposal(DirectionSchema):
     concept_name: str = Field(min_length=1, max_length=100)
     strategic_reason: str = Field(min_length=1, max_length=300)
     hero_subject: str = Field(min_length=1, max_length=500)
+    hero_relevance: str = Field(min_length=1, max_length=300)
+    product_story: str = Field(min_length=1, max_length=400)
+    scroll_stopping_hook: str = Field(min_length=1, max_length=300)
     visual_metaphor: str = Field(min_length=1, max_length=300)
     layout_intent: str = Field(min_length=1, max_length=500)
     focal_area: str = Field(min_length=1, max_length=160)
@@ -103,6 +107,9 @@ class CreativeConceptProposal(DirectionSchema):
         "concept_name",
         "strategic_reason",
         "hero_subject",
+        "hero_relevance",
+        "product_story",
+        "scroll_stopping_hook",
         "visual_metaphor",
         "layout_intent",
         "focal_area",
@@ -282,11 +289,11 @@ _PATTERNS: tuple[_DesignPattern, ...] = (
         objectives=frozenset({"brand awareness", "lead generation", "product launch"}),
         formats=frozenset({"social square", "landscape ad", "story vertical"}),
         styles=frozenset({"premium modern", "product led"}),
-        visual_metaphor="Connected operational intelligence represented through purposeful spatial systems",
-        layout_intent="Structured technology environment with a strong visual anchor and modular depth",
-        focal_area="system focal point in the center-right field",
+        visual_metaphor="Business decisions and automated workflows converging through a credible orchestration workspace",
+        layout_intent="Product-led technology environment with a strong operational story, asymmetric anchor, and modular depth",
+        focal_area="recognizable orchestration workspace or workflow moment in the center-right field",
         text_zone="uncluttered left-side plane",
-        image_style="sophisticated dimensional technology visualization without fake interface text",
+        image_style="premium product-environment visualization with UI-free functional zones, no decorative abstract rings",
         depth="layered architectural depth and controlled perspective",
         density="medium",
         background_complexity="structured detail away from the protected copy plane",
@@ -449,7 +456,8 @@ def build_creative_director_task(
         "Act as a senior advertising Creative Director. Produce exactly three "
         "materially different, executable visual concepts in one typed response. "
         "The candidates must differ in hero idea, metaphor, image-making approach, "
-        "camera direction, and spatial rhythm—not merely color. Do not self-score.\n\n"
+        "product representation, camera direction, and spatial rhythm—not merely "
+        "color or crop. Do not self-score.\n\n"
         "TRUSTED CAMPAIGN STRATEGY:\n"
         f"- Goal: {strategy.marketing_goal}\n"
         f"- Audience: {strategy.target_audience}\n"
@@ -475,7 +483,13 @@ def build_creative_director_task(
         "OUTPUT RULES:\n"
         "- Return exactly three candidates through the required typed schema.\n"
         "- Ground every subject and factual implication in the trusted strategy.\n"
+        "- Explain why the hero is relevant, how the offering is represented, and "
+        "what creates the immediate scroll-stopping read.\n"
+        "- Make the product story commercially meaningful; reject decoration-only "
+        "abstract geometry when it does not express the business or objective.\n"
         "- Treat an offer as a controlled supporting element, not the automatic hero.\n"
+        "- Explain brand expression and offer integration explicitly, and list what "
+        "must not appear in avoid_patterns.\n"
         "- Reserve a feasible quiet zone for exact deterministic copy and logo.\n"
         "- Use inspiration as abstract rhythm, hierarchy, lighting, density, and style only.\n"
         "- Never copy, clone, replicate, duplicate, or imitate a source design.\n"
@@ -526,6 +540,21 @@ def build_visual_art_direction(
         concept.visual_metaphor,
         strategy,
         fallback="A clear visual metaphor grounded in the supported offering.",
+    )
+    hero_relevance = _without_deterministic_copy(
+        concept.hero_relevance,
+        strategy,
+        fallback="The hero directly represents the supported offering and campaign objective.",
+    )
+    product_story = _without_deterministic_copy(
+        concept.product_story,
+        strategy,
+        fallback="Show the supported offering creating a clear, credible business moment.",
+    )
+    scroll_hook = _without_deterministic_copy(
+        concept.scroll_stopping_hook,
+        strategy,
+        fallback="Use one instantly legible focal contrast and an unexpected but relevant perspective.",
     )
     image_style = _without_deterministic_copy(
         concept.image_style,
@@ -579,6 +608,9 @@ def build_visual_art_direction(
         f"Selected original concept: {concept.concept_name}.\n"
         f"Strategic visual premise: {strategic_reason}\n"
         f"Hero subject: {hero_subject}\n"
+        f"Why the hero is campaign-relevant: {hero_relevance}\n"
+        f"Product or service story: {product_story}\n"
+        f"Immediate visual hook: {scroll_hook}\n"
         f"Environment and visual concept: {visual_concept}\n"
         f"Visual metaphor: {visual_metaphor}\n"
         f"Commercial image style: {image_style}\n"
@@ -623,6 +655,19 @@ def _build_pattern_proposal(
             "commercial idea led by the supported offering rather than literal promotional typography."
         ),
         hero_subject=strategy.subject_focus,
+        hero_relevance=(
+            f"This hero directly represents {strategy.subject_focus[:150].rstrip('.')} "
+            "and makes it visible evidence of "
+            f"the {context.campaign_objective} objective for this {context.industry} campaign."
+        )[:300],
+        product_story=(
+            f"Represent the supported offering in use or through a credible operational "
+            f"transformation; connect it directly to {strategy.campaign_angle[:220].rstrip('.')}."
+        )[:400],
+        scroll_stopping_hook=(
+            f"Create one unmistakable {pattern.focal_area} with controlled contrast, "
+            "depth, and a category-relevant moment instead of decorative abstraction."
+        )[:300],
         visual_metaphor=pattern.visual_metaphor,
         layout_intent=f"{pattern.layout_intent}; {_platform_layout(context.channel)}",
         focal_area=pattern.focal_area,
@@ -758,6 +803,13 @@ def _score_candidates(
             _DIRECT_COPY_LANGUAGE.search(proposal_text)
             or _URL_LANGUAGE.search(proposal_text)
         )
+        product_overlap = _overlap_ratio(
+            _tokens(
+                f"{proposal.hero_subject} {proposal.hero_relevance} "
+                f"{proposal.product_story} {proposal.visual_metaphor}"
+            ),
+            strategy_tokens,
+        )
 
         dimensions = {
             "brand_fit": _bounded_score(
@@ -775,6 +827,10 @@ def _score_candidates(
             ),
             "audience_relevance": _bounded_score(
                 44 + grounding_overlap * 34 + industry_fit * 0.18
+            ),
+            "product_relevance": _bounded_score(
+                42 + product_overlap * 46
+                + (8 if len(_tokens(proposal.product_story)) >= 8 else 0)
             ),
             "platform_suitability": _bounded_score(
                 35 + channel_fit * 0.30 + format_fit * 0.35
@@ -841,6 +897,8 @@ def _concept_signature(
             (
                 proposal.concept_name,
                 proposal.visual_metaphor,
+                proposal.product_story,
+                proposal.scroll_stopping_hook,
                 proposal.layout_intent,
                 proposal.image_style,
                 proposal.camera_direction,
