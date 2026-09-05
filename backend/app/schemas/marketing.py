@@ -409,6 +409,10 @@ class CreativeStrategyProposal(MarketingSchema):
     hook: str = Field(min_length=1, max_length=280)
     headline: str = Field(min_length=1, max_length=180)
     supporting_message: str = Field(min_length=1, max_length=600)
+    # Offers are an independent deterministic design element. Keeping them
+    # separate prevents a numeric promotion from automatically becoming the
+    # headline or the raw generated visual's hero.
+    offer: str | None = Field(default=None, max_length=160)
     cta: str | None = Field(default=None, max_length=300)
 
     visual_concept: str = Field(min_length=1, max_length=900)
@@ -447,6 +451,14 @@ class CreativeStrategyProposal(MarketingSchema):
             raise ValueError("recommended_channel must be a canonical channel")
 
         return normalized
+
+    @model_validator(mode="after")
+    def separate_offer_from_headline(self) -> "CreativeStrategyProposal":
+        if self.offer and " ".join(self.offer.casefold().split()) == " ".join(
+            self.headline.casefold().split()
+        ):
+            raise ValueError("offer must be separate from the campaign headline")
+        return self
 
 
 class CreativeBriefCreate(MarketingSchema):

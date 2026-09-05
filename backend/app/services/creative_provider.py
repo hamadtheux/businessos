@@ -305,16 +305,21 @@ def _safe_http_status_code(exception: OpenAIError) -> int | None:
 
 def _build_visual_prompt(request: CreativeGenerationRequest) -> str:
     return (
-        "Create one polished commercial marketing VISUAL LAYER based only on "
+        "Create one polished commercial marketing BACKGROUND / HERO VISUAL LAYER based only on "
         "the following authorized creative direction.\n\n"
         f"{request.instructions.strip()}\n\n"
         "Important production constraints:\n"
         "- Generate the photographic, illustrative, environmental, product-scene, "
         "or abstract visual only.\n"
-        "- Do not render logos, brand marks, watermarks, UI chrome, captions, "
-        "headlines, CTA text, typography, letters, or invented packaging copy.\n"
+        "- Do not render logos, brand marks, or watermarks. Do not render any "
+        "words, letters, numbers, typography, UI chrome, interface text, captions, headlines, "
+        "offer copy, CTA text, fake product labels, or invented packaging copy.\n"
+        "- Do not create discount numerals, percent signs, SALE graphics, duplicate "
+        "offer symbols, or text-like decorative glyphs.\n"
         "- Do not invent certifications, awards, prices, claims, testimonials, "
         "people, products, or business facts not present in the creative direction.\n"
+        "- Keep the requested overlay zone genuinely quiet: no focal subject, "
+        "high-contrast edges, or visual clutter in that area.\n"
         "- Keep useful negative space for a later deterministic brand composition layer.\n"
         "- The application will place the real logo and exact marketing copy afterward."
     )

@@ -18,6 +18,13 @@ from PIL import (
     UnidentifiedImageError,
 )
 
+from app.services.creative_layout import (
+    VisualAnalysis,
+    analyze_visual,
+    choose_text_side,
+    side_quiet_score,
+)
+
 
 LayoutFamily = Literal[
     "editorial_split",
@@ -69,6 +76,11 @@ class CreativeCompositionInput:
     composition_direction: str = ""
     negative_space: str = ""
     channel: str = "other"
+    offer: str | None = None
+    offer_treatment: str = "compact offer badge"
+    cta_treatment: str = "filled brand CTA"
+    concept_name: str = ""
+    visual_density: str = "medium"
 
     def __post_init__(self) -> None:
         if not self.raw_visual or len(self.raw_visual) > MAX_RAW_VISUAL_BYTES:
@@ -85,6 +97,8 @@ class CreativeCompositionInput:
         _bounded_text(self.supporting_copy, "supporting copy", 600)
         if self.cta is not None:
             _bounded_text(self.cta, "CTA", 300)
+        if self.offer is not None:
+            _bounded_text(self.offer, "offer", 160)
         _bounded_text(self.business_name, "business name", 180)
         if self.logo_content is not None and len(self.logo_content) > MAX_LOGO_BYTES:
             raise CreativeCompositionError("Logo size is invalid")
@@ -98,6 +112,7 @@ class CreativeQualityReport:
     selected_layout: LayoutFamily
     safe_margin: int
     text_bounds: dict[str, Box]
+    component_bounds: dict[str, Box]
     logo_bounds: Box | None
     minimum_contrast_ratio: float
     contrast_treatment: str
@@ -109,6 +124,24 @@ class CreativeQualityReport:
     logo_treatment: LogoTreatment
     text_side: TextSide
     rendered_text: dict[str, str]
+    font_sizes: dict[str, int]
+    cta_contrast_ratio: float | None
+    offer_contrast_ratio: float | None
+    target_dimensions: tuple[int, int]
+    visual_complexity: float
+    saliency_region: str
+    saliency_concentration: float
+    selected_zone: str
+    selected_zone_quiet_score: float
+    pre_render_layout_score: float
+    layout_score: float
+    composition_attempts: int
+    copy_safe_area_ratio: float
+    occupied_area_ratio: float
+    content_centroid_offset: float
+    largest_empty_edge_ratio: float
+    intentional_negative_space: bool
+    platform_fit: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +171,7 @@ class _LayoutPlan:
     brand_box: Box
     headline_box: Box
     supporting_box: Box
+    offer_box: Box | None
     cta_box: Box | None
     text_surface: Box
     overlay: bool
@@ -148,43 +182,98 @@ class _LayoutPlan:
 class CreativeCompositor:
     """Deterministic brand compositor with a configurable local font path."""
 
-    def __init__(self, *, font_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        font_path: Path | None = None,
+        max_candidates: int = 5,
+    ) -> None:
         if font_path is not None and not font_path.is_file():
             raise ValueError("Configured creative font does not exist")
+        if not 1 <= max_candidates <= 5:
+            raise ValueError("Composition candidate limit is invalid")
         self._font_path = font_path
+        self._max_candidates = max_candidates
         # Instance-local caching avoids repeated font decoding while keeping
         # rendering state bounded and isolated between concurrent jobs.
         self._font_cache: dict[int, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
 
     def compose(self, value: CreativeCompositionInput) -> CreativeCompositionResult:
+        """Return the strongest successful candidate for backward compatibility."""
+        return self.compose_candidates(value)[0]
+
+    def compose_candidates(
+        self,
+        value: CreativeCompositionInput,
+    ) -> tuple[CreativeCompositionResult, ...]:
+        """
+        Render every bounded viable family and rank by post-render evidence.
+
+        The pre-render score only controls render order. It is never the final
+        authority once actual typography, component geometry, contrast, and
+        balance measurements are available.
+        """
         self._validate_typography_coverage(value)
         source = _load_source_visual(value.raw_visual)
         logo, logo_source_ratio = _load_logo(value.logo_content)
         palette = _palette(value)
+        analysis = analyze_visual(source)
         preferred = _select_layout(value, source)
-        candidates = _layout_candidates(preferred, value)
-        text_side = (
-            _resolve_text_side(
+        requested_side = _resolve_text_side(
                 value.negative_space,
                 value.composition_direction,
             )
-            or "left"
+        text_side = choose_text_side(
+            analysis,
+            requested=requested_side,
+        )
+        candidates = tuple(
+            sorted(
+                _layout_candidates(preferred, value),
+                key=lambda family: (
+                    -_score_layout_candidate(
+                        family,
+                        preferred=preferred,
+                        value=value,
+                        analysis=analysis,
+                        text_side=text_side,
+                    ),
+                    family,
+                ),
+            )[: self._max_candidates]
         )
         last_error: CreativeCompositionError | None = None
+        successful: list[CreativeCompositionResult] = []
 
         for family in candidates:
             try:
-                return self._compose_layout(
-                    value,
-                    source,
-                    logo,
-                    logo_source_ratio,
-                    palette,
-                    family,
-                    text_side,
+                successful.append(
+                    self._compose_layout(
+                        value,
+                        source,
+                        logo,
+                        logo_source_ratio,
+                        palette,
+                        family,
+                        text_side,
+                        analysis,
+                        preferred,
+                        len(candidates),
+                    )
                 )
             except CreativeCompositionError as exc:
                 last_error = exc
+
+        if successful:
+            return tuple(
+                sorted(
+                    successful,
+                    key=lambda result: (
+                        -result.quality.layout_score,
+                        result.selected_layout,
+                    ),
+                )
+            )
 
         raise CreativeCompositionError(
             "Exact marketing copy cannot fit a safe professional layout"
@@ -199,6 +288,9 @@ class CreativeCompositor:
         palette: tuple[RGB, RGB, RGB],
         family: LayoutFamily,
         text_side: TextSide,
+        analysis: VisualAnalysis,
+        preferred: LayoutFamily,
+        candidate_count: int,
     ) -> CreativeCompositionResult:
         width, height = value.target_width, value.target_height
         margin, safe_top, safe_bottom = _safe_margins(value)
@@ -211,6 +303,7 @@ class CreativeCompositor:
             safe_bottom,
             palette,
             bool(value.cta),
+            bool(value.offer),
             text_side,
         )
         canvas = Image.new("RGB", (width, height), palette[1])
@@ -246,7 +339,9 @@ class CreativeCompositor:
             raise CreativeCompositionError("Layout text color is unavailable")
 
         text_bounds: dict[str, Box] = {}
+        component_bounds: dict[str, Box] = {}
         rendered_text: dict[str, str] = {}
+        font_sizes: dict[str, int] = {}
         identity_fit: _TextFit | None = None
         logo_bounds: Box | None = None
         logo_treatment: LogoTreatment = "none"
@@ -272,6 +367,27 @@ class CreativeCompositor:
             )
             text_bounds["business_name"] = identity_fit.bounds
             rendered_text["business_name"] = identity_fit.text
+            font_sizes["business_name"] = identity_fit.font_size
+
+        offer_contrast: float | None = None
+        if value.offer and plan.offer_box is not None:
+            (
+                offer_bounds,
+                offer_panel,
+                offer_contrast,
+                actual_offer,
+                offer_size,
+            ) = self._draw_offer(
+                canvas,
+                value.offer,
+                plan.offer_box,
+                palette,
+                value.offer_treatment,
+            )
+            text_bounds["offer"] = offer_bounds
+            component_bounds["offer"] = offer_panel
+            rendered_text["offer"] = actual_offer
+            font_sizes["offer"] = offer_size
 
         headline_fit = self._fit_text(
             canvas,
@@ -285,6 +401,7 @@ class CreativeCompositor:
         _verify_exact_copy("headline", value.headline, headline_fit.text)
         text_bounds["headline"] = headline_fit.bounds
         rendered_text["headline"] = headline_fit.text
+        font_sizes["headline"] = headline_fit.font_size
 
         supporting_fit = self._fit_text(
             canvas,
@@ -301,13 +418,18 @@ class CreativeCompositor:
         )
         text_bounds["supporting_copy"] = supporting_fit.bounds
         rendered_text["supporting_copy"] = supporting_fit.text
+        font_sizes["supporting_copy"] = supporting_fit.font_size
 
         # Capture the prepared background before drawing any typography so
         # foreground pixels can never inflate the measured contrast score.
         typography_background = canvas.copy()
         minimum_contrast = _sampled_minimum_contrast(
             typography_background,
-            tuple(text_bounds.values()),
+            tuple(
+                bounds
+                for name, bounds in text_bounds.items()
+                if name != "offer"
+            ),
             text_color,
         )
         if minimum_contrast < 4.5:
@@ -325,20 +447,42 @@ class CreativeCompositor:
         )
         _draw_text_fit(ImageDraw.Draw(canvas), supporting_fit, text_color)
 
+        cta_contrast: float | None = None
         if value.cta and plan.cta_box is not None:
-            cta_bounds, cta_contrast, actual_cta = self._draw_cta(
+            (
+                cta_bounds,
+                cta_panel,
+                cta_contrast,
+                actual_cta,
+                cta_size,
+            ) = self._draw_cta(
                 canvas,
                 value.cta,
                 plan.cta_box,
                 palette,
+                value.cta_treatment,
             )
             text_bounds["cta"] = cta_bounds
+            component_bounds["cta"] = cta_panel
             rendered_text["cta"] = actual_cta
+            font_sizes["cta"] = cta_size
 
         safe_box = (margin, safe_top, width - margin, height - safe_bottom)
-        _validate_element_bounds(text_bounds, logo_bounds, safe_box)
-        if value.cta and plan.cta_box is not None:
+        _validate_element_bounds(
+            text_bounds,
+            logo_bounds,
+            safe_box,
+            component_bounds=component_bounds,
+        )
+        _validate_no_element_overlaps(
+            text_bounds,
+            logo_bounds,
+            component_bounds=component_bounds,
+        )
+        if cta_contrast is not None:
             minimum_contrast = min(minimum_contrast, cta_contrast)
+        if offer_contrast is not None:
+            minimum_contrast = min(minimum_contrast, offer_contrast)
         if minimum_contrast < 4.5:
             raise CreativeCompositionError("Typography contrast is below quality threshold")
 
@@ -350,6 +494,45 @@ class CreativeCompositor:
             if logo_bounds is not None
             else None
         )
+        effective_bounds = _effective_element_bounds(
+            text_bounds,
+            component_bounds,
+        )
+        if logo_bounds is not None:
+            effective_bounds["logo"] = logo_bounds
+        (
+            occupied_area_ratio,
+            content_centroid_offset,
+            largest_empty_edge_ratio,
+        ) = _composition_geometry(
+            effective_bounds,
+            analysis=analysis,
+            image_box=plan.image_box,
+            overlay=plan.overlay,
+            width=width,
+            height=height,
+        )
+        intentional_negative_space = _intentional_negative_space(value)
+        pre_render_score = _score_layout_candidate(
+            family,
+            preferred=preferred,
+            value=value,
+            analysis=analysis,
+            text_side=text_side,
+        )
+        platform_fit = _platform_layout_fit(family, value)
+        post_render_score = _post_render_layout_score(
+            pre_render_score=pre_render_score,
+            font_sizes=font_sizes,
+            minimum_edge=min(width, height),
+            minimum_contrast=minimum_contrast,
+            selected_zone_quiet_score=side_quiet_score(analysis, text_side),
+            occupied_area_ratio=occupied_area_ratio,
+            content_centroid_offset=content_centroid_offset,
+            largest_empty_edge_ratio=largest_empty_edge_ratio,
+            intentional_negative_space=intentional_negative_space,
+            platform_fit=platform_fit,
+        )
         quality = CreativeQualityReport(
             valid_png=True,
             exact_dimensions=True,
@@ -357,6 +540,7 @@ class CreativeCompositor:
             selected_layout=family,
             safe_margin=margin,
             text_bounds=text_bounds,
+            component_bounds=component_bounds,
             logo_bounds=logo_bounds,
             minimum_contrast_ratio=round(minimum_contrast, 3),
             contrast_treatment=contrast_treatment,
@@ -374,6 +558,36 @@ class CreativeCompositor:
             logo_treatment=logo_treatment,
             text_side=text_side,
             rendered_text=rendered_text,
+            font_sizes=font_sizes,
+            cta_contrast_ratio=(
+                round(cta_contrast, 3) if cta_contrast is not None else None
+            ),
+            offer_contrast_ratio=(
+                round(offer_contrast, 3) if offer_contrast is not None else None
+            ),
+            target_dimensions=(width, height),
+            visual_complexity=analysis.overall_complexity,
+            saliency_region=analysis.saliency_region,
+            saliency_concentration=analysis.saliency_concentration,
+            selected_zone=f"{text_side}_copy_zone",
+            selected_zone_quiet_score=round(
+                side_quiet_score(analysis, text_side),
+                4,
+            ),
+            pre_render_layout_score=pre_render_score,
+            layout_score=post_render_score,
+            composition_attempts=candidate_count,
+            copy_safe_area_ratio=round(
+                ((plan.text_surface[2] - plan.text_surface[0])
+                * (plan.text_surface[3] - plan.text_surface[1]))
+                / (width * height),
+                4,
+            ),
+            occupied_area_ratio=occupied_area_ratio,
+            content_centroid_offset=content_centroid_offset,
+            largest_empty_edge_ratio=largest_empty_edge_ratio,
+            intentional_negative_space=intentional_negative_space,
+            platform_fit=platform_fit,
         )
         return CreativeCompositionResult(
             content=content,
@@ -411,6 +625,7 @@ class CreativeCompositor:
             value.headline,
             value.supporting_copy,
             value.cta or "",
+            value.offer or "",
             value.business_name if value.logo_content is None else "",
         )
         for character in set("".join(text_values)):
@@ -472,7 +687,8 @@ class CreativeCompositor:
         text: str,
         box: Box,
         palette: tuple[RGB, RGB, RGB],
-    ) -> tuple[Box, float, str]:
+        treatment: str,
+    ) -> tuple[Box, Box, float, str, int]:
         width, height = _box_size(box)
         padding_x = max(14, round(canvas.width * 0.018))
         padding_y = max(9, round(canvas.height * 0.009))
@@ -499,13 +715,26 @@ class CreativeCompositor:
             box[0] + panel_width,
             box[1] + panel_height,
         )
-        fill = palette[2]
+        normalized_treatment = treatment.casefold()
+        if "dark" in normalized_treatment:
+            fill = palette[0]
+        elif "light" in normalized_treatment or "outline" in normalized_treatment:
+            fill = palette[1]
+        else:
+            fill = palette[2]
         cta_text = _best_text_color(fill)
         if _contrast_ratio(fill, cta_text) < 4.5:
             fill = palette[0]
             cta_text = _best_text_color(fill)
-        radius = max(8, round(panel_height * 0.22))
-        ImageDraw.Draw(canvas).rounded_rectangle(panel, radius=radius, fill=fill)
+        radius = max(6, round(panel_height * 0.18))
+        outline = palette[2] if "outline" in normalized_treatment else None
+        ImageDraw.Draw(canvas).rounded_rectangle(
+            panel,
+            radius=radius,
+            fill=fill,
+            outline=outline,
+            width=max(2, round(min(canvas.size) * 0.002)) if outline else 1,
+        )
         adjusted = _TextFit(
             font=fit.font,
             font_size=fit.font_size,
@@ -524,7 +753,85 @@ class CreativeCompositor:
             spacing=fit.spacing,
         )
         _draw_text_fit(ImageDraw.Draw(canvas), adjusted, cta_text)
-        return adjusted.bounds, _contrast_ratio(fill, cta_text), adjusted.text
+        return (
+            adjusted.bounds,
+            panel,
+            _contrast_ratio(fill, cta_text),
+            adjusted.text,
+            adjusted.font_size,
+        )
+
+    def _draw_offer(
+        self,
+        canvas: Image.Image,
+        text: str,
+        box: Box,
+        palette: tuple[RGB, RGB, RGB],
+        treatment: str,
+    ) -> tuple[Box, Box, float, str, int]:
+        width, height = _box_size(box)
+        padding_x = max(10, round(canvas.width * 0.012))
+        padding_y = max(5, round(canvas.height * 0.005))
+        inner = (
+            box[0] + padding_x,
+            box[1] + padding_y,
+            box[2] - padding_x,
+            box[3] - padding_y,
+        )
+        fit = self._fit_text(
+            canvas,
+            text,
+            inner,
+            max_size=max(14, round(min(canvas.size) * 0.021)),
+            min_size=12,
+            max_lines=2,
+        )
+        _verify_exact_copy("offer", text, fit.text)
+        panel_width = min(width, (fit.bounds[2] - fit.bounds[0]) + padding_x * 2)
+        panel_height = min(height, (fit.bounds[3] - fit.bounds[1]) + padding_y * 2)
+        panel = (box[0], box[1], box[0] + panel_width, box[1] + panel_height)
+        normalized_treatment = treatment.casefold()
+        fill = palette[0] if "dark" in normalized_treatment else palette[2]
+        if "light" in normalized_treatment or "outline" in normalized_treatment:
+            fill = palette[1]
+        text_color = _best_text_color(fill)
+        if _contrast_ratio(fill, text_color) < 4.5:
+            fill = (18, 20, 24)
+            text_color = (255, 255, 255)
+        radius = max(4, round(panel_height * 0.16))
+        outline = palette[2] if "outline" in normalized_treatment else None
+        ImageDraw.Draw(canvas).rounded_rectangle(
+            panel,
+            radius=radius,
+            fill=fill,
+            outline=outline,
+            width=max(2, round(min(canvas.size) * 0.002)) if outline else 1,
+        )
+        adjusted = _TextFit(
+            font=fit.font,
+            font_size=fit.font_size,
+            text=fit.text,
+            origin=(
+                panel[0] + padding_x + (fit.origin[0] - fit.bounds[0]),
+                panel[1] + padding_y + (fit.origin[1] - fit.bounds[1]),
+            ),
+            bounds=(
+                panel[0] + padding_x,
+                panel[1] + padding_y,
+                panel[0] + padding_x + (fit.bounds[2] - fit.bounds[0]),
+                panel[1] + padding_y + (fit.bounds[3] - fit.bounds[1]),
+            ),
+            line_count=fit.line_count,
+            spacing=fit.spacing,
+        )
+        _draw_text_fit(ImageDraw.Draw(canvas), adjusted, text_color)
+        return (
+            adjusted.bounds,
+            panel,
+            _contrast_ratio(fill, text_color),
+            adjusted.text,
+            adjusted.font_size,
+        )
 
 
 def resolve_final_dimensions(
@@ -838,6 +1145,196 @@ def _layout_candidates(
     return tuple(dict.fromkeys(fallbacks))
 
 
+def _score_layout_candidate(
+    family: LayoutFamily,
+    *,
+    preferred: LayoutFamily,
+    value: CreativeCompositionInput,
+    analysis: VisualAnalysis,
+    text_side: TextSide,
+) -> float:
+    score = 82.0 if family == preferred else 72.0
+    ratio = value.target_width / value.target_height
+    if family == "vertical_story":
+        score += 8 if ratio <= 0.72 else -8
+    if family == "editorial_split":
+        score += 8 if ratio >= 1.35 else 2
+    if family == "framed_campaign":
+        score += 6 if len(value.supporting_copy) > 220 else 1
+    if family in {"minimal_hero", "cinematic_overlay", "vertical_story"}:
+        score += side_quiet_score(analysis, text_side) * 10
+        score -= analysis.overall_complexity * 4
+    else:
+        # Solid text surfaces remain valuable fallbacks for visually busy raw
+        # images, but do not automatically displace a strong overlay layout.
+        score += 5
+    if family == "minimal_hero" and (
+        len(value.headline) > 90 or len(value.supporting_copy) > 240
+    ):
+        score -= 12
+    if value.offer and family in {"editorial_split", "framed_campaign"}:
+        score += 2
+    return round(max(0.0, min(100.0, score)), 3)
+
+
+def _post_render_layout_score(
+    *,
+    pre_render_score: float,
+    font_sizes: dict[str, int],
+    minimum_edge: int,
+    minimum_contrast: float,
+    selected_zone_quiet_score: float,
+    occupied_area_ratio: float,
+    content_centroid_offset: float,
+    largest_empty_edge_ratio: float,
+    intentional_negative_space: bool,
+    platform_fit: bool,
+) -> float:
+    headline = font_sizes.get("headline", 0)
+    supporting = font_sizes.get("supporting_copy", 0)
+    hierarchy_ratio = headline / max(1, supporting)
+    hierarchy_score = (
+        94.0
+        if 1.45 <= hierarchy_ratio <= 4.2
+        else max(45.0, 92.0 - abs(hierarchy_ratio - 2.2) * 20)
+    )
+    type_scores = [min(100.0, headline / max(1, minimum_edge) / 0.055 * 88)]
+    if supporting:
+        type_scores.append(
+            min(100.0, supporting / max(1, minimum_edge) / 0.018 * 88)
+        )
+    if "cta" in font_sizes:
+        type_scores.append(
+            min(100.0, font_sizes["cta"] / max(1, minimum_edge) / 0.018 * 88)
+        )
+    typography_score = sum(type_scores) / len(type_scores)
+    contrast_score = min(100.0, 82.0 + max(0.0, minimum_contrast - 4.5) * 5)
+    quiet_score = 58.0 + selected_zone_quiet_score * 42
+    balance_score = max(45.0, 98.0 - content_centroid_offset * 90)
+    if 0.08 <= occupied_area_ratio <= 0.58:
+        occupation_score = 94.0
+    elif intentional_negative_space and occupied_area_ratio >= 0.045:
+        occupation_score = 86.0
+    else:
+        occupation_score = max(40.0, 90.0 - abs(occupied_area_ratio - 0.22) * 180)
+    empty_edge_score = (
+        90.0
+        if intentional_negative_space
+        else max(45.0, 98.0 - largest_empty_edge_ratio * 85)
+    )
+    metrics = (
+        pre_render_score * 0.34,
+        hierarchy_score * 0.10,
+        typography_score * 0.11,
+        contrast_score * 0.11,
+        quiet_score * 0.08,
+        balance_score * 0.08,
+        occupation_score * 0.07,
+        empty_edge_score * 0.05,
+        (94.0 if platform_fit else 55.0) * 0.06,
+    )
+    return round(max(0.0, min(100.0, sum(metrics))), 3)
+
+
+def _composition_geometry(
+    element_bounds: dict[str, Box],
+    *,
+    analysis: VisualAnalysis,
+    image_box: Box,
+    overlay: bool,
+    width: int,
+    height: int,
+) -> tuple[float, float, float]:
+    weighted_boxes: list[tuple[Box, float]] = [
+        (bounds, 1.0) for bounds in element_bounds.values()
+    ]
+    salient = analysis.region(analysis.saliency_region)
+    grid_width = max(region.bounds[2] for region in analysis.regions)
+    grid_height = max(region.bounds[3] for region in analysis.regions)
+    image_width = max(1, image_box[2] - image_box[0])
+    image_height = max(1, image_box[3] - image_box[1])
+    if overlay and analysis.saliency_concentration >= 0.12:
+        salient_box = (
+            image_box[0] + round(salient.bounds[0] / max(1, grid_width) * image_width),
+            image_box[1] + round(salient.bounds[1] / max(1, grid_height) * image_height),
+            image_box[0] + round(salient.bounds[2] / max(1, grid_width) * image_width),
+            image_box[1] + round(salient.bounds[3] / max(1, grid_height) * image_height),
+        )
+    elif overlay:
+        salient_box = (
+            image_box[0] + round(image_width * 0.25),
+            image_box[1] + round(image_height * 0.25),
+            image_box[0] + round(image_width * 0.75),
+            image_box[1] + round(image_height * 0.75),
+        )
+    else:
+        salient_box = image_box
+    weighted_boxes.append(
+        (salient_box, max(0.20, analysis.saliency_concentration))
+    )
+    total_weighted_area = sum(
+        _box_area(bounds) * weight for bounds, weight in weighted_boxes
+    )
+    canvas_area = max(1, width * height)
+    occupied = min(1.0, total_weighted_area / canvas_area)
+    if total_weighted_area <= 0:
+        return 0.0, 1.0, 1.0
+    centroid_x = sum(
+        ((bounds[0] + bounds[2]) / 2) * _box_area(bounds) * weight
+        for bounds, weight in weighted_boxes
+    ) / total_weighted_area
+    centroid_y = sum(
+        ((bounds[1] + bounds[3]) / 2) * _box_area(bounds) * weight
+        for bounds, weight in weighted_boxes
+    ) / total_weighted_area
+    offset = (
+        ((centroid_x - width / 2) / max(1, width / 2)) ** 2
+        + ((centroid_y - height / 2) / max(1, height / 2)) ** 2
+    ) ** 0.5
+    all_boxes = [bounds for bounds, _weight in weighted_boxes]
+    union = (
+        min(bounds[0] for bounds in all_boxes),
+        min(bounds[1] for bounds in all_boxes),
+        max(bounds[2] for bounds in all_boxes),
+        max(bounds[3] for bounds in all_boxes),
+    )
+    largest_empty_edge = max(
+        union[0] / max(1, width),
+        union[1] / max(1, height),
+        (width - union[2]) / max(1, width),
+        (height - union[3]) / max(1, height),
+    )
+    return (
+        round(occupied, 4),
+        round(min(1.5, offset), 4),
+        round(max(0.0, largest_empty_edge), 4),
+    )
+
+
+def _intentional_negative_space(value: CreativeCompositionInput) -> bool:
+    normalized = f"{value.visual_density} {value.concept_name}".casefold()
+    return any(
+        marker in normalized
+        for marker in ("low", "restrained", "minimal", "editorial")
+    )
+
+
+def _box_area(bounds: Box) -> int:
+    return max(0, bounds[2] - bounds[0]) * max(0, bounds[3] - bounds[1])
+
+
+def _platform_layout_fit(
+    family: LayoutFamily,
+    value: CreativeCompositionInput,
+) -> bool:
+    ratio = value.target_width / value.target_height
+    if value.asset_type == "story_reel" or value.channel == "tiktok":
+        return family == "vertical_story" or ratio <= 0.72
+    if value.asset_type in {"landscape_ad", "display_banner"}:
+        return family in {"editorial_split", "cinematic_overlay"}
+    return ratio >= 0.72
+
+
 def _safe_margins(value: CreativeCompositionInput) -> tuple[int, int, int]:
     margin = max(24, round(min(value.target_width, value.target_height) * 0.055))
     if value.asset_type == "story_reel" or value.target_height / value.target_width >= 1.65:
@@ -910,6 +1407,7 @@ def _layout_plan(
     safe_bottom: int,
     palette: tuple[RGB, RGB, RGB],
     has_cta: bool,
+    has_offer: bool,
     text_side: TextSide,
 ) -> _LayoutPlan:
     safe_left, safe_right = margin, width - margin
@@ -928,11 +1426,17 @@ def _layout_plan(
             image_box = (0, 0, width - panel_width, height)
             left, right = panel[0] + margin, width - margin
         available = safe_end - safe_top
+        headline_start = 0.24 if has_offer else 0.20
         return _LayoutPlan(
             family=family,
             image_box=image_box,
             brand_box=(left, safe_top, right, safe_top + round(available * 0.12)),
-            headline_box=(left, safe_top + round(available * 0.20), right, safe_top + round(available * 0.50)),
+            offer_box=(
+                (left, safe_top + round(available * 0.14), right, safe_top + round(available * 0.22))
+                if has_offer
+                else None
+            ),
+            headline_box=(left, safe_top + round(available * headline_start), right, safe_top + round(available * 0.50)),
             supporting_box=(left, safe_top + round(available * 0.53), right, safe_top + round(available * 0.77)),
             cta_box=((left, safe_top + round(available * 0.81), right, safe_end) if has_cta else None),
             text_surface=panel,
@@ -946,12 +1450,18 @@ def _layout_plan(
         image_box = (margin, safe_top, width - margin, image_bottom)
         text_top = image_bottom + margin
         available = max(1, safe_end - text_top)
+        headline_start = 0.27 if has_offer else 0.15
         return _LayoutPlan(
             family=family,
             image_box=image_box,
             brand_box=(safe_left, text_top, safe_right, text_top + round(available * 0.11)),
-            headline_box=(safe_left, text_top + round(available * 0.15), safe_right, text_top + round(available * 0.43)),
-            supporting_box=(safe_left, text_top + round(available * 0.47), safe_right, text_top + round(available * 0.73)),
+            offer_box=(
+                (safe_left, text_top + round(available * 0.13), safe_right, text_top + round(available * 0.24))
+                if has_offer
+                else None
+            ),
+            headline_box=(safe_left, text_top + round(available * headline_start), safe_right, text_top + round(available * (0.48 if has_offer else 0.43))),
+            supporting_box=(safe_left, text_top + round(available * (0.52 if has_offer else 0.47)), safe_right, text_top + round(available * 0.73)),
             cta_box=((safe_left, text_top + round(available * 0.77), safe_right, safe_end) if has_cta else None),
             text_surface=(0, image_bottom, width, height),
             overlay=False,
@@ -973,6 +1483,11 @@ def _layout_plan(
             family=family,
             image_box=(0, 0, width, height),
             brand_box=(left, safe_top, right, safe_top + round(height * 0.07)),
+            offer_box=(
+                (left, text_top - round(height * 0.10), right, text_top - round(height * 0.025))
+                if has_offer
+                else None
+            ),
             headline_box=(left, text_top, right, text_top + round(available * 0.34)),
             supporting_box=(left, text_top + round(available * 0.38), right, text_top + round(available * 0.68)),
             cta_box=((left, text_top + round(available * 0.74), right, safe_end) if has_cta else None),
@@ -995,8 +1510,13 @@ def _layout_plan(
             family=family,
             image_box=(0, 0, width, height),
             brand_box=(left, safe_top, right, safe_top + round(available * 0.10)),
-            headline_box=(left, safe_top + round(available * 0.18), right, safe_top + round(available * 0.45)),
-            supporting_box=(left, safe_top + round(available * 0.49), right, safe_top + round(available * 0.68)),
+            offer_box=(
+                (left, safe_top + round(available * 0.13), right, safe_top + round(available * 0.21))
+                if has_offer
+                else None
+            ),
+            headline_box=(left, safe_top + round(available * (0.24 if has_offer else 0.18)), right, safe_top + round(available * (0.47 if has_offer else 0.45))),
+            supporting_box=(left, safe_top + round(available * (0.51 if has_offer else 0.49)), right, safe_top + round(available * 0.68)),
             cta_box=((left, safe_top + round(available * 0.75), right, safe_end) if has_cta else None),
             text_surface=surface,
             overlay=True,
@@ -1016,6 +1536,11 @@ def _layout_plan(
         family="cinematic_overlay",
         image_box=(0, 0, width, height),
         brand_box=(left, safe_top, right, safe_top + round(available * 0.10)),
+        offer_box=(
+            (left, safe_top + round(available * 0.32), right, safe_top + round(available * 0.40))
+            if has_offer
+            else None
+        ),
         headline_box=(left, safe_top + round(available * 0.43), right, safe_top + round(available * 0.66)),
         supporting_box=(left, safe_top + round(available * 0.69), right, safe_top + round(available * 0.84)),
         cta_box=((left, safe_top + round(available * 0.87), right, safe_end) if has_cta else None),
@@ -1181,10 +1706,49 @@ def _validate_element_bounds(
     text_bounds: dict[str, Box],
     logo_bounds: Box | None,
     safe_box: Box,
+    *,
+    component_bounds: dict[str, Box] | None = None,
 ) -> None:
-    for bounds in [*text_bounds.values(), *([logo_bounds] if logo_bounds else [])]:
+    effective = _effective_element_bounds(text_bounds, component_bounds or {})
+    for bounds in [*effective.values(), *([logo_bounds] if logo_bounds else [])]:
         if not _inside(bounds, safe_box):
             raise CreativeCompositionError("A required element left the safe area")
+
+
+def _validate_no_element_overlaps(
+    text_bounds: dict[str, Box],
+    logo_bounds: Box | None,
+    *,
+    component_bounds: dict[str, Box] | None = None,
+) -> None:
+    values = list(
+        _effective_element_bounds(text_bounds, component_bounds or {}).items()
+    )
+    if logo_bounds is not None:
+        values.append(("logo", logo_bounds))
+    for index, (first_name, first) in enumerate(values):
+        for second_name, second in values[index + 1 :]:
+            if _boxes_overlap(first, second):
+                raise CreativeCompositionError(
+                    f"Required elements overlap: {first_name} and {second_name}"
+                )
+
+
+def _effective_element_bounds(
+    text_bounds: dict[str, Box],
+    component_bounds: dict[str, Box],
+) -> dict[str, Box]:
+    return {
+        name: component_bounds.get(name, bounds)
+        for name, bounds in text_bounds.items()
+    }
+
+
+def _boxes_overlap(first: Box, second: Box) -> bool:
+    return (
+        min(first[2], second[2]) > max(first[0], second[0])
+        and min(first[3], second[3]) > max(first[1], second[1])
+    )
 
 
 def _inside(inner: Box, outer: Box) -> bool:

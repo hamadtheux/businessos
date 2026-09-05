@@ -17,6 +17,7 @@ os.environ.setdefault("AIBOS_DATABASE_URL", "postgresql+asyncpg://database.inval
 os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 
 from app.exceptions.marketing import MarketingAIError, MarketingNotFoundError, MarketingPersistenceError, MarketingStateError, MarketingValidationError  # noqa: E402
+from app.agents.provider import AIAgentProviderMetadata  # noqa: E402
 from app.models.audit_log import AuditLog  # noqa: E402
 from app.models.business import Business  # noqa: E402
 from app.models.business_branding import BusinessBranding  # noqa: E402
@@ -30,6 +31,11 @@ from app.services.creative_provider import (
     CreativeProviderGenerationError,
     CreativeProviderNotConfiguredError,
 )  # noqa: E402
+from app.services.creative_compositor import CreativeCompositionResult  # noqa: E402
+from app.services.creative_visual_review import (  # noqa: E402
+    CreativeVisualReview,
+    CreativeVisualReviewResult,
+)
 from app.services.marketing import (  # noqa: E402
     _allocate_budget,
     _page,
@@ -166,6 +172,69 @@ def _creative_asset(
         alt_text="Product campaign creative",
         created_at=NOW,
         updated_at=NOW,
+    )
+
+
+def _composed_candidate(layout: str, *, color: tuple[int, int, int]):
+    return CreativeCompositionResult(
+        content=_solid_png(color),
+        width=640,
+        height=640,
+        selected_layout=layout,
+        quality=SimpleNamespace(),
+    )
+
+
+def _solid_png(color: tuple[int, int, int]) -> bytes:
+    output = BytesIO()
+    Image.new("RGB", (640, 640), color).save(output, format="PNG")
+    return output.getvalue()
+
+
+def _visual_review(**updates: object) -> CreativeVisualReview:
+    values: dict[str, object] = {
+        "hierarchy": 90,
+        "composition": 90,
+        "brand_consistency": 88,
+        "readability": 94,
+        "cta_clarity": 90,
+        "offer_clarity": 90,
+        "focal_relevance": 87,
+        "visual_polish": 89,
+        "generic_template_risk": 20,
+        "accidental_generated_text": False,
+        "duplicated_message": False,
+        "excessive_whitespace": False,
+        "overcrowding": False,
+        "irrelevant_visual": False,
+        "hard_failures": (),
+        "approved": True,
+        "repair_class": "none",
+        "repair_instructions": "No repair required.",
+    }
+    values.update(updates)
+    values["hard_failures"] = tuple(
+        name
+        for name in (
+            "accidental_generated_text",
+            "duplicated_message",
+            "excessive_whitespace",
+            "overcrowding",
+            "irrelevant_visual",
+        )
+        if values[name]
+    )
+    return CreativeVisualReview.model_validate(values)
+
+
+def _visual_result(review: CreativeVisualReview) -> CreativeVisualReviewResult:
+    return CreativeVisualReviewResult(
+        review=review,
+        metadata=AIAgentProviderMetadata(
+            provider_request_id="req_visual_test",
+            input_tokens=120,
+            output_tokens=40,
+        ),
     )
 
 
@@ -881,11 +950,14 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
                 )
             ),
         )
-        composed = SimpleNamespace(
-            content=_png_bytes(640, 640),
-            width=640,
-            height=640,
-            selected_layout="minimal_hero",
+        composed = _composed_candidate(
+            "minimal_hero",
+            color=(100, 120, 140),
+        )
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
         )
 
         async def dispatch(function, *args):
@@ -897,9 +969,13 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(side_effect=dispatch),
             ) as to_thread,
             patch(
-                "app.services.marketing.CreativeCompositor.compose",
-                return_value=composed,
-            ) as compose,
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(composed,),
+            ) as compose_candidates,
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
         ):
             generated = await generate_creative_asset(
                 _ScalarSession([asset, _business_record(), None, asset]),
@@ -912,8 +988,402 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(generated.generation_status, "ready")
         to_thread.assert_awaited_once()
-        self.assertIs(to_thread.await_args.args[0], compose)
-        compose.assert_called_once_with(to_thread.await_args.args[1])
+        self.assertIs(to_thread.await_args.args[0], compose_candidates)
+        compose_candidates.assert_called_once_with(to_thread.await_args.args[1])
+
+    async def test_visual_layout_rejection_uses_next_local_candidate_without_new_image(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        first = _composed_candidate("minimal_hero", color=(10, 20, 30))
+        second = _composed_candidate("framed_campaign", color=(30, 40, 50))
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
+        )
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(
+                side_effect=[
+                    _visual_result(
+                        _visual_review(
+                            approved=False,
+                            repair_class="layout",
+                            excessive_whitespace=True,
+                            repair_instructions="Use the next local layout.",
+                        )
+                    ),
+                    _visual_result(_visual_review()),
+                ]
+            ),
+        )
+
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(first, second),
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None, asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                storage=storage,
+            )
+
+        self.assertEqual(generated.generation_status, "ready")
+        self.assertEqual(image_provider.generate_draft.await_count, 1)
+        self.assertEqual(reviewer.review.await_count, 2)
+        self.assertEqual(storage.put.await_args.args[1], second.content)
+
+    async def test_deterministic_layout_failure_uses_next_local_candidate(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        first = _composed_candidate("minimal_hero", color=(10, 20, 30))
+        second = _composed_candidate("framed_campaign", color=(30, 40, 50))
+        layout_failure = SimpleNamespace(
+            approved_for_delivery=False,
+            failure_kind="layout",
+            overall_score=70,
+        )
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
+        )
+
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(first, second),
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                side_effect=[layout_failure, approved],
+            ),
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None, asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                storage=storage,
+            )
+
+        self.assertEqual(generated.generation_status, "ready")
+        self.assertEqual(image_provider.generate_draft.await_count, 1)
+        self.assertEqual(storage.put.await_args.args[1], second.content)
+
+    async def test_visual_raw_duplicate_gets_exactly_one_image_regeneration(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                side_effect=[
+                    CreativeGenerationResult(
+                        content=_png_bytes(),
+                        width=1024,
+                        height=1024,
+                    ),
+                    CreativeGenerationResult(
+                        content=_png_bytes(),
+                        width=1024,
+                        height=1024,
+                    ),
+                ]
+            ),
+        )
+        first = _composed_candidate("minimal_hero", color=(10, 20, 30))
+        second = _composed_candidate("framed_campaign", color=(30, 40, 50))
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
+        )
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(
+                side_effect=[
+                    _visual_result(
+                        _visual_review(
+                            approved=False,
+                            repair_class="raw_visual",
+                            accidental_generated_text=True,
+                            duplicated_message=True,
+                            hard_failures=(
+                                "accidental_generated_text",
+                                "duplicated_message",
+                            ),
+                            repair_instructions=(
+                                "LEAK_THIS_PROVIDER_TEXT: remove giant 50% OFF."
+                            ),
+                        )
+                    ),
+                    _visual_result(_visual_review()),
+                ]
+            ),
+        )
+
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                side_effect=[(first,), (second,)],
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None, asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                storage=storage,
+                max_image_attempts=2,
+                max_visual_review_calls=2,
+            )
+
+        self.assertEqual(generated.generation_status, "ready")
+        self.assertEqual(image_provider.generate_draft.await_count, 2)
+        self.assertEqual(reviewer.review.await_count, 2)
+        corrected = image_provider.generate_draft.await_args_list[1].args[0].instructions
+        self.assertIn("no letters, words, numbers", corrected)
+        self.assertNotIn("LEAK_THIS_PROVIDER_TEXT", corrected)
+
+    async def test_regenerated_image_uses_deterministic_qa_when_review_budget_is_exhausted(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                side_effect=[
+                    CreativeGenerationResult(
+                        content=_png_bytes(),
+                        width=1024,
+                        height=1024,
+                    ),
+                    CreativeGenerationResult(
+                        content=_png_bytes(),
+                        width=1024,
+                        height=1024,
+                    ),
+                ]
+            ),
+        )
+        first = _composed_candidate("minimal_hero", color=(10, 20, 30))
+        second = _composed_candidate("framed_campaign", color=(30, 40, 50))
+        regenerated = _composed_candidate(
+            "editorial_split",
+            color=(50, 60, 70),
+        )
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
+        )
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(
+                side_effect=[
+                    _visual_result(
+                        _visual_review(
+                            approved=False,
+                            repair_class="layout",
+                            excessive_whitespace=True,
+                            repair_instructions="Try another local composition.",
+                        )
+                    ),
+                    _visual_result(
+                        _visual_review(
+                            approved=False,
+                            repair_class="raw_visual",
+                            accidental_generated_text=True,
+                            repair_instructions="Regenerate the raw visual.",
+                        )
+                    ),
+                ]
+            ),
+        )
+
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                side_effect=[(first, second), (regenerated,)],
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
+            self.assertLogs("aibos.marketing", level="WARNING") as captured,
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None, asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                storage=storage,
+                max_image_attempts=2,
+                max_visual_review_calls=2,
+            )
+
+        self.assertEqual(generated.generation_status, "ready")
+        self.assertEqual(image_provider.generate_draft.await_count, 2)
+        self.assertEqual(reviewer.review.await_count, 2)
+        storage.put.assert_awaited_once()
+        self.assertEqual(storage.put.await_args.args[1], regenerated.content)
+        logs = " ".join(captured.output)
+        self.assertIn("creative_visual_review_degraded", logs)
+        self.assertIn("reason=budget_exhausted", logs)
+
+    async def test_visual_reviewer_failure_degrades_to_deterministic_candidate(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        candidate = _composed_candidate("minimal_hero", color=(10, 20, 30))
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
+        )
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(
+                side_effect=RuntimeError("sk-proj-secret provider payload")
+            ),
+        )
+
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(candidate,),
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
+            self.assertLogs("aibos.marketing", level="WARNING") as captured,
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None, asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                storage=storage,
+            )
+
+        self.assertEqual(generated.generation_status, "ready")
+        self.assertEqual(image_provider.generate_draft.await_count, 1)
+        self.assertNotIn("sk-proj-secret", " ".join(captured.output))
+
+    async def test_visual_review_call_budget_never_exceeds_two(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        candidates = tuple(
+            _composed_candidate(layout, color=color)
+            for layout, color in (
+                ("minimal_hero", (10, 20, 30)),
+                ("framed_campaign", (30, 40, 50)),
+                ("editorial_split", (50, 60, 70)),
+            )
+        )
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
+        )
+        layout_review = _visual_result(
+            _visual_review(
+                approved=False,
+                repair_class="layout",
+                excessive_whitespace=True,
+                repair_instructions="Try another local composition.",
+            )
+        )
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(return_value=layout_review),
+        )
+
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=candidates,
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None, asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                max_visual_review_calls=2,
+                storage=storage,
+            )
+
+        self.assertEqual(generated.generation_status, "ready")
+        self.assertEqual(reviewer.review.await_count, 2)
+        self.assertEqual(image_provider.generate_draft.await_count, 1)
+        storage.put.assert_awaited_once()
 
     async def test_creative_generation_persists_failed_provider_result(self) -> None:
         strategy = {
@@ -1046,6 +1516,69 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(generated.storage_reference)
         storage.put.assert_not_awaited()
 
+    async def test_raw_visual_failure_gets_one_bounded_corrective_regeneration(self) -> None:
+        asset = _creative_asset()
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                side_effect=[
+                    CreativeGenerationResult(
+                        content=b"not-an-image",
+                        width=640,
+                        height=640,
+                    ),
+                    CreativeGenerationResult(
+                        content=_png_bytes(),
+                        width=1024,
+                        height=1024,
+                    ),
+                ]
+            ),
+        )
+        storage = _ObjectStorage()
+
+        generated = await generate_creative_asset(
+            _ScalarSession([asset, _business_record(), None, asset]),
+            business_id=BUSINESS_ID,
+            creative_asset_id=asset.id,
+            actor_user_id=USER_ID,
+            provider=provider,
+            storage=storage,
+            max_image_attempts=2,
+        )
+
+        self.assertEqual(generated.generation_status, "ready")
+        self.assertEqual(provider.generate_draft.await_count, 2)
+        corrected = provider.generate_draft.await_args_list[1].args[0].instructions
+        self.assertIn("Correction for this attempt", corrected)
+        self.assertIn("keep all typography absent", corrected)
+
+    async def test_image_attempt_limit_is_never_exceeded(self) -> None:
+        asset = _creative_asset()
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=b"not-an-image",
+                    width=640,
+                    height=640,
+                )
+            ),
+        )
+
+        generated = await generate_creative_asset(
+            _ScalarSession([asset, _business_record(), None]),
+            business_id=BUSINESS_ID,
+            creative_asset_id=asset.id,
+            actor_user_id=USER_ID,
+            provider=provider,
+            storage=_ObjectStorage(),
+            max_image_attempts=2,
+        )
+
+        self.assertEqual(generated.generation_status, "failed")
+        self.assertEqual(provider.generate_draft.await_count, 2)
+
     async def test_unsupported_typography_persists_failed_state(self) -> None:
         strategy = _creative_strategy()
         strategy["headline"] = "مرحبا بالعالم"
@@ -1149,21 +1682,30 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
                 )
             ),
         )
-        composed = SimpleNamespace(
-            content=_png_bytes(640, 640),
-            width=640,
-            height=640,
-            selected_layout="minimal_hero",
+        composed = _composed_candidate(
+            "minimal_hero",
+            color=(100, 120, 140),
+        )
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
         )
         storage = _ObjectStorage()
         session = _ScalarSession(
             [initial, _business_record(), None, winner]
         )
 
-        with patch(
-            "app.services.marketing.CreativeCompositor.compose",
-            return_value=composed,
-        ) as compose:
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(composed,),
+            ) as compose_candidates,
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
+        ):
             generated = await generate_creative_asset(
                 session,
                 business_id=BUSINESS_ID,
@@ -1180,7 +1722,7 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
             "https://media.example.com/winning-final.png",
         )
         provider.generate_draft.assert_awaited_once()
-        compose.assert_called_once()
+        compose_candidates.assert_called_once()
         storage.put.assert_not_awaited()
         storage.delete.assert_not_awaited()
         finalization_statement = session.scalar_statements[-1]

@@ -15,7 +15,7 @@ from sqlalchemy import Select, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.provider import AIAgentProvider
+from app.agents.provider import AIAgentProvider, AIAgentProviderMetadata
 from app.agents.runtime import (
     execute_ai_agent,
     execute_ai_agent_typed_with_metadata,
@@ -38,8 +38,34 @@ from app.services.creative_provider import (
 from app.services.creative_compositor import (
     CreativeCompositionError,
     CreativeCompositionInput,
+    CreativeCompositionResult,
     CreativeCompositor,
     resolve_final_dimensions,
+)
+from app.services.creative_direction import (
+    CreativeDirectorSynthesis,
+    CreativeDirectionPlan,
+    build_creative_director_task,
+    build_creative_direction,
+    build_visual_art_direction,
+)
+from app.services.creative_quality import (
+    CreativeQualityAssessment,
+    assess_creative_quality,
+)
+from app.services.creative_research import (
+    CreativeResearchBundle,
+    CreativeResearchEngine,
+    PublicCreativeResearchContext,
+    build_research_request,
+    degraded_research_bundle,
+    derive_public_research_context,
+)
+from app.services.creative_visual_review import (
+    CreativeVisualReview,
+    CreativeVisualReviewProvider,
+    CreativeVisualReviewRequest,
+    CreativeVisualReviewResult,
 )
 from app.models.business import Business
 from app.models.business_branding import BusinessBranding
@@ -1271,6 +1297,9 @@ async def create_creative_brief(
         "MARKETING + PR STANDARD:\n"
         "- Determine the strongest defensible audience, marketing angle, hook, "
         "headline, supporting message and CTA.\n"
+        "- Keep an explicit authorized offer separate from the headline. A discount "
+        "or number is a compact supporting component unless an exceptional "
+        "typography-led concept is explicitly justified.\n"
         "- Protect brand reputation and avoid manipulative, deceptive, unsafe, or "
         "unsupported wording.\n"
         "- Adapt the strategy to the requested asset and known channel.\n"
@@ -1287,7 +1316,7 @@ async def create_creative_brief(
         "serialized JSON document. Set recommendations, proposed_actions, and "
         "evidence_source_ids to empty lists. Use these exact strategy fields:\n"
         "marketing_goal, target_audience, audience_insight, campaign_angle, hook, "
-        "headline, supporting_message, cta, visual_concept, composition_direction, "
+        "headline, supporting_message, offer, cta, visual_concept, composition_direction, "
         "subject_focus, mood, lighting, negative_space, brand_treatment, "
         "recommended_channel, pr_guardrails, prohibited_claims, evidence_source_ids.\n"
         "pr_guardrails and prohibited_claims must be short user-visible lists. "
@@ -1417,6 +1446,14 @@ async def create_creative_brief(
 
 def _creative_visual_generation_instructions(
     strategy: CreativeStrategyProposal,
+    direction: CreativeDirectionPlan,
+    *,
+    research_context: PublicCreativeResearchContext,
+    aspect_ratio: str,
+    primary_color: str | None,
+    secondary_color: str | None,
+    accent_color: str | None,
+    correction: str | None = None,
 ) -> str:
     """
     Produce only the visual-layer instructions for the image model.
@@ -1424,16 +1461,109 @@ def _creative_visual_generation_instructions(
     Exact headline, supporting copy, CTA and logo are deliberately omitted.
     They belong to the deterministic graphic-design composition stage.
     """
-    return (
-        f"Campaign angle: {strategy.campaign_angle}\n"
-        f"Visual concept: {strategy.visual_concept}\n"
-        f"Composition direction: {strategy.composition_direction}\n"
-        f"Subject focus: {strategy.subject_focus}\n"
-        f"Mood: {strategy.mood}\n"
-        f"Lighting: {strategy.lighting}\n"
-        f"Negative space: {strategy.negative_space}\n"
-        f"Brand treatment: {strategy.brand_treatment}"
+    return build_visual_art_direction(
+        strategy=strategy,
+        direction=direction,
+        context=research_context,
+        aspect_ratio=aspect_ratio,
+        primary_color=primary_color,
+        secondary_color=secondary_color,
+        accent_color=accent_color,
+        correction=correction,
     )
+
+
+async def _creative_direction_with_fallback(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    strategy: CreativeStrategyProposal,
+    research: CreativeResearchBundle,
+    context: PublicCreativeResearchContext,
+    provider: AIAgentProvider | None,
+    max_output_tokens: int,
+) -> tuple[CreativeDirectionPlan, AIAgentProviderMetadata]:
+    """Use one trusted typed runtime call, then degrade to internal patterns."""
+    empty_metadata = AIAgentProviderMetadata()
+    if provider is None:
+        logger.info(
+            "creative_director_degraded provider=unconfigured",
+            extra={"provider": "unconfigured", "reason": "unavailable"},
+        )
+        return (
+            build_creative_direction(
+                strategy=strategy,
+                research=research,
+                context=context,
+            ),
+            empty_metadata,
+        )
+
+    task = build_creative_director_task(
+        strategy=strategy,
+        research=research,
+        context=context,
+    )
+    request = await _build_cmo_execution_request(session, business_id, task)
+    try:
+        execution = await execute_ai_agent_typed_with_metadata(
+            session,
+            business_id,
+            request,
+            provider,
+            CreativeDirectorSynthesis,
+            max_output_tokens=max_output_tokens,
+        )
+        direction = build_creative_direction(
+            strategy=strategy,
+            research=research,
+            context=context,
+            synthesis=execution.output,
+        )
+    except AIAgentError:
+        logger.warning(
+            "creative_director_degraded provider=%s",
+            _safe_provider_attribute(provider, "provider_name") or "unknown",
+            extra={
+                "provider": _safe_provider_attribute(provider, "provider_name"),
+                "reason": "provider_or_schema_failure",
+            },
+        )
+        return (
+            build_creative_direction(
+                strategy=strategy,
+                research=research,
+                context=context,
+            ),
+            empty_metadata,
+        )
+
+    logger.info(
+        "creative_director_succeeded provider=%s input_tokens=%s output_tokens=%s",
+        _safe_provider_attribute(provider, "provider_name") or "unknown",
+        execution.provider_metadata.input_tokens,
+        execution.provider_metadata.output_tokens,
+        extra={
+            "provider": _safe_provider_attribute(provider, "provider_name"),
+            "input_tokens": execution.provider_metadata.input_tokens,
+            "output_tokens": execution.provider_metadata.output_tokens,
+        },
+    )
+    return direction, execution.provider_metadata
+
+
+def _provider_usage_audit_value(
+    metadata: AIAgentProviderMetadata,
+) -> str | None:
+    fields: list[str] = []
+    request_id = _safe_ai_diagnostic_identifier(metadata.provider_request_id)
+    if request_id is not None:
+        fields.append(f"provider_request_id={request_id}")
+    if metadata.input_tokens is not None:
+        fields.append(f"input_tokens={metadata.input_tokens}")
+    if metadata.output_tokens is not None:
+        fields.append(f"output_tokens={metadata.output_tokens}")
+    return ";".join(fields) or None
 
 
 async def generate_creative_asset(
@@ -1444,6 +1574,14 @@ async def generate_creative_asset(
     actor_user_id: UUID,
     provider: CreativeGenerationProvider,
     storage: ObjectStorage,
+    research_engine: CreativeResearchEngine | None = None,
+    director_provider: AIAgentProvider | None = None,
+    director_max_output_tokens: int = 4_000,
+    visual_review_provider: CreativeVisualReviewProvider | None = None,
+    max_visual_review_calls: int = 2,
+    max_image_attempts: int = 2,
+    max_composition_attempts: int = 5,
+    quality_threshold: int = 82,
 ) -> CreativeAsset:
     """
     Turn grounded Creative Intelligence into a final branded PNG.
@@ -1469,6 +1607,14 @@ async def generate_creative_asset(
         actor_user_id=actor_user_id,
         provider=provider,
         storage=storage,
+        research_engine=research_engine,
+        director_provider=director_provider,
+        director_max_output_tokens=director_max_output_tokens,
+        visual_review_provider=visual_review_provider,
+        max_visual_review_calls=max_visual_review_calls,
+        max_image_attempts=max_image_attempts,
+        max_composition_attempts=max_composition_attempts,
+        quality_threshold=quality_threshold,
     )
 
 
@@ -1480,6 +1626,14 @@ async def regenerate_creative_asset(
     actor_user_id: UUID,
     provider: CreativeGenerationProvider,
     storage: ObjectStorage,
+    research_engine: CreativeResearchEngine | None = None,
+    director_provider: AIAgentProvider | None = None,
+    director_max_output_tokens: int = 4_000,
+    visual_review_provider: CreativeVisualReviewProvider | None = None,
+    max_visual_review_calls: int = 2,
+    max_image_attempts: int = 2,
+    max_composition_attempts: int = 5,
+    quality_threshold: int = 82,
 ) -> CreativeAsset:
     """Create and generate a new immutable creative revision."""
     source = await _get(
@@ -1530,6 +1684,14 @@ async def regenerate_creative_asset(
         actor_user_id=actor_user_id,
         provider=provider,
         storage=storage,
+        research_engine=research_engine,
+        director_provider=director_provider,
+        director_max_output_tokens=director_max_output_tokens,
+        visual_review_provider=visual_review_provider,
+        max_visual_review_calls=max_visual_review_calls,
+        max_image_attempts=max_image_attempts,
+        max_composition_attempts=max_composition_attempts,
+        quality_threshold=quality_threshold,
     )
 
 
@@ -1541,6 +1703,14 @@ async def _generate_creative_asset_value(
     actor_user_id: UUID,
     provider: CreativeGenerationProvider,
     storage: ObjectStorage,
+    research_engine: CreativeResearchEngine | None,
+    director_provider: AIAgentProvider | None,
+    director_max_output_tokens: int,
+    visual_review_provider: CreativeVisualReviewProvider | None,
+    max_visual_review_calls: int,
+    max_image_attempts: int,
+    max_composition_attempts: int,
+    quality_threshold: int,
 ) -> CreativeAsset:
     if value.business_id != business_id:
         raise MarketingNotFoundError
@@ -1595,86 +1765,354 @@ async def _generate_creative_asset_value(
         business_id=business_id,
         branding=branding,
     )
-    instructions = _creative_visual_generation_instructions(strategy)
+    if (
+        not 1 <= max_image_attempts <= 2
+        or not 1 <= max_composition_attempts <= 5
+        or not 60 <= quality_threshold <= 95
+        or not 1_000 <= director_max_output_tokens <= 6_000
+        or not 0 <= max_visual_review_calls <= 2
+    ):
+        raise MarketingValidationError
 
-    try:
-        result = await provider.generate_draft(
-            CreativeGenerationRequest(
-                business_id=business_id,
-                creative_asset_id=value.id,
-                instructions=instructions,
-                width=target_width,
-                height=target_height,
-                aspect_ratio=value.aspect_ratio,
-            )
+    channel = (
+        content.channel if content is not None else strategy.recommended_channel
+    )
+    research_context = derive_public_research_context(
+        business_type=business.business_type,
+        channel=channel,
+        asset_type=value.asset_type,
+        strategy_text=(
+            f"{value.instructions or ''} {strategy.marketing_goal} "
+            f"{strategy.campaign_angle}"
+        ),
+        visual_text=(
+            f"{strategy.visual_concept} {strategy.mood} "
+            f"{strategy.brand_treatment}"
+        ),
+    )
+    if research_engine is None:
+        fallback_request = build_research_request(
+            research_context,
+            max_results=12,
         )
-    except CreativeProviderNotConfiguredError:
-        await _set_creative_generation_state(
-            session,
-            value,
-            status="provider_required",
+        research = degraded_research_bundle(
+            fallback_request,
+            provider="internal_patterns",
         )
+    else:
+        research = await research_engine.research(research_context)
 
-        record_audit(
-            session,
-            business_id=business_id,
-            actor_user_id=actor_user_id,
-            event_type="marketing.creative_generation_provider_required",
-            entity_type="marketing_creative_asset",
-            entity_id=value.id,
-            summary=(
-                "Creative visual generation requires a configured image provider; "
-                "no image was created and nothing was published."
+    record_audit(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        event_type="marketing.creative_research_completed",
+        entity_type="marketing_creative_asset",
+        entity_id=value.id,
+        summary=(
+            f"Creative research completed with {research.reference_count} public "
+            f"references across {len(research.reference_domains)} domains; only "
+            "abstract design principles were used."
+        ),
+    )
+    direction, director_metadata = await _creative_direction_with_fallback(
+        session,
+        business_id=business_id,
+        strategy=strategy,
+        research=research,
+        context=research_context,
+        provider=director_provider,
+        max_output_tokens=director_max_output_tokens,
+    )
+    record_audit(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        event_type="marketing.creative_direction_selected",
+        entity_type="marketing_creative_asset",
+        entity_id=value.id,
+        summary=(
+            f"Selected {direction.selected_concept.concept_name} from "
+            f"{len(direction.candidates)} original scored concepts using "
+            f"{'AI synthesis' if direction.used_ai_synthesis else 'the deterministic fallback'}."
+        ),
+        after_value=_provider_usage_audit_value(director_metadata),
+    )
+
+    final: CreativeCompositionResult | None = None
+    quality: CreativeQualityAssessment | None = None
+    correction: str | None = None
+    visual_review_calls = 0
+    for image_attempt in range(1, max_image_attempts + 1):
+        instructions = _creative_visual_generation_instructions(
+            strategy,
+            direction,
+            research_context=research_context,
+            aspect_ratio=(
+                value.aspect_ratio
+                or f"{target_width}:{target_height}"
             ),
-        )
-        return value
-    except ValueError:
-        # Invalid requested dimensions/ratio are request-state problems, not an
-        # external provider outage.
-        raise MarketingValidationError from None
-    except CreativeProviderError:
-        return await _fail_creative_generation(
-            session,
-            business_id=business_id,
-            value=value,
-            actor_user_id=actor_user_id,
-            stage="provider",
-        )
-
-    try:
-        composition_input = CreativeCompositionInput(
-            raw_visual=result.content,
-            target_width=target_width,
-            target_height=target_height,
-            asset_type=value.asset_type,
-            headline=strategy.headline,
-            supporting_copy=strategy.supporting_message,
-            cta=strategy.cta,
-            business_name=business.name,
             primary_color=(branding.primary_color if branding else None),
             secondary_color=(branding.secondary_color if branding else None),
             accent_color=(branding.accent_color if branding else None),
-            logo_content=logo_content,
-            composition_direction=strategy.composition_direction,
-            negative_space=strategy.negative_space,
-            channel=(
-                content.channel
-                if content is not None
-                else strategy.recommended_channel
-            ),
+            correction=correction,
         )
-        compositor = CreativeCompositor()
-        final = await asyncio.to_thread(
-            compositor.compose,
-            composition_input,
-        )
-    except CreativeCompositionError:
+        try:
+            result = await provider.generate_draft(
+                CreativeGenerationRequest(
+                    business_id=business_id,
+                    creative_asset_id=value.id,
+                    instructions=instructions,
+                    width=target_width,
+                    height=target_height,
+                    aspect_ratio=value.aspect_ratio,
+                )
+            )
+        except CreativeProviderNotConfiguredError:
+            await _set_creative_generation_state(
+                session,
+                value,
+                status="provider_required",
+            )
+            record_audit(
+                session,
+                business_id=business_id,
+                actor_user_id=actor_user_id,
+                event_type="marketing.creative_generation_provider_required",
+                entity_type="marketing_creative_asset",
+                entity_id=value.id,
+                summary=(
+                    "Creative visual generation requires a configured image provider; "
+                    "no image was created and nothing was published."
+                ),
+            )
+            return value
+        except ValueError:
+            raise MarketingValidationError from None
+        except CreativeProviderError:
+            return await _fail_creative_generation(
+                session,
+                business_id=business_id,
+                value=value,
+                actor_user_id=actor_user_id,
+                stage="provider",
+            )
+
+        try:
+            composition_input = CreativeCompositionInput(
+                raw_visual=result.content,
+                target_width=target_width,
+                target_height=target_height,
+                asset_type=value.asset_type,
+                headline=strategy.headline,
+                supporting_copy=strategy.supporting_message,
+                offer=strategy.offer,
+                cta=strategy.cta,
+                business_name=business.name,
+                primary_color=(branding.primary_color if branding else None),
+                secondary_color=(branding.secondary_color if branding else None),
+                accent_color=(branding.accent_color if branding else None),
+                logo_content=logo_content,
+                composition_direction=direction.selected_concept.layout_intent,
+                negative_space=direction.selected_concept.text_zone,
+                channel=channel,
+                offer_treatment=direction.selected_concept.offer_treatment,
+                cta_treatment=direction.selected_concept.cta_treatment,
+                concept_name=direction.selected_concept.concept_name,
+                visual_density=direction.selected_concept.visual_density,
+            )
+            compositor = CreativeCompositor(
+                max_candidates=max_composition_attempts,
+            )
+            composed_values = await asyncio.to_thread(
+                compositor.compose_candidates,
+                composition_input,
+            )
+            if not composed_values or any(
+                not isinstance(candidate, CreativeCompositionResult)
+                for candidate in composed_values
+            ):
+                raise CreativeCompositionError(
+                    "Compositor returned an invalid candidate set"
+                )
+        except CreativeCompositionError as exc:
+            if (
+                image_attempt < max_image_attempts
+                and _is_retryable_raw_visual_failure(exc)
+            ):
+                correction = (
+                    "Return a valid, quieter raw visual with one clear subject and "
+                    "an uncluttered copy corridor; keep all typography absent."
+                )
+                logger.info(
+                    "creative_quality_retry attempt=%d reason=raw_visual",
+                    image_attempt,
+                    extra={"attempt_number": image_attempt, "reason": "raw_visual"},
+                )
+                continue
+            return await _fail_creative_generation(
+                session,
+                business_id=business_id,
+                value=value,
+                actor_user_id=actor_user_id,
+                stage="composition",
+            )
+
+        candidates = composed_values
+        approved_candidates: list[
+            tuple[CreativeCompositionResult, CreativeQualityAssessment]
+        ] = []
+        candidate_failure_kinds: list[str | None] = []
+        for candidate in candidates:
+            assessment = assess_creative_quality(
+                candidate,
+                threshold=quality_threshold,
+            )
+            if assessment.approved_for_delivery:
+                approved_candidates.append((candidate, assessment))
+            else:
+                candidate_failure_kinds.append(assessment.failure_kind)
+
+        if not approved_candidates:
+            all_failed_from_raw_visual = bool(candidate_failure_kinds) and all(
+                kind == "raw_visual" for kind in candidate_failure_kinds
+            )
+            if all_failed_from_raw_visual and image_attempt < max_image_attempts:
+                correction = _raw_visual_regeneration_correction()
+                logger.info(
+                    "creative_quality_retry attempt=%d reason=raw_visual",
+                    image_attempt,
+                    extra={"attempt_number": image_attempt, "reason": "raw_visual"},
+                )
+                continue
+            return await _fail_creative_generation(
+                session,
+                business_id=business_id,
+                value=value,
+                actor_user_id=actor_user_id,
+                stage="quality",
+            )
+
+        if visual_review_provider is None or max_visual_review_calls == 0:
+            final, quality = approved_candidates[0]
+            if visual_review_provider is None:
+                logger.info(
+                    "creative_visual_review_degraded provider=unconfigured",
+                    extra={"provider": "unconfigured", "reason": "unavailable"},
+                )
+            break
+
+        critic_raw_failure = False
+        for candidate, assessment in approved_candidates:
+            if visual_review_calls >= max_visual_review_calls:
+                safe_review_provider = (
+                    _safe_provider_attribute(
+                        visual_review_provider,
+                        "provider_name",
+                    )
+                    or "unknown"
+                )
+                logger.warning(
+                    "creative_visual_review_degraded provider=%s "
+                    "reason=budget_exhausted",
+                    safe_review_provider,
+                    extra={
+                        "provider": safe_review_provider,
+                        "reason": "budget_exhausted",
+                    },
+                )
+                # This candidate has passed deterministic QA and has not been
+                # semantically rejected. The global semantic-call ceiling is
+                # authoritative, so exhausted capacity degrades exactly like
+                # an unavailable optional reviewer.
+                final, quality = candidate, assessment
+                break
+            visual_review_calls += 1
+            review_request = CreativeVisualReviewRequest(
+                final_png=candidate.content,
+                campaign_objective=research_context.campaign_objective,
+                channel=research_context.channel,
+                concept_name=direction.selected_concept.concept_name,
+                expected_headline=strategy.headline,
+                expected_offer=strategy.offer,
+                expected_cta=strategy.cta,
+                brand_expectations=_visual_review_brand_expectations(branding),
+                quality_threshold=quality_threshold,
+            )
+            try:
+                review_result = await visual_review_provider.review(review_request)
+                if not isinstance(review_result, CreativeVisualReviewResult):
+                    raise TypeError("Visual reviewer returned an invalid result")
+            except Exception:
+                # The semantic critic is optional. A provider, timeout, or
+                # validation failure safely falls back to the already-passed
+                # deterministic candidate without exposing exception text.
+                logger.warning(
+                    "creative_visual_review_degraded provider=%s",
+                    _safe_provider_attribute(
+                        visual_review_provider,
+                        "provider_name",
+                    )
+                    or "unknown",
+                    extra={
+                        "provider": _safe_provider_attribute(
+                            visual_review_provider,
+                            "provider_name",
+                        ),
+                        "reason": "provider_or_schema_failure",
+                    },
+                )
+                final, quality = candidate, assessment
+                break
+
+            review = review_result.review
+            record_audit(
+                session,
+                business_id=business_id,
+                actor_user_id=actor_user_id,
+                event_type="marketing.creative_visual_review_completed",
+                entity_type="marketing_creative_asset",
+                entity_id=value.id,
+                summary=(
+                    "Semantic visual review completed for one deterministic "
+                    f"candidate with decision {review.repair_class}."
+                ),
+                after_value=_provider_usage_audit_value(review_result.metadata),
+            )
+            if review.approved:
+                final, quality = candidate, assessment
+                break
+            if review.repair_class == "raw_visual":
+                critic_raw_failure = True
+                correction = _raw_visual_regeneration_correction(review)
+                break
+            # A layout rejection intentionally falls through to the next local
+            # candidate. It never consumes another raw-image generation call.
+
+        if final is not None:
+            break
+        if critic_raw_failure and image_attempt < max_image_attempts:
+            logger.info(
+                "creative_quality_retry attempt=%d reason=raw_visual",
+                image_attempt,
+                extra={"attempt_number": image_attempt, "reason": "raw_visual"},
+            )
+            continue
         return await _fail_creative_generation(
             session,
             business_id=business_id,
             value=value,
             actor_user_id=actor_user_id,
-            stage="composition",
+            stage="quality",
+        )
+
+    if final is None:
+        return await _fail_creative_generation(
+            session,
+            business_id=business_id,
+            value=value,
+            actor_user_id=actor_user_id,
+            stage="quality",
         )
 
     value = await _lock_creative_for_finalization(
@@ -1766,12 +2204,90 @@ async def _generate_creative_asset_value(
         entity_id=value.id,
         summary=(
             f"Generated and stored a validated {final.width}x{final.height} final "
-            f"branded creative using the {final.selected_layout} layout; nothing "
+            f"branded creative using the {final.selected_layout} layout"
+            f"{f' at quality score {quality.overall_score}' if quality else ''}; nothing "
             "was published externally."
         ),
     )
 
+    if quality is not None:
+        logger.info(
+            "creative_quality_passed score=%d layout=%s",
+            quality.overall_score,
+            final.selected_layout,
+            extra={
+                "safe_quality_score": quality.overall_score,
+                "selected_layout": final.selected_layout,
+            },
+        )
+
     return value
+
+
+def _visual_review_brand_expectations(
+    branding: BusinessBranding | None,
+) -> str:
+    """Return only server-validated public palette expectations to the critic."""
+    colors: list[str] = []
+    if branding is not None:
+        for value in (
+            branding.primary_color,
+            branding.secondary_color,
+            branding.accent_color,
+        ):
+            if isinstance(value, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
+                colors.append(value.upper())
+    palette = ", ".join(dict.fromkeys(colors)) or "saved neutral brand palette"
+    return (
+        f"Visible identity must remain clear; use the controlled palette {palette}; "
+        "do not infer or invent additional brand claims."
+    )
+
+
+def _raw_visual_regeneration_correction(
+    review: CreativeVisualReview | None = None,
+) -> str:
+    """Map semantic flags to server-owned instructions, never provider prose."""
+    if review is not None and (
+        review.accidental_generated_text or review.duplicated_message
+    ):
+        return (
+            "Regenerate a true non-typographic hero visual with no letters, words, "
+            "numbers, badges, offer copy, UI labels, watermarks, or signs. Keep all "
+            "typography absent and preserve a quiet copy corridor."
+        )
+    if review is not None and review.irrelevant_visual:
+        return (
+            "Regenerate one objective-relevant hero subject with a clear focal point, "
+            "a restrained background, and a quiet copy corridor. Keep all typography "
+            "absent."
+        )
+    return (
+        "Reduce background noise and competing focal points. Keep one clear subject, "
+        "a large low-detail copy zone, and keep all typography absent."
+    )
+
+
+def _is_retryable_raw_visual_failure(
+    exception: CreativeCompositionError,
+) -> bool:
+    current: BaseException | None = exception
+    for _depth in range(5):
+        if current is None:
+            break
+        message = str(current).casefold()
+        if any(
+            marker in message
+            for marker in (
+                "raw visual is invalid",
+                "raw visual format is unsupported",
+                "image dimensions exceed safe limits",
+                "animated raw visuals",
+            )
+        ):
+            return True
+        current = current.__cause__
+    return False
 
 
 async def _lock_creative_for_finalization(

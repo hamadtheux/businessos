@@ -9,7 +9,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies.ai_agent import AIAgentProviderDependency
-from app.api.dependencies.creative import CreativeGenerationProviderDependency
+from app.api.dependencies.creative import (
+    CreativeDirectorProviderDependency,
+    CreativeGenerationProviderDependency,
+    CreativeResearchEngineDependency,
+    CreativeVisualReviewProviderDependency,
+)
+from app.core.config import settings
 from app.storage.factory import ObjectStorageDependency
 from app.api.dependencies.business import BusinessAccessDependency, require_business_role
 from app.api.response_materialization import materialize_response_before_commit
@@ -348,6 +354,9 @@ async def generate_creative_asset(
     response: Response,
     session: SessionDependency,
     provider: CreativeGenerationProviderDependency,
+    director_provider: CreativeDirectorProviderDependency,
+    visual_review_provider: CreativeVisualReviewProviderDependency,
+    research_engine: CreativeResearchEngineDependency,
     storage: ObjectStorageDependency,
 ):
     await _guard(
@@ -365,7 +374,15 @@ async def generate_creative_asset(
             creative_asset_id=creative_asset_id,
             actor_user_id=access.user.id,
             provider=provider,
+            director_provider=director_provider,
+            director_max_output_tokens=settings.creative_director_max_output_tokens,
+            visual_review_provider=visual_review_provider,
+            max_visual_review_calls=settings.creative_max_visual_review_calls,
+            research_engine=research_engine,
             storage=storage,
+            max_image_attempts=settings.creative_max_image_attempts,
+            max_composition_attempts=settings.creative_max_composition_attempts,
+            quality_threshold=settings.creative_quality_threshold,
         ),
     )
 
@@ -381,6 +398,9 @@ async def regenerate_creative_asset(
     response: Response,
     session: SessionDependency,
     provider: CreativeGenerationProviderDependency,
+    director_provider: CreativeDirectorProviderDependency,
+    visual_review_provider: CreativeVisualReviewProviderDependency,
+    research_engine: CreativeResearchEngineDependency,
     storage: ObjectStorageDependency,
 ):
     await _guard(
@@ -398,7 +418,15 @@ async def regenerate_creative_asset(
             creative_asset_id=creative_asset_id,
             actor_user_id=access.user.id,
             provider=provider,
+            director_provider=director_provider,
+            director_max_output_tokens=settings.creative_director_max_output_tokens,
+            visual_review_provider=visual_review_provider,
+            max_visual_review_calls=settings.creative_max_visual_review_calls,
+            research_engine=research_engine,
             storage=storage,
+            max_image_attempts=settings.creative_max_image_attempts,
+            max_composition_attempts=settings.creative_max_composition_attempts,
+            quality_threshold=settings.creative_quality_threshold,
         ),
     )
 

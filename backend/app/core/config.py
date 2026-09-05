@@ -174,6 +174,37 @@ class Settings(BaseSettings):
 
     openai_image_quality: Literal["low", "medium", "high", "auto"] = "medium"
 
+    # Public creative research is optional and always degrades to the internal
+    # abstract design-pattern library. Its cache key contains only generalized
+    # public dimensions, never tenant context.
+    creative_research_enabled: bool = True
+    creative_research_max_results: int = Field(default=12, ge=4, le=15)
+    creative_research_timeout_seconds: float = Field(default=15.0, ge=1, le=60)
+    creative_research_cache_ttl_seconds: int = Field(
+        default=21_600,
+        ge=60,
+        le=604_800,
+    )
+    creative_director_enabled: bool = True
+    creative_director_max_output_tokens: int = Field(
+        default=4_000,
+        ge=1_000,
+        le=6_000,
+    )
+    # Optional semantic review of the final branded PNG. Provider failure is
+    # non-blocking and falls back to the deterministic quality gate.
+    creative_visual_review_enabled: bool = True
+    creative_visual_review_timeout_seconds: float = Field(default=30.0, ge=5, le=60)
+    creative_visual_review_max_output_tokens: int = Field(
+        default=1_600,
+        ge=500,
+        le=2_500,
+    )
+    creative_max_visual_review_calls: int = Field(default=2, ge=0, le=2)
+    creative_max_image_attempts: int = Field(default=2, ge=1, le=2)
+    creative_max_composition_attempts: int = Field(default=5, ge=1, le=5)
+    creative_quality_threshold: int = Field(default=82, ge=60, le=95)
+
     # External integrations
     #
     # Provider tokens are never stored in application database columns. The
