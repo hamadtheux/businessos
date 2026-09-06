@@ -99,16 +99,22 @@ def assess_creative_quality(
     ]
     if len(rendered_values) != len(set(rendered_values)):
         failures.append("duplicate_deterministic_text")
+    # Visual complexity is not a raw-image defect by itself.
+    #
+    # A rich, business-specific commercial scene may legitimately be detailed.
+    # But a busy scene underneath an overlay copy layout is still an invalid
+    # composition. Classify that as a LOCAL LAYOUT failure so the compositor can
+    # use editorial_split/framed_campaign without buying another generated image.
     if (
         report.visual_complexity > 0.84
         and report.selected_zone_quiet_score < 0.30
         and report.selected_layout in {
-        "cinematic_overlay",
-        "minimal_hero",
-        "vertical_story",
+            "cinematic_overlay",
+            "minimal_hero",
+            "vertical_story",
         }
     ):
-        failures.append("raw_visual_too_complex")
+        failures.append("overlay_zone_too_complex")
     if report.headline_wrap_quality < 60:
         failures.append("unnatural_headline_wrapping")
 
@@ -217,11 +223,11 @@ def assess_creative_quality(
     approved = not failures and overall >= threshold
     failure_kind = None
     if not approved:
-        failure_kind = (
-            "raw_visual"
-            if "raw_visual_too_complex" in failures
-            else "layout"
-        )
+        # Deterministic final-art QA measures technical composition:
+        # typography, overlap, safe areas, contrast, geometry and layout.
+        # Semantic raw-visual defects are owned by the vision critic, which can
+        # request one bounded raw-image regeneration when genuinely necessary.
+        failure_kind = "layout"
     return CreativeQualityAssessment(
         **dimensions,
         overall_score=overall,
@@ -321,8 +327,10 @@ def _improvements(
         actions.append("select a layout with more separation between required elements")
     if "contrast_unacceptable" in failures:
         actions.append("strengthen the controlled text surface contrast")
-    if "raw_visual_too_complex" in failures:
-        actions.append("regenerate a quieter visual with a protected copy corridor")
+    if "overlay_zone_too_complex" in failures:
+        actions.append(
+            "use a protected solid text surface instead of overlaying copy on the busy visual"
+        )
     if "extreme_unused_or_unbalanced_space" in failures:
         actions.append("rebalance the hero and copy zones")
     if "extreme_meaningless_whitespace" in failures:

@@ -1332,25 +1332,51 @@ def _score_layout_candidate(
 ) -> float:
     score = 82.0 if family == preferred else 72.0
     ratio = value.target_width / value.target_height
+    quiet_score = side_quiet_score(analysis, text_side)
+
+    # A visually rich scene is not bad artwork. It simply should not be forced
+    # underneath deterministic copy when the selected overlay zone is busy.
+    # Prefer layouts with independent solid text surfaces in that case.
+    busy_for_overlay = (
+        analysis.overall_complexity > 0.84
+        and quiet_score < 0.30
+    )
+
     if family == "vertical_story":
         score += 8 if ratio <= 0.72 else -8
+
     if family == "editorial_split":
         score += 8 if ratio >= 1.35 else 2
+
     if family == "framed_campaign":
         score += 6 if len(value.supporting_copy) > 220 else 1
+
     if family in {"minimal_hero", "cinematic_overlay", "vertical_story"}:
-        score += side_quiet_score(analysis, text_side) * 10
+        score += quiet_score * 10
         score -= analysis.overall_complexity * 4
+
+        if busy_for_overlay:
+            # Keep overlays available as bounded fallbacks, but make a protected
+            # solid text surface the clear first choice for a busy commercial
+            # scene.
+            score -= 24
     else:
-        # Solid text surfaces remain valuable fallbacks for visually busy raw
-        # images, but do not automatically displace a strong overlay layout.
         score += 5
+
+        if busy_for_overlay:
+            # editorial_split and framed_campaign isolate exact copy from image
+            # complexity, so rich imagery is an asset rather than a false raw
+            # failure.
+            score += 18
+
     if family == "minimal_hero" and (
         len(value.headline) > 90 or len(value.supporting_copy) > 240
     ):
         score -= 12
+
     if value.offer and family in {"editorial_split", "framed_campaign"}:
         score += 2
+
     return round(max(0.0, min(100.0, score)), 3)
 
 

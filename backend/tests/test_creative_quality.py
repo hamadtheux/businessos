@@ -287,11 +287,12 @@ class CreativeLayoutAndQualityTests(TestCase):
         self.assertFalse(broken.approved_for_delivery)
         self.assertTrue(any("overlap" in value for value in broken.hard_failures))
 
-    def test_noisy_visual_is_classified_for_bounded_raw_regeneration(self) -> None:
+    def test_noisy_visual_overlay_is_classified_as_layout_failure(self) -> None:
         result = _composition(_visual(noisy=True))
-        # The real compositor first repairs this fixture with a solid editorial
-        # split. Force an overlay report to exercise the raw-visual failure
-        # classification used only after layout candidates are exhausted.
+
+        # Rich imagery is allowed, but deterministic copy must not be placed
+        # directly over a busy zone. This is a local composition problem, not
+        # evidence that the generated raw image should be discarded/regenerated.
         overlay_report = replace(
             result.quality,
             selected_layout="minimal_hero",
@@ -303,8 +304,19 @@ class CreativeLayoutAndQualityTests(TestCase):
             selected_layout="minimal_hero",
             quality=overlay_report,
         )
-        assessment = assess_creative_quality(overlay_result, threshold=82)
+
+        assessment = assess_creative_quality(
+            overlay_result,
+            threshold=82,
+        )
 
         self.assertFalse(assessment.approved_for_delivery)
-        self.assertEqual(assessment.failure_kind, "raw_visual")
-        self.assertIn("raw_visual_too_complex", assessment.hard_failures)
+        self.assertEqual(assessment.failure_kind, "layout")
+        self.assertIn(
+            "overlay_zone_too_complex",
+            assessment.hard_failures,
+        )
+        self.assertNotIn(
+            "raw_visual_too_complex",
+            assessment.hard_failures,
+        )

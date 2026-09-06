@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from io import BytesIO
+from random import Random
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -66,6 +67,31 @@ def _mixed_image_bytes() -> bytes:
                     ),
                     fill=(240, 240, 240),
                 )
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
+def _genuinely_busy_image_bytes() -> bytes:
+    """High-frequency source detail that survives bounded visual downsampling."""
+    rng = Random(7)
+    image = Image.new("RGB", (800, 600))
+    draw = ImageDraw.Draw(image)
+    block = 4
+
+    for y in range(0, image.height, block):
+        for x in range(0, image.width, block):
+            value = rng.randrange(256)
+            draw.rectangle(
+                (
+                    x,
+                    y,
+                    x + block - 1,
+                    y + block - 1,
+                ),
+                fill=(value, value, value),
+            )
+
     output = BytesIO()
     image.save(output, format="PNG")
     return output.getvalue()
@@ -156,6 +182,25 @@ class CreativeCompositorTests(TestCase):
         self.assertEqual(result.selected_layout, "framed_campaign")
         self.assertTrue(result.quality.valid_png)
         self.assertEqual((result.width, result.height), (640, 640))
+
+    def test_busy_visual_prefers_protected_text_surface(self) -> None:
+        result = CreativeCompositor().compose(
+            _input(
+                raw_visual=_genuinely_busy_image_bytes(),
+            )
+        )
+
+        # Rich visual detail must not be mistaken for a defective raw image.
+        # When an overlay copy zone is unsafe, the compositor should keep the
+        # same raw visual and choose a protected deterministic text surface.
+        self.assertGreater(result.quality.visual_complexity, 0.84)
+        self.assertLess(result.quality.selected_zone_quiet_score, 0.30)
+        self.assertIn(
+            result.selected_layout,
+            {"editorial_split", "framed_campaign"},
+        )
+        self.assertTrue(result.quality.valid_png)
+        self.assertTrue(result.quality.exact_dimensions)
 
     def test_cinematic_overlay_is_reachable_and_valid(self) -> None:
         result = CreativeCompositor().compose(
