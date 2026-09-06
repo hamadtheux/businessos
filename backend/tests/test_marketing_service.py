@@ -673,6 +673,131 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("availability=in_stock", runtime.await_args.args[2])
 
 
+    async def test_creative_strategy_runtime_uses_provider_draft_schema(self) -> None:
+        execution = SimpleNamespace(output=object(), provider_metadata=None)
+
+        with patch(
+            "app.services.marketing.execute_ai_agent_typed_with_metadata",
+            new=AsyncMock(return_value=execution),
+        ) as runtime:
+            result = await _execute_creative_strategy(
+                _ScalarSession([]),
+                BUSINESS_ID,
+                "Build a grounded creative strategy.",
+                SimpleNamespace(),
+                expected_channel="instagram",
+            )
+
+        self.assertIs(result, execution)
+        output_type = runtime.await_args.args[4]
+        self.assertEqual(
+            output_type.__name__,
+            "_CreativeStrategyProviderProposal",
+        )
+        # Governance-sensitive provider values remain visible so the server
+        # can explicitly reject attempted provenance/actions instead of
+        # silently deleting them.
+        self.assertIn("offer", output_type.model_fields)
+        self.assertIn("claim_source", output_type.model_fields)
+        self.assertIn("evidence_source_ids", output_type.model_fields)
+        self.assertIn("recommendations", output_type.model_fields)
+        self.assertIn("proposed_actions", output_type.model_fields)
+        self.assertIn("recommended_channel", output_type.model_fields)
+
+    async def test_creative_strategy_canonicalizes_instagram_offer_before_domain_validation(self) -> None:
+        authorized_offer = "50% off"
+
+        content = MarketingContent(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            campaign_id=None,
+            channel="instagram",
+            content_type="social_post",
+            title="50% Off",
+            body="A grounded automation product story.",
+            cta="Explore now",
+            language="en",
+            status="draft",
+            ai_generated=True,
+            version=1,
+            parent_content_id=None,
+            root_content_id=uuid4(),
+            created_by_user_id=USER_ID,
+            creative_brief="Show the supported product value clearly.",
+            source_evidence=[
+                {
+                    "classification": "claim_provenance",
+                    "claim_type": "offer",
+                    "claim_source": "owner_provided_campaign_input",
+                    "claim_value": authorized_offer,
+                }
+            ],
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+        provider_output = _creative_strategy()
+        for server_owned in (
+            "offer",
+            "claim_source",
+            "evidence_source_ids",
+            "recommendations",
+            "proposed_actions",
+        ):
+            provider_output.pop(server_owned, None)
+
+        # Reproduce the production failure shape:
+        # provider repeats the offer as headline and varies channel casing.
+        provider_output.update(
+            {
+                "headline": "50% off",
+                "hook": "Put your business workflow on a smarter operating system.",
+                "recommended_channel": "Instagram",
+            }
+        )
+
+        execution = SimpleNamespace(
+            provider_metadata=SimpleNamespace(
+                provider_request_id="req-creative-offer-channel",
+            ),
+            output=provider_output,
+        )
+
+        with patch(
+            "app.services.marketing._execute_creative_strategy",
+            new=AsyncMock(return_value=execution),
+        ):
+            asset = await create_creative_brief(
+                _ScalarSession([content]),
+                business_id=BUSINESS_ID,
+                actor_user_id=USER_ID,
+                data=CreativeBriefCreate(
+                    content_id=content.id,
+                    asset_type="social_square",
+                    instructions="make a strong instagram post",
+                    aspect_ratio="1:1",
+                ),
+                provider=SimpleNamespace(),
+            )
+
+        strategy = json.loads(asset.visual_direction)
+
+        self.assertEqual(asset.generation_status, "brief_ready")
+        self.assertEqual(strategy["recommended_channel"], "instagram")
+        self.assertEqual(strategy["offer"], authorized_offer)
+        self.assertEqual(
+            strategy["claim_source"],
+            "owner_provided_campaign_input",
+        )
+        self.assertEqual(
+            strategy["headline"],
+            "Put your business workflow on a smarter operating system.",
+        )
+        self.assertNotEqual(
+            " ".join(strategy["headline"].casefold().split()),
+            " ".join(authorized_offer.casefold().split()),
+        )
+
     async def test_creative_intelligence_turns_weak_request_into_structured_strategy(self) -> None:
         execution = SimpleNamespace(
             provider_metadata=SimpleNamespace(
@@ -932,7 +1057,11 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Never invent testimonials", task)
         self.assertIn("MARKETING + PR STANDARD:", task)
         self.assertIn("OUTPUT CONTRACT:", task)
-        self.assertIn("Return exactly one CreativeStrategyProposal", task)
+        self.assertIn("Return exactly one creative strategy draft", task)
+        self.assertIn(
+            "server can reject attempted provenance or actions before persistence",
+            task,
+        )
         self.assertIn("Never include hidden reasoning or chain-of-thought.", task)
         self.assertIn(f"- Offer: {authorized_offer}", task)
         self.assertIn("- Channel: instagram", task)

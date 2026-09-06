@@ -12,7 +12,7 @@ from typing import Any, Literal
 from uuid import UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -109,7 +109,11 @@ from app.models.marketing import (
     SocialSchedule,
 )
 from app.models.notification import Notification
-from app.schemas.ai_agent import AIAgentExecutionRequest, MAX_AGENT_TASK_LENGTH
+from app.schemas.ai_agent import (
+    AIAgentExecutionRequest,
+    AIAgentProposedAction,
+    MAX_AGENT_TASK_LENGTH,
+)
 from app.schemas.marketing import (
     AnalyticsBreakdown,
     AudienceCreate,
@@ -1580,6 +1584,59 @@ _CREATIVE_STRATEGY_TASK_BUDGET = (
     MAX_AGENT_TASK_LENGTH - _CREATIVE_STRATEGY_RUNTIME_RULE_MARGIN
 )
 
+class _CreativeStrategyProviderProposal(BaseModel):
+    """
+    AI-authored creative draft before server-owned canonicalization.
+
+    This deliberately avoids final domain cross-field validators so a usable
+    provider response can reach the server validation boundary. Security-
+    sensitive fields remain present so attempted evidence, actions, provenance,
+    offers, or channel changes can be explicitly inspected and rejected.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    marketing_goal: str = Field(min_length=1, max_length=300)
+    target_audience: str = Field(min_length=1, max_length=500)
+    audience_insight: str = Field(min_length=1, max_length=500)
+
+    campaign_angle: str = Field(min_length=1, max_length=500)
+    hook: str = Field(min_length=1, max_length=280)
+    headline: str = Field(min_length=1, max_length=180)
+    supporting_message: str = Field(min_length=1, max_length=600)
+
+    offer: str | None = Field(default=None, max_length=160)
+    claim_source: Literal[
+        "none",
+        "authoritative_business_context",
+        "owner_provided_campaign_input",
+        "ai_inferred_or_generated_claim",
+    ] = "none"
+    cta: str | None = Field(default=None, max_length=300)
+
+    visual_concept: str = Field(min_length=1, max_length=900)
+    composition_direction: str = Field(min_length=1, max_length=700)
+    subject_focus: str = Field(min_length=1, max_length=500)
+    mood: str = Field(min_length=1, max_length=240)
+    lighting: str = Field(min_length=1, max_length=240)
+    negative_space: str = Field(min_length=1, max_length=300)
+    brand_treatment: str = Field(min_length=1, max_length=700)
+
+    # Provider value is inspected before the trusted server channel is applied.
+    # It intentionally has no domain channel validator here.
+    recommended_channel: str = Field(min_length=1, max_length=40)
+
+    pr_guardrails: list[str] = Field(default_factory=list, max_length=8)
+    prohibited_claims: list[str] = Field(default_factory=list, max_length=8)
+
+    evidence_source_ids: list[str] = Field(default_factory=list, max_length=20)
+    recommendations: list[str] = Field(default_factory=list, max_length=20)
+    proposed_actions: list[AIAgentProposedAction] = Field(
+        default_factory=list,
+        max_length=20,
+    )
+
+
 _CREATIVE_STRATEGY_TASK_PREAMBLE = (
     "Act as the senior Creative Intelligence team for this business: "
     "marketing strategist, brand strategist, PR reviewer, copywriter, and "
@@ -1605,6 +1662,9 @@ _CREATIVE_STRATEGY_TASK_CONTRACT = (
     "layout, camera, lighting, image, typography, logo or design instructions there.\n"
     "- Use a concise, correctly capitalized CTA only when the trusted context supports "
     "the action; otherwise null. Keep any offer separate and visually supporting.\n"
+    "- When a server-classified offer exists, do not merely repeat that offer as the "
+    "headline. Write a grounded value-led headline; the server adds the exact offer "
+    "as a separate deterministic element.\n"
     "- Avoid manipulative, deceptive, unsafe or unsupported wording. Adapt to the "
     "requested asset and known channel. Give executable expert design direction.\n"
     "- Require a business-specific product/service story. Gradients, rings, circles, "
@@ -1613,14 +1673,18 @@ _CREATIVE_STRATEGY_TASK_CONTRACT = (
     "- Reserve negative space for deterministic logo and exact copy. Never ask an "
     "image model to draw logos or final typography. Do not claim an image exists.\n\n"
     "OUTPUT CONTRACT:\n"
-    "Return exactly one CreativeStrategyProposal, without markdown or nested JSON. Set "
-    "recommendations, proposed_actions and evidence_source_ids to empty lists. Fields:\n"
+    "Return exactly one creative strategy draft, without markdown or nested JSON. Fields:\n"
     "marketing_goal, target_audience, audience_insight, campaign_angle, hook, "
-    "headline, supporting_message, offer, claim_source, cta, visual_concept, composition_direction, "
-    "subject_focus, mood, lighting, negative_space, brand_treatment, "
-    "recommended_channel, pr_guardrails, prohibited_claims, evidence_source_ids.\n"
-    "Use short user-visible guardrail lists. Set claim_source to none; the server "
-    "applies provenance after validation. Never include hidden reasoning or chain-of-thought."
+    "headline, supporting_message, offer, claim_source, cta, visual_concept, "
+    "composition_direction, subject_focus, mood, lighting, negative_space, "
+    "brand_treatment, recommended_channel, pr_guardrails, prohibited_claims, "
+    "evidence_source_ids, recommendations, proposed_actions.\n"
+    "When a trusted content channel is present above, echo that exact channel in "
+    "recommended_channel. Preserve only the server-classified offer above or return "
+    "null when no offer exists. Set claim_source to none. Set evidence_source_ids, "
+    "recommendations and proposed_actions to empty lists. These fields remain visible "
+    "so the server can reject attempted provenance or actions before persistence. "
+    "Use short user-visible guardrail lists. Never include hidden reasoning or chain-of-thought."
 )
 
 
@@ -1934,14 +1998,143 @@ async def create_creative_brief(
     )
 
     try:
-        strategy = CreativeStrategyProposal.model_validate(
-            execution.output
+        provider_strategy = _CreativeStrategyProviderProposal.model_validate(
+            execution.output,
+            from_attributes=True,
         )
     except ValidationError:
         _log_creative_strategy_failure(
-            "creative_strategy_schema_invalid",
+            "creative_strategy_provider_payload_invalid",
             provider=provider,
             expected_channel=expected_channel,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
+        raise MarketingAIError from None
+
+    provider_channel = _normalize_creative_strategy_context(
+        provider_strategy.recommended_channel
+    ).casefold()
+
+    expected_channel_normalized = (
+        _normalize_creative_strategy_context(expected_channel).casefold()
+        if expected_channel is not None
+        else None
+    )
+
+    # Governance violations must be rejected, never silently removed.
+    if provider_strategy.recommendations:
+        _log_creative_strategy_failure(
+            "creative_strategy_unexpected_recommendations",
+            provider=provider,
+            expected_channel=expected_channel,
+            returned_channel=provider_strategy.recommended_channel,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
+        raise MarketingAIError
+
+    if provider_strategy.proposed_actions:
+        _log_creative_strategy_failure(
+            "creative_strategy_proposed_actions_rejected",
+            provider=provider,
+            expected_channel=expected_channel,
+            returned_channel=provider_strategy.recommended_channel,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
+        raise MarketingAIError
+
+    if provider_strategy.evidence_source_ids:
+        _log_creative_strategy_failure(
+            "creative_strategy_evidence_ids_rejected",
+            provider=provider,
+            expected_channel=expected_channel,
+            returned_channel=provider_strategy.recommended_channel,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
+        raise MarketingAIError
+
+    if (
+        expected_channel_normalized is not None
+        and provider_channel != expected_channel_normalized
+    ):
+        _log_creative_strategy_failure(
+            "creative_strategy_channel_mismatch",
+            provider=provider,
+            expected_channel=expected_channel,
+            returned_channel=provider_strategy.recommended_channel,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
+        raise MarketingAIError
+
+    if provider_strategy.claim_source != "none":
+        _log_creative_strategy_failure(
+            "creative_strategy_claim_source_rejected",
+            provider=provider,
+            expected_channel=expected_channel,
+            returned_channel=provider_strategy.recommended_channel,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
+        raise MarketingAIError
+
+    provider_offer = _normalized_claim(provider_strategy.offer)
+    trusted_offer = _normalized_claim(authorized_offer)
+
+    if authorized_offer is not None:
+        if provider_offer not in {None, trusted_offer}:
+            _log_creative_strategy_failure(
+                "creative_strategy_offer_mismatch",
+                provider=provider,
+                expected_channel=expected_channel,
+                returned_channel=provider_strategy.recommended_channel,
+                provider_request_id=_creative_strategy_request_id(execution),
+            )
+            raise MarketingAIError
+    elif provider_offer is not None:
+        _log_creative_strategy_failure(
+            "creative_strategy_unsupported_offer_rejected",
+            provider=provider,
+            expected_channel=expected_channel,
+            returned_channel=provider_strategy.recommended_channel,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
+        raise MarketingAIError
+
+    # Only after provider output has passed the security/governance boundary do
+    # trusted server values replace model-authored values.
+    canonical_channel = (
+        expected_channel_normalized
+        if expected_channel_normalized is not None
+        else provider_channel
+    )
+
+    try:
+        strategy = CreativeStrategyProposal.model_validate(
+            {
+                **provider_strategy.model_dump(
+                    exclude={
+                        "offer",
+                        "claim_source",
+                        "recommended_channel",
+                        "evidence_source_ids",
+                        "recommendations",
+                        "proposed_actions",
+                    }
+                ),
+                # Exact authorized offer and provenance are applied by the
+                # existing trusted-offer branch below, after headline repair.
+                "offer": None,
+                "claim_source": "none",
+                "recommended_channel": canonical_channel,
+                "evidence_source_ids": [],
+                "recommendations": [],
+                "proposed_actions": [],
+            }
+        )
+    except ValidationError:
+        _log_creative_strategy_failure(
+            "creative_strategy_domain_invalid",
+            provider=provider,
+            expected_channel=expected_channel,
+            returned_channel=provider_strategy.recommended_channel,
             provider_request_id=_creative_strategy_request_id(execution),
         )
         raise MarketingAIError from None
@@ -2018,6 +2211,46 @@ async def create_creative_brief(
                 provider_request_id=_creative_strategy_request_id(execution),
             )
             raise MarketingAIError
+        normalized_authorized_offer = _normalized_claim(
+            authorized_offer
+        )
+        if (
+            normalized_authorized_offer is not None
+            and _normalized_claim(strategy.headline)
+            == normalized_authorized_offer
+        ):
+            # The provider may copy a promotion into the headline even though
+            # the offer is rendered separately. Reuse grounded customer-facing
+            # copy already produced in the same strategy instead of failing the
+            # entire creative or inventing new server copy.
+            replacement_headline = _shorten_creative_strategy_context(
+                strategy.hook,
+                180,
+            )
+            if (
+                not replacement_headline
+                or _normalized_claim(replacement_headline)
+                == normalized_authorized_offer
+            ):
+                _log_creative_strategy_failure(
+                    "creative_strategy_offer_headline_unrepairable",
+                    provider=provider,
+                    expected_channel=expected_channel,
+                    returned_channel=strategy.recommended_channel,
+                    provider_request_id=_creative_strategy_request_id(execution),
+                )
+                raise MarketingAIError
+
+            try:
+                strategy = CreativeStrategyProposal.model_validate(
+                    {
+                        **strategy.model_dump(),
+                        "headline": replacement_headline,
+                    }
+                )
+            except ValidationError:
+                raise MarketingAIError from None
+
         try:
             strategy = CreativeStrategyProposal.model_validate({
                 **strategy.model_dump(),
@@ -4556,7 +4789,7 @@ async def _execute_creative_strategy(
             business_id,
             request,
             provider,
-            CreativeStrategyProposal,
+            _CreativeStrategyProviderProposal,
         )
     except AIAgentResponseError:
         _log_creative_strategy_failure(
