@@ -59,6 +59,9 @@ _STOPWORDS = frozenset(
 )
 
 
+from app.services.creative_world_class import assess_world_class_creative
+
+
 class CreativeConceptScorecard(DirectionSchema):
     brand_fit: int = Field(ge=0, le=100)
     business_specific_relevance: int = Field(ge=0, le=100)
@@ -451,7 +454,16 @@ def build_creative_director_task(
     research: CreativeResearchBundle,
     context: PublicCreativeResearchContext,
 ) -> str:
-    """Build one bounded task containing principles, never source artwork or URLs."""
+    """
+    Build one bounded Creative Director task without blind truncation.
+
+    Authoritative campaign values and the final server-owned quality/safety
+    contract are mandatory. Only abstract research and fallback design guidance
+    may be shortened to satisfy the global 4,000-character task ceiling.
+    """
+
+    max_task_length = 4000
+
     pattern_lines = "\n".join(
         (
             f"- {pattern.name}: {pattern.visual_metaphor}; "
@@ -459,25 +471,35 @@ def build_creative_director_task(
         )
         for pattern in _ranked_patterns(context)
     )
+
     research_principles = "; ".join(
         (
             *research.dominant_patterns,
             *research.emerging_patterns,
             *research.recommended_visual_directions,
         )[:12]
-    ) or "No live research available; rely on the internal abstract pattern guidance."
-    avoid_patterns = "; ".join(
-        (*research.avoid_patterns, *research.originality_constraints)[:10]
+    ) or (
+        "No live research available; rely on internal abstract pattern guidance."
     )
-    task = (
+
+    avoid_patterns = "; ".join(
+        (
+            *research.avoid_patterns,
+            *research.originality_constraints,
+        )[:10]
+    ) or "none"
+
+    mandatory_prefix = (
         "Act as a senior advertising Creative Director. Produce exactly three "
-        "materially different, executable visual concepts in one typed response. "
-        "The candidates must differ in hero idea, metaphor, image-making approach, "
-        "product representation, camera direction, and spatial rhythm—not merely "
-        "color or crop. Each marketing_idea must state the campaign mechanism and "
-        "customer_care_reason must explain why the target customer will care. Reject "
-        "replaceable-brand ideas, decorative abstraction, generic gradients, rings, "
-        "circles, waves, or geometry with no product/service story. Do not self-score.\n\n"
+        "materially different executable concepts. They must differ in hero idea, "
+        "metaphor, image-making approach, product representation, camera direction, "
+        "and spatial rhythm—not merely color or crop. Every concept must show a "
+        "specific cause -> mechanism -> customer outcome. Reject generic premium "
+        "desk/workspace photography, decorative abstraction, generic productivity "
+        "metaphors, generic person-at-laptop scenes, replaceable-brand concepts, and "
+        "generic AI/SaaS fantasy imagery unless it visibly demonstrates the supported "
+        "business mechanism. Do not self-score.\n\n"
+
         "TRUSTED CAMPAIGN STRATEGY:\n"
         f"- Goal: {strategy.marketing_goal}\n"
         f"- Audience: {strategy.target_audience}\n"
@@ -489,35 +511,156 @@ def build_creative_director_task(
         f"- Supported visual concept: {strategy.visual_concept}\n"
         f"- Supported hero subject: {strategy.subject_focus}\n"
         f"- Brand treatment: {strategy.brand_treatment}\n\n"
+
         "PUBLIC-SAFE CAMPAIGN DIMENSIONS:\n"
         f"- Industry: {context.industry}\n"
         f"- Objective: {context.campaign_objective}\n"
         f"- Channel: {context.channel}\n"
         f"- Format: {context.creative_format}\n"
-        f"- Style family: {context.style_family}\n\n"
-        "ABSTRACT RESEARCH SIGNALS ONLY:\n"
-        f"{research_principles[:1200]}\n"
-        f"Avoid: {avoid_patterns[:900]}\n\n"
-        "INTERNAL FALLBACK GUIDANCE (combine or depart from it thoughtfully):\n"
-        f"{pattern_lines[:1200]}\n\n"
-        "OUTPUT RULES:\n"
+        f"- Style family: {context.style_family}\n"
+    )
+
+    mandatory_suffix = (
+        "\n\nOUTPUT RULES:\n"
         "- Return exactly three candidates through the required typed schema.\n"
         "- Ground every subject and factual implication in the trusted strategy.\n"
-        "- Explain why the hero is relevant, how the offering is represented, and "
-        "what creates the immediate scroll-stopping read.\n"
-        "- Make the product story commercially meaningful; reject decoration-only "
-        "abstract geometry when it does not express the business or objective.\n"
+        "- marketing_idea must state the advertising mechanism.\n"
+        "- customer_care_reason must explain the customer tension or consequence.\n"
+        "- product_story must show cause -> mechanism -> outcome.\n"
+        "- The hero must visually prove the supported offering rather than merely "
+        "provide attractive atmosphere.\n"
+        "- Reject generic stock/lifestyle scenes even when visually premium.\n"
+        "- Reject swap-logo concepts an unrelated business could use unchanged.\n"
+        "- Reject decoration-only gradients, rings, circles, waves, blobs, or "
+        "geometry as the central campaign idea.\n"
         "- Treat an offer as a controlled supporting element, not the automatic hero.\n"
-        "- Explain brand expression and offer integration explicitly, and list what "
-        "must not appear in avoid_patterns.\n"
         "- Reserve a feasible quiet zone for exact deterministic copy and logo.\n"
-        "- Use inspiration as abstract rhythm, hierarchy, lighting, density, and style only.\n"
-        "- Never copy, clone, replicate, duplicate, or imitate a source design.\n"
-        "- Never include URLs, evidence IDs, external actions, hidden reasoning, or chain-of-thought.\n"
-        "- The raw image will contain no typography; describe visual direction, not final copy."
+        "- Use inspiration only as abstract rhythm, hierarchy, lighting, density, "
+        "composition, and style.\n"
+        "- Never copy, clone, replicate, duplicate, or imitate source artwork.\n"
+        "- Never include URLs, evidence IDs, external actions, hidden reasoning, "
+        "credentials, or chain-of-thought.\n"
+        "- The raw image will contain no typography; describe visual direction, "
+        "not final copy."
     )
-    return task[:4000]
 
+    fixed_task = mandatory_prefix + mandatory_suffix
+
+    if len(fixed_task) > max_task_length:
+        # Never truncate authoritative campaign values or mandatory policy.
+        raise ValueError(
+            "Creative Director mandatory task content exceeds the safe task budget"
+        )
+
+    remaining = max_task_length - len(fixed_task)
+
+    dynamic_sources: tuple[tuple[str, str, float], ...] = (
+        (
+            "\n\nABSTRACT RESEARCH SIGNALS ONLY:\n",
+            research_principles,
+            0.38,
+        ),
+        (
+            "\nAvoid: ",
+            avoid_patterns,
+            0.20,
+        ),
+        (
+            "\n\nINTERNAL FALLBACK GUIDANCE:\n",
+            pattern_lines,
+            0.42,
+        ),
+    )
+
+    label_total = sum(
+        len(label)
+        for label, _value, _weight in dynamic_sources
+    )
+
+    dynamic = ""
+
+    if remaining > label_total:
+        content_budget = remaining - label_total
+        allocations: list[int] = []
+        unallocated = content_budget
+
+        for index, (_label, _value, weight) in enumerate(dynamic_sources):
+            if index == len(dynamic_sources) - 1:
+                amount = unallocated
+            else:
+                amount = min(
+                    unallocated,
+                    max(0, int(content_budget * weight)),
+                )
+
+            allocations.append(amount)
+            unallocated -= amount
+
+        sections: list[str] = []
+
+        for (
+            label,
+            value,
+            _weight,
+        ), allocation in zip(
+            dynamic_sources,
+            allocations,
+            strict=True,
+        ):
+            # Research/pattern material is non-authoritative and may be bounded.
+            normalized = " ".join(value.split())
+
+            if len(normalized) > allocation:
+                if allocation >= 2:
+                    normalized = normalized[: allocation - 1].rstrip() + "…"
+                else:
+                    normalized = normalized[:allocation]
+
+            sections.append(label + normalized)
+
+        dynamic = "".join(sections)
+
+    task = mandatory_prefix + dynamic + mandatory_suffix
+
+    if len(task) > max_task_length:
+        raise ValueError(
+            "Creative Director task exceeded the safe task budget"
+        )
+
+    required_contract_markers = (
+        "Return exactly three candidates",
+        "Reject generic stock/lifestyle scenes",
+        "Reject swap-logo concepts",
+        "Never copy, clone, replicate",
+        "Never include URLs",
+        "raw image will contain no typography",
+    )
+
+    if any(marker not in task for marker in required_contract_markers):
+        raise ValueError(
+            "Creative Director task lost a mandatory quality or safety contract"
+        )
+
+    authoritative_values = (
+        strategy.marketing_goal,
+        strategy.target_audience,
+        strategy.audience_insight,
+        strategy.campaign_angle,
+        strategy.headline,
+        strategy.offer,
+        strategy.cta,
+        strategy.visual_concept,
+        strategy.subject_focus,
+        strategy.brand_treatment,
+    )
+
+    for value in authoritative_values:
+        if value and value not in task:
+            raise ValueError(
+                "Creative Director task lost authoritative campaign input"
+            )
+
+    return task
 
 def build_visual_art_direction(
     *,
@@ -736,6 +879,77 @@ def _build_pattern_proposal(
     )
 
 
+def _world_class_concept_assessment(
+    *,
+    proposal: CreativeConceptProposal,
+    strategy: CreativeStrategyProposal,
+    context: PublicCreativeResearchContext,
+):
+    """
+    Evaluate one renderer-bound concept against the centralized commercial policy.
+
+    Only already-grounded, public-safe strategy fields are used here. This function
+    does not add new business claims, provider data, URLs, credentials, or private
+    research evidence.
+    """
+    business_context = " | ".join(
+        (
+            context.industry,
+            strategy.visual_concept,
+            strategy.subject_focus,
+            strategy.brand_treatment,
+            strategy.audience_insight,
+        )
+    )
+
+    return assess_world_class_creative(
+        business_context=business_context,
+        campaign_goal=strategy.marketing_goal,
+        audience=strategy.target_audience,
+        subject_focus=strategy.subject_focus,
+        campaign_angle=strategy.campaign_angle,
+        marketing_idea=proposal.marketing_idea,
+        customer_care_reason=proposal.customer_care_reason,
+        hero_subject=proposal.hero_subject,
+        hero_relevance=proposal.hero_relevance,
+        product_story=proposal.product_story,
+        visual_metaphor=proposal.visual_metaphor,
+        scroll_stopping_hook=proposal.scroll_stopping_hook,
+    )
+
+
+def _world_class_policy_blocks_render(assessment) -> bool:
+    """
+    Hard-stop obvious agency-quality failures.
+
+    We intentionally do not use `assessment.approved` as the only gate because the
+    semantic final-image critic remains authoritative for nuanced visual quality.
+    This deterministic layer exists to stop unmistakably generic concepts before
+    money is spent on image generation.
+    """
+    blocking_failures = {
+        "generic_lifestyle_stock_scene",
+        "decorative_abstraction_as_story",
+        "replaceable_brand_idea",
+        "generic_productivity_metaphor",
+    }
+
+    return (
+        bool(blocking_failures.intersection(assessment.hard_failures))
+        or assessment.stock_lifestyle_risk >= 72
+        or assessment.decorative_abstraction_risk >= 72
+        or assessment.replaceable_brand_risk >= 72
+        or (
+            assessment.commercial_readiness < 42
+            and assessment.visual_proof < 48
+        )
+        or (
+            assessment.business_specificity < 42
+            and assessment.product_service_mechanism < 48
+        )
+    )
+
+
 def _score_candidates(
     proposals: tuple[CreativeConceptProposal, ...],
     *,
@@ -844,11 +1058,26 @@ def _score_candidates(
             f"{proposal.customer_care_reason} {proposal.visual_metaphor}"
         )
         story_tokens = _tokens(product_story_text)
-        genericness_risk = _genericness_risk(product_story_text)
-        replaceable_brand_risk = _replaceable_brand_risk(
-            story_tokens=story_tokens,
-            strategy_tokens=strategy_tokens,
+
+        world_class = _world_class_concept_assessment(
             proposal=proposal,
+            strategy=strategy,
+            context=context,
+        )
+
+        genericness_risk = max(
+            _genericness_risk(product_story_text),
+            world_class.stock_lifestyle_risk,
+            world_class.decorative_abstraction_risk,
+        )
+
+        replaceable_brand_risk = max(
+            _replaceable_brand_risk(
+                story_tokens=story_tokens,
+                strategy_tokens=strategy_tokens,
+                proposal=proposal,
+            ),
+            world_class.replaceable_brand_risk,
         )
         story_mechanism = _contains_any(
             product_story_text,
@@ -978,7 +1207,10 @@ def _score_candidates(
             - genericness_risk * 0.16
             - replaceable_brand_risk * 0.18
         )
-        if genericness_risk >= 65 or replaceable_brand_risk >= 72:
+        if _world_class_policy_blocks_render(world_class):
+            # A beautiful-but-generic concept must never win server selection.
+            overall = min(overall, 49)
+        elif genericness_risk >= 65 or replaceable_brand_risk >= 72:
             overall = min(overall, 58)
         results.append(
             CreativeConceptScorecard(**dimensions, overall_score=overall)
@@ -992,7 +1224,8 @@ def creative_direction_meets_quality_floor(
     """Reject a polished-looking concept that could belong to any business."""
     score = direction.selected_concept.scorecard
     return (
-        score.business_specific_relevance >= 55
+        score.overall_score >= 60
+        and score.business_specific_relevance >= 55
         and score.marketing_idea_strength >= 55
         and score.product_relevance >= 55
         and score.visual_storytelling >= 55

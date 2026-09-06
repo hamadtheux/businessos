@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.agents.provider import AIAgentProviderMetadata
 
+from app.services.creative_world_class import WORLD_CLASS_VISUAL_CRITIC_CONTRACT
+
 
 VisualRepairClass = Literal["none", "layout", "raw_visual"]
 VisualHardFailure = Literal[
@@ -279,49 +281,134 @@ class CreativeVisualReviewProviderError(RuntimeError):
     """Safe visual-review failure that never contains provider payloads."""
 
 
-def build_visual_review_task(request: CreativeVisualReviewRequest) -> str:
-    """Create the bounded text paired with the transient final-image input."""
-    return (
-        "Review the attached final marketing creative as a strict senior visual "
-        "quality critic. Judge what is visibly present, not hidden reasoning.\n"
-        f"Campaign objective: {request.campaign_objective}\n"
-        f"Channel: {request.channel}\n"
-        f"Selected concept: {request.concept_name}\n"
-        f"Expected hero and product story: {request.concept_expectations}\n"
-        f"Expected exact headline: {request.expected_headline}\n"
-        f"Expected exact offer: {request.expected_offer or '[none]'}\n"
-        f"Expected exact CTA: {request.expected_cta or '[none]'}\n"
-        f"Brand expectations: {request.brand_expectations}\n"
-        f"Approval floor: {request.quality_threshold}/100.\n"
-        "Score hierarchy, composition, brand consistency, logo/identity quality, "
-        "readability, CTA and offer clarity, focal and product/category relevance, "
-        "business-specific relevance, visual storytelling, commercial sophistication, "
-        "originality, polish, scroll-stopping strength, message coherence, whitespace "
-        "balance, typography, sophistication, and campaign alignment. Treat 68 as the "
-        "minimum acceptable score for any individual dimension and reject generic-template "
-        "risk above 48. The overall semantic quality must also meet the supplied approval "
-        "floor.\n"
-        "Reject as raw_visual when generated background artwork contains any "
-        "accidental words, fake letters, a second copy of the headline/offer/CTA "
-        "(including a giant duplicate such as 50% OFF), a generic abstract SaaS "
-        "background with no product/campaign relevance, irrelevant decorative art, "
-        "or no meaningful focal story. Apply a swap-the-logo test: if the exact same "
-        "creative could advertise an unrelated company, mark replaceable_brand_creative. "
-        "Mark decorative_abstraction_dominates for gradients, rings, circles, waves, "
-        "or arbitrary geometry that substitutes for a product/service story. Mark "
-        "no_product_service_story when the supported offering or credible customer "
-        "outcome is not visually communicated, and commercially_weak when the output "
-        "looks like generic decoration rather than an art-directed campaign, "
-        "or an artifact that cannot be repaired by rearranging deterministic layers. "
-        "Reject as layout when the supplied artwork is usable but hierarchy, balance, "
-        "spacing, crowding, excessive dead panel space, awkward short-headline wrapping, "
-        "weak/non-brand CTA treatment, or disconnected identity "
-        "requires another local composition. Reject technically valid but aesthetically "
-        "mediocre output. Approve only a polished, readable, original, brand-consistent "
-        "final with a commercially meaningful visual story. Keep repair "
-        "instructions short and do not reveal chain-of-thought."
+def build_visual_review_task(
+    request: CreativeVisualReviewRequest,
+) -> str:
+    """
+    Create the bounded commercial-review task paired with one transient final PNG.
+
+    This remains a deliberately narrow privacy boundary. The critic receives only
+    the final creative and bounded delivery expectations. It does not receive CRM
+    records, private Business Brain documents, research URLs, credentials, source
+    images, storage identifiers, or provider internals.
+    """
+    task = (
+        "Review the attached final marketing creative as an exceptionally strict "
+        "global-agency Creative Director and visual quality critic. Judge only what "
+        "is visibly present in the supplied final PNG and the bounded expectations "
+        "below. Do not reward an image merely because it is clean, expensive-looking, "
+        "photorealistic, minimal, trendy, or technically well generated.\n\n"
+
+        "CAMPAIGN EXPECTATIONS:\n"
+        f"- Objective: {request.campaign_objective}\n"
+        f"- Channel: {request.channel}\n"
+        f"- Selected concept: {request.concept_name}\n"
+        f"- Commercial story expected: {request.concept_expectations}\n"
+        f"- Exact headline: {request.expected_headline}\n"
+        f"- Exact offer: {request.expected_offer or '[none]'}\n"
+        f"- Exact CTA: {request.expected_cta or '[none]'}\n"
+        f"- Brand expectations: {request.brand_expectations}\n"
+        f"- Runtime approval target: {request.quality_threshold}/100.\n\n"
+
+        "SCORING STANDARD:\n"
+        "Score every typed semantic dimension independently. The existing server "
+        "requires at least 68 on every important dimension and separately enforces "
+        "the runtime aggregate threshold. Never inflate a weak dimension merely to "
+        "make the candidate pass. Generic-template risk must remain at or below the "
+        "server-owned allowable ceiling.\n\n"
+
+        "FOUR NON-NEGOTIABLE REVIEW LAYERS:\n"
+        "1. COMMERCIAL IDEA — Is there an actual advertising idea, mechanism, "
+        "tension, demonstration, transformation, or customer consequence?\n"
+        "2. BUSINESS PROOF — Does the visual itself communicate the supported "
+        "product/service, workflow, use case, customer moment, or outcome?\n"
+        "3. BRAND OWNERSHIP — Does this feel intentionally created for this business, "
+        "rather than unrelated stock art with a logo and palette pasted on top?\n"
+        "4. EXECUTION — Is hierarchy, typography, composition, identity, readability, "
+        "spacing, focal control, sophistication, polish and channel fit genuinely "
+        "professional?\n\n"
+
+        f"{WORLD_CLASS_VISUAL_CRITIC_CONTRACT.strip()}\n\n"
+
+        "MANDATORY FAILURE MAPPING:\n"
+
+        "- GENERIC STOCK/LIFESTYLE SCENE: A premium desk, coffee mug, stacked books, "
+        "glasses, plant, notebook, laptop, generic office, generic person-at-laptop, "
+        "or aspirational lifestyle scene is NOT a business story merely because it "
+        "looks polished. When those objects do not visibly demonstrate the supported "
+        "offering, set generic_template_output=true, replaceable_brand_creative=true, "
+        "commercially_weak=true, and no_product_service_story=true as applicable. "
+        "This is a raw_visual failure.\n"
+
+        "- SWAP-LOGO FAILURE: Mentally replace the displayed identity with an "
+        "unrelated bank, furniture company, productivity app, consultancy, or SaaS "
+        "brand. If the visual still works substantially unchanged, set "
+        "replaceable_brand_creative=true. Correct logo placement does NOT override "
+        "this failure.\n"
+
+        "- LOGO-PASTED-ON-STOCK FAILURE: A real tenant logo and correct tenant colors "
+        "do not by themselves prove brand consistency. If the underlying scene has "
+        "no business-specific ownership, score brand_consistency and "
+        "business_specific_relevance below the passing floor and classify the "
+        "appropriate raw_visual failures.\n"
+
+        "- COPY-CARRIES-THE-STORY FAILURE: If the headline/supporting copy explains "
+        "the value proposition but the image itself provides no visual evidence of "
+        "the product/service mechanism or customer outcome, set "
+        "no_product_service_story=true and commercially_weak=true. The visual must "
+        "earn its role even before marketing copy is read.\n"
+
+        "- DECORATIVE-ABSTRACTION FAILURE: Gradients, waves, rings, concentric "
+        "circles, glowing orbs, blobs, generic neural motifs, floating geometry, or "
+        "decorative technology effects cannot substitute for an advertising idea. "
+        "When they dominate without meaningful product/service storytelling, set "
+        "decorative_abstraction_dominates=true and commercially_weak=true.\n"
+
+        "- GENERIC AI/SAAS FANTASY FAILURE: Do not automatically reward floating "
+        "dashboards, holographic interfaces, glowing data panels, robots, brains, "
+        "neural networks, or generic futuristic AI imagery. If those elements do "
+        "not credibly demonstrate the supplied concept/product story, treat them as "
+        "generic template output or irrelevant visual storytelling.\n"
+
+        "- VISUAL-PROOF FAILURE: If the supported product/service supposedly causes "
+        "an outcome but the visual does not make that cause-and-effect understandable, "
+        "score product_relevance, business_specific_relevance, visual_storytelling, "
+        "commercial_sophistication and campaign_alignment accordingly. Do not allow "
+        "beautiful execution to compensate for missing proof.\n"
+
+        "- BRAND COLOR FAILURE: Correct palette usage must feel integrated with the "
+        "scene and composition. Simply tinting unrelated stock imagery with the "
+        "tenant colors is not world-class branding.\n"
+
+        "- CTA/LOGO/LAYOUT FAILURE: If the underlying commercial artwork is strong "
+        "and only deterministic hierarchy, typography, spacing, CTA treatment, logo "
+        "placement, or composition needs repair, classify as layout rather than "
+        "raw_visual.\n"
+
+        "- RAW-VISUAL FAILURE: Generic concept, irrelevant hero, missing product "
+        "story, replaceable-brand creative, meaningless focal story, commercial "
+        "weakness, or dominant decorative abstraction requires raw_visual repair. "
+        "Do not misclassify those problems as layout.\n\n"
+
+        "APPROVAL TEST:\n"
+        "Approve only if the final creative could credibly appear in the portfolio "
+        "of an excellent global advertising/design agency AND it unmistakably serves "
+        "this specific campaign. Technical correctness is necessary but never "
+        "sufficient. A clean mediocre ad is a rejection. A polished generic ad is a "
+        "rejection. A correct-logo generic ad is a rejection. A beautiful visual "
+        "with no commercial mechanism is a rejection.\n\n"
+
+        "Keep repair_instructions short, actionable and focused on the visible "
+        "failure. Do not reveal hidden reasoning or chain-of-thought."
     )
 
+    # This task contains bounded request fields plus fixed server-owned policy.
+    # Keep a deterministic ceiling so future edits cannot grow the provider
+    # boundary without review.
+    if len(task) > 9000:
+        raise ValueError("Visual review task exceeds the safe policy budget")
+
+    return task
 
 def _bounded(value: str, name: str, limit: int) -> None:
     if not isinstance(value, str) or not value.strip() or len(value) > limit:

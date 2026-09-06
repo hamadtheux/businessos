@@ -37,6 +37,11 @@ from app.services.creative_provider import (
     CreativeProviderError,
     CreativeProviderNotConfiguredError,
 )
+from app.services.creative_brand_identity import (
+    CreativeBrandIdentity,
+    build_creative_brand_identity,
+)
+from app.services.creative_world_class import WORLD_CLASS_RAW_VISUAL_CONTRACT
 from app.services.creative_compositor import (
     CreativeCompositionError,
     CreativeCompositionInput,
@@ -2689,27 +2694,169 @@ def _creative_visual_generation_instructions(
     *,
     research_context: PublicCreativeResearchContext,
     aspect_ratio: str,
-    primary_color: str | None,
-    secondary_color: str | None,
-    accent_color: str | None,
+    brand_identity: CreativeBrandIdentity,
     correction: str | None = None,
 ) -> str:
     """
-    Produce only the visual-layer instructions for the image model.
+    Produce one bounded, renderer-safe raw-visual prompt.
 
-    Exact headline, supporting copy, CTA and logo are deliberately omitted.
-    They belong to the deterministic graphic-design composition stage.
+    The 5,000-character provider boundary is authoritative. Exact tenant identity,
+    exact marketing copy, credentials, storage references and private provider data
+    never enter this prompt.
+
+    Mandatory commercial policy, renderer safety and server-owned retry corrections
+    are preserved in full. Only redundant or expendable art-direction detail may be
+    shortened.
     """
-    return build_visual_art_direction(
+
+    max_provider_instructions = 5_000
+
+    base_direction = build_visual_art_direction(
         strategy=strategy,
         direction=direction,
         context=research_context,
         aspect_ratio=aspect_ratio,
-        primary_color=primary_color,
-        secondary_color=secondary_color,
-        accent_color=accent_color,
+        primary_color=brand_identity.primary_color,
+        secondary_color=brand_identity.secondary_color,
+        accent_color=brand_identity.accent_color,
         correction=correction,
     )
+
+    # These lines are represented again in protected fixed sections below.
+    # Removing them from the expendable base avoids duplicate policy and ensures
+    # retry corrections can never disappear when the base direction is shortened.
+    redundant_base_prefixes = (
+        "Originality:",
+        "DO NOT GENERATE ",
+        "Do not turn an offer ",
+        "Correction for this attempt:",
+    )
+
+    base_lines = tuple(
+        line.rstrip()
+        for line in base_direction.splitlines()
+        if not any(
+            line.startswith(prefix)
+            for prefix in redundant_base_prefixes
+        )
+    )
+
+    bounded_base = "\n".join(base_lines).strip()
+
+    mandatory_renderer_safety = (
+        "MANDATORY RAW-RENDERER SAFETY:\n"
+        "- Do not imitate or reproduce any source design.\n"
+        "- Generate no letters, words, numbers, typography, logos, fake brand "
+        "marks, watermarks, interface text, offer or CTA copy, fake product labels, "
+        "or invented branded packaging.\n"
+        "- Keep the reserved deterministic copy/logo area visually quiet. The "
+        "application adds exact marketing copy and the real tenant logo afterward."
+    )
+
+    correction_section = ""
+
+    if correction is not None:
+        normalized_correction = " ".join(correction.split()).strip()
+
+        # All production retry/variation corrections are server-owned and short.
+        # Refuse unexpected expansion rather than truncating a corrective contract.
+        if not normalized_correction or len(normalized_correction) > 600:
+            raise ValueError(
+                "Raw visual correction exceeded the server-owned safe budget"
+            )
+
+        correction_section = (
+            "Correction for this attempt:\n"
+            f"{normalized_correction}"
+        )
+
+    fixed_sections = tuple(
+        section
+        for section in (
+            WORLD_CLASS_RAW_VISUAL_CONTRACT.strip(),
+            brand_identity.provider_palette_instruction().strip(),
+            correction_section,
+            mandatory_renderer_safety,
+        )
+        if section
+    )
+
+    fixed_tail = "\n\n".join(fixed_sections)
+
+    # One separator is required between the dynamic art direction and the
+    # protected fixed policy/correction tail.
+    base_budget = (
+        max_provider_instructions
+        - len(fixed_tail)
+        - len("\n\n")
+    )
+
+    if base_budget < 800:
+        # Never solve policy growth by silently deleting the actual campaign idea.
+        raise ValueError(
+            "Mandatory raw-visual policy leaves insufficient renderer prompt budget"
+        )
+
+    if len(bounded_base) > base_budget:
+        kept_lines: list[str] = []
+        used = 0
+
+        for line in bounded_base.splitlines():
+            separator_cost = 1 if kept_lines else 0
+            remaining = base_budget - used - separator_cost
+
+            if remaining <= 0:
+                break
+
+            if len(line) <= remaining:
+                kept_lines.append(line)
+                used += separator_cost + len(line)
+                continue
+
+            if remaining >= 32:
+                fragment = line[: remaining - 1].rstrip() + "…"
+                kept_lines.append(fragment)
+
+            break
+
+        bounded_base = "\n".join(kept_lines).strip()
+
+    instructions = "\n\n".join(
+        (
+            bounded_base,
+            fixed_tail,
+        )
+    )
+
+    if not 1 <= len(instructions) <= max_provider_instructions:
+        raise ValueError(
+            "Raw visual generation instructions exceeded the provider-safe budget"
+        )
+
+    normalized = instructions.casefold()
+
+    required_markers = (
+        "swap-logo",
+        "actual supported product",
+        "do not imitate or reproduce",
+        "no letters, words, numbers",
+        "real tenant logo",
+    )
+
+    if any(
+        marker not in normalized
+        for marker in required_markers
+    ):
+        raise ValueError(
+            "Raw visual generation instructions lost a mandatory safety contract"
+        )
+
+    if correction_section and correction_section not in instructions:
+        raise ValueError(
+            "Raw visual generation instructions lost the retry correction"
+        )
+
+    return instructions
 
 
 async def _creative_direction_with_fallback(
@@ -2878,6 +3025,7 @@ async def generate_creative_asset(
     max_image_attempts: int = 2,
     max_composition_attempts: int = 5,
     quality_threshold: int = 82,
+    require_semantic_review: bool = False,
 ) -> CreativeAsset:
     """
     Turn grounded Creative Intelligence into a final branded PNG.
@@ -2911,6 +3059,7 @@ async def generate_creative_asset(
         max_image_attempts=max_image_attempts,
         max_composition_attempts=max_composition_attempts,
         quality_threshold=quality_threshold,
+        require_semantic_review=require_semantic_review,
     )
 
 
@@ -2931,6 +3080,7 @@ async def regenerate_creative_asset(
     max_composition_attempts: int = 5,
     quality_threshold: int = 82,
     variation_mode: CreativeVariationMode | None = None,
+    require_semantic_review: bool = False,
 ) -> CreativeAsset:
     """Create and generate a new immutable creative revision."""
     source = await _get(
@@ -3002,6 +3152,7 @@ async def regenerate_creative_asset(
         max_image_attempts=max_image_attempts,
         max_composition_attempts=max_composition_attempts,
         quality_threshold=quality_threshold,
+        require_semantic_review=require_semantic_review,
     )
 
 
@@ -3021,6 +3172,7 @@ async def _generate_creative_asset_value(
     max_image_attempts: int,
     max_composition_attempts: int,
     quality_threshold: int,
+    require_semantic_review: bool,
 ) -> CreativeAsset:
     if value.business_id != business_id:
         raise MarketingNotFoundError
@@ -3077,6 +3229,13 @@ async def _generate_creative_asset_value(
         business_id=business_id,
         branding=branding,
     )
+
+    brand_identity = build_creative_brand_identity(
+        business=business,
+        branding=branding,
+        sanitized_logo_content=logo_content,
+    )
+
     if (
         not 1 <= max_image_attempts <= 2
         or not 1 <= max_composition_attempts <= 5
@@ -3085,6 +3244,36 @@ async def _generate_creative_asset_value(
         or not 0 <= max_visual_review_calls <= 2
     ):
         raise MarketingValidationError
+
+    if require_semantic_review and (
+        visual_review_provider is None
+        or max_visual_review_calls == 0
+    ):
+        logger.warning(
+            "creative_visual_review_required_but_unavailable",
+            extra={
+                "provider": (
+                    _safe_provider_attribute(
+                        visual_review_provider,
+                        "provider_name",
+                    )
+                    if visual_review_provider is not None
+                    else "unconfigured"
+                ),
+                "reason": (
+                    "review_disabled"
+                    if max_visual_review_calls == 0
+                    else "provider_unavailable"
+                ),
+            },
+        )
+        return await _fail_creative_generation(
+            session,
+            business_id=business_id,
+            value=value,
+            actor_user_id=actor_user_id,
+            stage="semantic_review",
+        )
 
     channel = (
         content.channel if content is not None else strategy.recommended_channel
@@ -3164,9 +3353,7 @@ async def _generate_creative_asset_value(
                 value.aspect_ratio
                 or f"{target_width}:{target_height}"
             ),
-            primary_color=(branding.primary_color if branding else None),
-            secondary_color=(branding.secondary_color if branding else None),
-            accent_color=(branding.accent_color if branding else None),
+            brand_identity=brand_identity,
             correction=correction,
         )
         try:
@@ -3220,10 +3407,16 @@ async def _generate_creative_asset_value(
                 supporting_copy=strategy.supporting_message,
                 offer=strategy.offer,
                 cta=strategy.cta,
-                business_name=business.name,
-                primary_color=(branding.primary_color if branding else None),
-                secondary_color=(branding.secondary_color if branding else None),
-                accent_color=(branding.accent_color if branding else None),
+                business_name=brand_identity.business_name,
+                primary_color=brand_identity.primary_color,
+                secondary_color=brand_identity.secondary_color,
+                accent_color=brand_identity.accent_color,
+                canvas_color=brand_identity.canvas_color,
+                canvas_text_color=brand_identity.canvas_text_color,
+                cta_fill_color=brand_identity.cta_fill_color,
+                cta_text_color=brand_identity.cta_text_color,
+                muted_surface_color=brand_identity.muted_surface_color,
+                border_color=brand_identity.border_color,
                 logo_content=logo_content,
                 composition_direction=direction.selected_concept.layout_intent,
                 negative_space=direction.selected_concept.text_zone,
@@ -3308,12 +3501,23 @@ async def _generate_creative_asset_value(
             )
 
         if visual_review_provider is None or max_visual_review_calls == 0:
+            if require_semantic_review:
+                return await _fail_creative_generation(
+                    session,
+                    business_id=business_id,
+                    value=value,
+                    actor_user_id=actor_user_id,
+                    stage="semantic_review",
+                )
+
             final, quality = approved_candidates[0]
+
             if visual_review_provider is None:
                 logger.info(
                     "creative_visual_review_degraded provider=unconfigured",
                     extra={"provider": "unconfigured", "reason": "unavailable"},
                 )
+
             break
 
         critic_raw_failure = False
@@ -3335,10 +3539,20 @@ async def _generate_creative_asset_value(
                         "reason": "budget_exhausted",
                     },
                 )
-                # This candidate has passed deterministic QA and has not been
-                # semantically rejected. The global semantic-call ceiling is
-                # authoritative, so exhausted capacity degrades exactly like
-                # an unavailable optional reviewer.
+                # The global semantic-call ceiling remains authoritative.
+                # Required-review callers must fail closed rather than promote
+                # an image that has never passed semantic approval.
+                if require_semantic_review:
+                    return await _fail_creative_generation(
+                        session,
+                        business_id=business_id,
+                        value=value,
+                        actor_user_id=actor_user_id,
+                        stage="semantic_review",
+                    )
+
+                # Explicitly optional low-level callers retain the prior
+                # deterministic-QA degradation behavior.
                 final, quality = candidate, assessment
                 break
             visual_review_calls += 1
@@ -3347,15 +3561,13 @@ async def _generate_creative_asset_value(
                 campaign_objective=research_context.campaign_objective,
                 channel=research_context.channel,
                 concept_name=direction.selected_concept.concept_name,
-                concept_expectations=(
-                    f"Hero: {direction.selected_concept.hero_subject}. "
-                    f"Relevance: {direction.selected_concept.hero_relevance}. "
-                    f"Product story: {direction.selected_concept.product_story}."
-                )[:600],
+                concept_expectations=_visual_review_concept_expectations(
+                    direction
+                ),
                 expected_headline=strategy.headline,
                 expected_offer=strategy.offer,
                 expected_cta=strategy.cta,
-                brand_expectations=_visual_review_brand_expectations(branding),
+                brand_expectations=_visual_review_brand_expectations(brand_identity),
                 quality_threshold=quality_threshold,
             )
             try:
@@ -3381,6 +3593,15 @@ async def _generate_creative_asset_value(
                         "reason": "provider_or_schema_failure",
                     },
                 )
+                if require_semantic_review:
+                    return await _fail_creative_generation(
+                        session,
+                        business_id=business_id,
+                        value=value,
+                        actor_user_id=actor_user_id,
+                        stage="semantic_review",
+                    )
+
                 final, quality = candidate, assessment
                 break
 
@@ -3553,23 +3774,80 @@ async def _generate_creative_asset_value(
     return value
 
 
-def _visual_review_brand_expectations(
-    branding: BusinessBranding | None,
+def _visual_review_concept_expectations(
+    direction: CreativeDirectionPlan,
 ) -> str:
-    """Return only server-validated public palette expectations to the critic."""
-    colors: list[str] = []
-    if branding is not None:
-        for value in (
-            branding.primary_color,
-            branding.secondary_color,
-            branding.accent_color,
-        ):
-            if isinstance(value, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
-                colors.append(value.upper())
-    palette = ", ".join(dict.fromkeys(colors)) or "saved neutral brand palette"
+    """
+    Give the semantic critic the commercial logic it must visually verify.
+
+    Only the already-approved selected concept is included. No private Business
+    Brain source text, research URLs, credentials, storage identifiers, provider
+    metadata, or hidden reasoning enters this boundary.
+
+    The result is deterministically bounded to the existing critic field budget.
+    """
+    concept = direction.selected_concept
+
+    fields: tuple[tuple[str, str, int], ...] = (
+        ("Idea", concept.marketing_idea, 118),
+        ("Customer", concept.customer_care_reason, 104),
+        ("Hero", concept.hero_subject, 92),
+        ("Why hero", concept.hero_relevance, 92),
+        ("Mechanism", concept.product_story, 118),
+        ("Hook", concept.scroll_stopping_hook, 76),
+    )
+
+    parts: list[str] = []
+
+    for label, value, budget in fields:
+        normalized = " ".join(str(value).split()).strip()
+
+        if not normalized:
+            continue
+
+        if len(normalized) > budget:
+            normalized = normalized[: budget - 1].rstrip() + "…"
+
+        parts.append(f"{label}: {normalized}")
+
+    result = " | ".join(parts)
+
+    # CreativeVisualReviewRequest already uses a 600-character bounded field.
+    # Keep this helper independently defensive so future call-site changes do
+    # not accidentally widen the provider privacy boundary.
+    return result[:600]
+
+
+def _visual_review_brand_expectations(
+    brand_identity: CreativeBrandIdentity,
+) -> str:
+    """
+    Return only provider-safe tenant identity expectations.
+
+    No logo bytes, storage identifiers, logo URLs, or private metadata leave the
+    application boundary.
+    """
+    palette = ", ".join(
+        dict.fromkeys(
+            (
+                brand_identity.primary_color,
+                brand_identity.secondary_color,
+                brand_identity.accent_color,
+            )
+        )
+    )
+
+    logo_expectation = (
+        "the exact tenant logo should appear as a controlled deterministic identity layer"
+        if brand_identity.has_tenant_logo
+        else "the business-name fallback should provide the controlled identity layer"
+    )
+
     return (
-        f"Visible identity must remain clear; use the controlled palette {palette}; "
-        "do not infer or invent additional brand claims."
+        f"Visible identity must clearly belong to this business. Controlled palette: "
+        f"{palette}. {logo_expectation}. The palette should feel intentionally integrated "
+        "with the campaign rather than pasted onto an unrelated stock image. Do not infer "
+        "or invent any additional brand claims."
     )
 
 

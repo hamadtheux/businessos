@@ -1746,6 +1746,325 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no letters, words, numbers", corrected)
         self.assertNotIn("LEAK_THIS_PROVIDER_TEXT", corrected)
 
+    async def test_required_visual_review_missing_fails_before_image_generation(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+
+        generated = await generate_creative_asset(
+            _ScalarSession([asset, _business_record(), None]),
+            business_id=BUSINESS_ID,
+            creative_asset_id=asset.id,
+            actor_user_id=USER_ID,
+            provider=image_provider,
+            visual_review_provider=None,
+            storage=storage,
+            require_semantic_review=True,
+        )
+
+        self.assertEqual(generated.generation_status, "failed")
+        self.assertEqual(generated.source_type, "ai_brief")
+        self.assertIsNone(generated.storage_reference)
+
+        # Required semantic capability is checked before paying for image work.
+        image_provider.generate_draft.assert_not_awaited()
+        storage.put.assert_not_awaited()
+
+
+    async def test_required_visual_reviewer_failure_never_marks_ready(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        candidate = _composed_candidate(
+            "minimal_hero",
+            color=(10, 20, 30),
+        )
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
+        )
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(
+                side_effect=RuntimeError(
+                    "sk-proj-secret provider payload"
+                )
+            ),
+        )
+
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(candidate,),
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
+            self.assertLogs(
+                "aibos.marketing",
+                level="WARNING",
+            ) as captured,
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                storage=storage,
+                require_semantic_review=True,
+            )
+
+        self.assertEqual(generated.generation_status, "failed")
+        self.assertIsNone(generated.storage_reference)
+
+        self.assertEqual(
+            image_provider.generate_draft.await_count,
+            1,
+        )
+        self.assertEqual(
+            reviewer.review.await_count,
+            1,
+        )
+        storage.put.assert_not_awaited()
+
+        # Provider exception text/secrets are never exposed through logs.
+        self.assertNotIn(
+            "sk-proj-secret",
+            " ".join(captured.output),
+        )
+
+
+    async def test_required_visual_review_budget_exhaustion_never_marks_ready(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                side_effect=[
+                    CreativeGenerationResult(
+                        content=_png_bytes(),
+                        width=1024,
+                        height=1024,
+                    ),
+                    CreativeGenerationResult(
+                        content=_png_bytes(),
+                        width=1024,
+                        height=1024,
+                    ),
+                ]
+            ),
+        )
+
+        first = _composed_candidate(
+            "minimal_hero",
+            color=(10, 20, 30),
+        )
+        second = _composed_candidate(
+            "framed_campaign",
+            color=(30, 40, 50),
+        )
+        regenerated = _composed_candidate(
+            "editorial_split",
+            color=(50, 60, 70),
+        )
+
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
+        )
+
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(
+                side_effect=[
+                    _visual_result(
+                        _visual_review(
+                            approved=False,
+                            repair_class="layout",
+                            excessive_whitespace=True,
+                            repair_instructions=(
+                                "Try another local composition."
+                            ),
+                        )
+                    ),
+                    _visual_result(
+                        _visual_review(
+                            approved=False,
+                            repair_class="raw_visual",
+                            accidental_generated_text=True,
+                            repair_instructions=(
+                                "Regenerate the raw visual."
+                            ),
+                        )
+                    ),
+                ]
+            ),
+        )
+
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                side_effect=[
+                    (first, second),
+                    (regenerated,),
+                ],
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
+            self.assertLogs(
+                "aibos.marketing",
+                level="WARNING",
+            ) as captured,
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession(
+                    [asset, _business_record(), None]
+                ),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                storage=storage,
+                max_image_attempts=2,
+                max_visual_review_calls=2,
+                require_semantic_review=True,
+            )
+
+        self.assertEqual(
+            generated.generation_status,
+            "failed",
+        )
+        self.assertIsNone(
+            generated.storage_reference,
+        )
+
+        self.assertEqual(
+            image_provider.generate_draft.await_count,
+            2,
+        )
+        self.assertEqual(
+            reviewer.review.await_count,
+            2,
+        )
+
+        storage.put.assert_not_awaited()
+
+        logs = " ".join(captured.output)
+        self.assertIn(
+            "reason=budget_exhausted",
+            logs,
+        )
+
+
+    async def test_required_visual_review_pass_marks_ready(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+
+        candidate = _composed_candidate(
+            "minimal_hero",
+            color=(10, 20, 30),
+        )
+
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
+        )
+
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(
+                return_value=_visual_result(
+                    _visual_review()
+                )
+            ),
+        )
+
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(candidate,),
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession(
+                    [
+                        asset,
+                        _business_record(),
+                        None,
+                        asset,
+                    ]
+                ),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                storage=storage,
+                quality_threshold=82,
+                require_semantic_review=True,
+            )
+
+        self.assertEqual(
+            generated.generation_status,
+            "ready",
+        )
+        self.assertEqual(
+            reviewer.review.await_count,
+            1,
+        )
+        self.assertEqual(
+            image_provider.generate_draft.await_count,
+            1,
+        )
+
+        storage.put.assert_awaited_once()
+        self.assertEqual(
+            storage.put.await_args.args[1],
+            candidate.content,
+        )
+
+
     async def test_regenerated_image_uses_deterministic_qa_when_review_budget_is_exhausted(self) -> None:
         asset = _creative_asset()
         storage = _ObjectStorage()

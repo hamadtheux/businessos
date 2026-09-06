@@ -55,6 +55,22 @@ Box = tuple[int, int, int, int]
 RGB = tuple[int, int, int]
 
 
+@dataclass(frozen=True, slots=True)
+class _BrandPalette:
+    primary: RGB
+    secondary: RGB
+    accent: RGB
+
+    canvas: RGB
+    canvas_text: RGB
+
+    cta_fill: RGB
+    cta_text: RGB
+
+    muted_surface: RGB
+    border: RGB
+
+
 class CreativeCompositionError(RuntimeError):
     """The raw visual could not be converted into a safe final creative."""
 
@@ -72,6 +88,16 @@ class CreativeCompositionInput:
     primary_color: str | None = None
     secondary_color: str | None = None
     accent_color: str | None = None
+
+    # Deterministic derived brand roles. Source brand colors above remain the
+    # tenant-owned identity; these roles control safe final composition.
+    canvas_color: str | None = None
+    canvas_text_color: str | None = None
+    cta_fill_color: str | None = None
+    cta_text_color: str | None = None
+    muted_surface_color: str | None = None
+    border_color: str | None = None
+
     logo_content: bytes | None = None
     composition_direction: str = ""
     negative_space: str = ""
@@ -291,7 +317,7 @@ class CreativeCompositor:
         source: Image.Image,
         logo: Image.Image | None,
         logo_source_ratio: float | None,
-        palette: tuple[RGB, RGB, RGB],
+        palette: _BrandPalette,
         family: LayoutFamily,
         text_side: TextSide,
         analysis: VisualAnalysis,
@@ -313,7 +339,7 @@ class CreativeCompositor:
             text_side,
             value,
         )
-        canvas = Image.new("RGB", (width, height), palette[1])
+        canvas = Image.new("RGB", (width, height), palette.canvas)
         focal = _focal_center(value.negative_space, value.composition_direction)
         fitted = ImageOps.fit(
             source,
@@ -714,7 +740,7 @@ class CreativeCompositor:
         canvas: Image.Image,
         text: str,
         box: Box,
-        palette: tuple[RGB, RGB, RGB],
+        palette: _BrandPalette,
         treatment: str,
     ) -> tuple[Box, Box, float, str, int, RGB]:
         width, height = _box_size(box)
@@ -744,18 +770,26 @@ class CreativeCompositor:
             box[1] + panel_height,
         )
         normalized_treatment = treatment.casefold()
+
         if "dark" in normalized_treatment:
-            fill = palette[0]
-        elif "light" in normalized_treatment or "outline" in normalized_treatment:
-            fill = palette[1]
-        else:
-            fill = palette[2]
-        cta_text = _best_text_color(fill)
-        if _contrast_ratio(fill, cta_text) < 4.5:
-            fill = palette[0]
+            fill = palette.primary
             cta_text = _best_text_color(fill)
+        elif "light" in normalized_treatment or "outline" in normalized_treatment:
+            fill = palette.muted_surface
+            cta_text = _best_text_color(fill)
+        else:
+            fill = palette.cta_fill
+            cta_text = palette.cta_text
+
+        if _contrast_ratio(fill, cta_text) < 4.5:
+            cta_text = _best_text_color(fill)
+
+        if _contrast_ratio(fill, cta_text) < 4.5:
+            fill = palette.primary
+            cta_text = _best_text_color(fill)
+
         radius = max(6, round(panel_height * 0.18))
-        outline = palette[2] if "outline" in normalized_treatment else None
+        outline = palette.border if "outline" in normalized_treatment else None
         ImageDraw.Draw(canvas).rounded_rectangle(
             panel,
             radius=radius,
@@ -795,7 +829,7 @@ class CreativeCompositor:
         canvas: Image.Image,
         text: str,
         box: Box,
-        palette: tuple[RGB, RGB, RGB],
+        palette: _BrandPalette,
         treatment: str,
     ) -> tuple[Box, Box, float, str, int]:
         width, height = _box_size(box)
@@ -820,15 +854,22 @@ class CreativeCompositor:
         panel_height = min(height, (fit.bounds[3] - fit.bounds[1]) + padding_y * 2)
         panel = (box[0], box[1], box[0] + panel_width, box[1] + panel_height)
         normalized_treatment = treatment.casefold()
-        fill = palette[0] if "dark" in normalized_treatment else palette[2]
-        if "light" in normalized_treatment or "outline" in normalized_treatment:
-            fill = palette[1]
+
+        if "dark" in normalized_treatment:
+            fill = palette.primary
+        elif "light" in normalized_treatment or "outline" in normalized_treatment:
+            fill = palette.muted_surface
+        else:
+            fill = palette.accent
+
         text_color = _best_text_color(fill)
+
         if _contrast_ratio(fill, text_color) < 4.5:
-            fill = (18, 20, 24)
-            text_color = (255, 255, 255)
+            fill = palette.primary
+            text_color = _best_text_color(fill)
+
         radius = max(4, round(panel_height * 0.16))
-        outline = palette[2] if "outline" in normalized_treatment else None
+        outline = palette.border if "outline" in normalized_treatment else None
         ImageDraw.Draw(canvas).rounded_rectangle(
             panel,
             radius=radius,
@@ -1160,18 +1201,72 @@ def _validate_dimensions(width: int, height: int) -> None:
         raise CreativeCompositionError("Image dimensions exceed safe limits")
 
 
-def _palette(value: CreativeCompositionInput) -> tuple[RGB, RGB, RGB]:
+def _palette(value: CreativeCompositionInput) -> _BrandPalette:
+    """
+    Build one deterministic set of final-composition brand roles.
+
+    Tenant source colors remain authoritative. Derived roles may improve
+    readability and visual hierarchy, but never substitute unrelated platform
+    branding.
+    """
     neutral_dark = (30, 31, 34)
+    white = (255, 255, 255)
+
     primary = _parse_color(value.primary_color) or neutral_dark
+
     secondary = _parse_color(value.secondary_color) or _blend_color(
         primary,
-        (255, 255, 255),
+        white,
         0.91,
     )
-    # A missing accent derives from the tenant's actual primary identity. This
-    # avoids introducing the former unrelated brown fallback into CTAs.
+
     accent = _parse_color(value.accent_color) or primary
-    return primary, secondary, accent
+
+    canvas = _parse_color(value.canvas_color) or secondary
+
+    requested_canvas_text = _parse_color(value.canvas_text_color)
+    canvas_text = (
+        requested_canvas_text
+        if requested_canvas_text is not None
+        and _contrast_ratio(canvas, requested_canvas_text) >= 4.5
+        else _best_text_color(canvas)
+    )
+
+    requested_cta_fill = _parse_color(value.cta_fill_color)
+    cta_fill = requested_cta_fill or accent
+
+    requested_cta_text = _parse_color(value.cta_text_color)
+    cta_text = (
+        requested_cta_text
+        if requested_cta_text is not None
+        and _contrast_ratio(cta_fill, requested_cta_text) >= 4.5
+        else _best_text_color(cta_fill)
+    )
+
+    # Defense in depth: even malformed future callers cannot create an
+    # unreadable CTA.
+    if _contrast_ratio(cta_fill, cta_text) < 4.5:
+        cta_fill = primary
+        cta_text = _best_text_color(cta_fill)
+
+    muted_surface = (
+        _parse_color(value.muted_surface_color)
+        or _blend_color(canvas, canvas_text, 0.06)
+    )
+
+    border = _parse_color(value.border_color) or primary
+
+    return _BrandPalette(
+        primary=primary,
+        secondary=secondary,
+        accent=accent,
+        canvas=canvas,
+        canvas_text=canvas_text,
+        cta_fill=cta_fill,
+        cta_text=cta_text,
+        muted_surface=muted_surface,
+        border=border,
+    )
 
 
 def _blend_color(first: RGB, second: RGB, second_weight: float) -> RGB:
@@ -1489,7 +1584,7 @@ def _layout_plan(
     margin: int,
     safe_top: int,
     safe_bottom: int,
-    palette: tuple[RGB, RGB, RGB],
+    palette: _BrandPalette,
     has_cta: bool,
     has_offer: bool,
     text_side: TextSide,
@@ -1528,8 +1623,8 @@ def _layout_plan(
             cta_box=((left, safe_top + round(available * 0.81), right, safe_end) if has_cta else None),
             text_surface=panel,
             overlay=False,
-            panel_color=palette[1],
-            text_color=_best_text_color(palette[1]),
+            panel_color=palette.canvas,
+            text_color=palette.canvas_text,
         )
 
     if family == "framed_campaign":
@@ -1552,8 +1647,8 @@ def _layout_plan(
             cta_box=((safe_left, text_top + round(available * 0.77), safe_right, safe_end) if has_cta else None),
             text_surface=(0, image_bottom, width, height),
             overlay=False,
-            panel_color=palette[1],
-            text_color=_best_text_color(palette[1]),
+            panel_color=palette.canvas,
+            text_color=palette.canvas_text,
         )
 
     if family == "vertical_story":
@@ -1683,19 +1778,35 @@ def _adaptive_vertical_anchor(value: CreativeCompositionInput) -> float:
 def _draw_layout_frame(
     draw: ImageDraw.ImageDraw,
     plan: _LayoutPlan,
-    palette: tuple[RGB, RGB, RGB],
+    palette: _BrandPalette,
     width: int,
     height: int,
     margin: int,
 ) -> None:
     if plan.panel_color is not None:
         draw.rectangle(plan.text_surface, fill=plan.panel_color)
+
     if plan.family == "framed_campaign":
-        draw.rectangle((0, 0, width, height), outline=palette[0], width=max(4, margin // 6))
-        draw.rectangle(plan.image_box, outline=palette[2], width=max(3, margin // 10))
+        draw.rectangle(
+            (0, 0, width, height),
+            outline=palette.border,
+            width=max(4, margin // 6),
+        )
+        draw.rectangle(
+            plan.image_box,
+            outline=palette.accent,
+            width=max(3, margin // 10),
+        )
     elif plan.family == "editorial_split":
-        edge = plan.text_surface[2] if plan.text_surface[0] == 0 else plan.text_surface[0]
-        draw.rectangle((edge - 3, 0, edge + 3, height), fill=palette[2])
+        edge = (
+            plan.text_surface[2]
+            if plan.text_surface[0] == 0
+            else plan.text_surface[0]
+        )
+        draw.rectangle(
+            (edge - 3, 0, edge + 3, height),
+            fill=palette.border,
+        )
 
 
 def _prepare_overlay_contrast(

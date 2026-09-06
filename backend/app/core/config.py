@@ -191,8 +191,9 @@ class Settings(BaseSettings):
         ge=1_000,
         le=6_000,
     )
-    # Optional semantic review of the final branded PNG. Provider failure is
-    # non-blocking and falls back to the deterministic quality gate.
+    # Semantic review of the final branded PNG. Internal/low-level callers may
+    # choose deterministic-only QA, but customer-facing creative generation
+    # requires semantic approval before an asset can become ready.
     creative_visual_review_enabled: bool = True
     creative_visual_review_timeout_seconds: float = Field(default=30.0, ge=5, le=60)
     creative_visual_review_max_output_tokens: int = Field(

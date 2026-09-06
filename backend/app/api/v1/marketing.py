@@ -459,6 +459,7 @@ async def generate_creative_asset(
             max_image_attempts=settings.creative_max_image_attempts,
             max_composition_attempts=settings.creative_max_composition_attempts,
             quality_threshold=settings.creative_quality_threshold,
+            require_semantic_review=True,
         ),
     )
 
@@ -505,6 +506,7 @@ async def regenerate_creative_asset(
             max_composition_attempts=settings.creative_max_composition_attempts,
             quality_threshold=settings.creative_quality_threshold,
             variation_mode=(data.variation_mode if data is not None else None),
+            require_semantic_review=True,
         ),
     )
 

@@ -80,7 +80,14 @@ CreativeDirectorProviderDependency = Annotated[
 
 @lru_cache(maxsize=1)
 def get_creative_visual_review_provider() -> CreativeVisualReviewProvider | None:
-    """Return the optional vision critic; absence preserves deterministic QA."""
+    """
+    Return the configured final-image semantic critic.
+
+    The dependency remains optional at application startup so migrations,
+    non-AI workflows and isolated service tests can run without OpenAI.
+    Customer-facing creative generation fails closed when semantic approval
+    is required but this provider is unavailable.
+    """
     api_key = settings.openai_api_key_value
     if not settings.creative_visual_review_enabled or not api_key:
         return None

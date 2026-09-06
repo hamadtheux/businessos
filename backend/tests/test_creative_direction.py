@@ -170,6 +170,92 @@ class CreativeDirectionTests(TestCase):
         self.assertIn("exactly three", task.casefold())
         self.assertIn("abstract", task.casefold())
 
+    def test_director_task_budget_preserves_authoritative_values_and_final_contract(self) -> None:
+        strategy = _strategy()
+
+        # Deliberately overwhelm every expendable research section. The builder
+        # must shrink this material rather than truncating trusted campaign truth
+        # or the final server-owned quality/safety contract.
+        research = SimpleNamespace(
+            dominant_patterns=(
+                "RESEARCH-FIRST " + ("R" * 3000) + " RESEARCH-END-SENTINEL",
+            ),
+            emerging_patterns=(
+                "EMERGING-FIRST " + ("E" * 3000) + " EMERGING-END-SENTINEL",
+            ),
+            recommended_visual_directions=(
+                "DIRECTION-FIRST " + ("D" * 3000) + " DIRECTION-END-SENTINEL",
+            ),
+            avoid_patterns=(
+                "AVOID-FIRST " + ("A" * 3000) + " AVOID-END-SENTINEL",
+            ),
+            originality_constraints=(
+                "ORIGINALITY-FIRST "
+                + ("O" * 3000)
+                + " ORIGINALITY-END-SENTINEL",
+            ),
+        )
+
+        task = build_creative_director_task(
+            strategy=strategy,
+            research=research,  # type: ignore[arg-type]
+            context=_context(),
+        )
+
+        self.assertLessEqual(len(task), 4000)
+
+        # Authoritative campaign truth must survive exactly.
+        authoritative_values = (
+            strategy.marketing_goal,
+            strategy.target_audience,
+            strategy.audience_insight,
+            strategy.campaign_angle,
+            strategy.headline,
+            strategy.offer,
+            strategy.cta,
+            strategy.visual_concept,
+            strategy.subject_focus,
+            strategy.brand_treatment,
+        )
+
+        for value in authoritative_values:
+            if value:
+                with self.subTest(authoritative_value=value):
+                    self.assertIn(value, task)
+
+        # The final contract must remain intact even under extreme dynamic input.
+        required_contract = (
+            "OUTPUT RULES:",
+            "Return exactly three candidates",
+            "marketing_idea must state the advertising mechanism",
+            "product_story must show cause -> mechanism -> outcome",
+            "Reject generic stock/lifestyle scenes",
+            "Reject swap-logo concepts",
+            "Never copy, clone, replicate",
+            "Never include URLs",
+            "raw image will contain no typography",
+        )
+
+        for marker in required_contract:
+            with self.subTest(contract_marker=marker):
+                self.assertIn(marker, task)
+
+        # Research is allowed to exist, but it is the expendable layer.
+        self.assertIn("ABSTRACT RESEARCH SIGNALS ONLY:", task)
+        self.assertIn("RESEARCH-FIRST", task)
+
+        # The deliberately enormous research tail must be removed rather than
+        # pushing mandatory output/safety rules beyond the global budget.
+        self.assertNotIn("RESEARCH-END-SENTINEL", task)
+        self.assertNotIn("R" * 1000, task)
+
+        # The mandatory final contract must occur after the bounded research
+        # block, proving it was not chopped away by an end-of-string slice.
+        self.assertGreater(
+            task.index("OUTPUT RULES:"),
+            task.index("ABSTRACT RESEARCH SIGNALS ONLY:"),
+        )
+
     def test_channel_changes_platform_specific_direction(self) -> None:
         strategy = _strategy()
         instagram_context = _context("instagram")

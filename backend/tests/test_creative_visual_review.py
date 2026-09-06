@@ -269,3 +269,52 @@ class OpenAIVisualReviewAdapterTests(IsolatedAsyncioTestCase):
             user_content[1]["image_url"].startswith("data:image/png;base64,")
         )
         self.assertNotIn(_request().final_png.decode("latin1"), str(kwargs))
+
+def test_maximum_valid_visual_review_request_stays_within_task_budget() -> None:
+    """
+    Every individually valid request field must fit inside the fixed semantic
+    critic policy boundary without truncating campaign truth or review rules.
+    """
+    from io import BytesIO
+
+    from PIL import Image
+
+    from app.services.creative_visual_review import (
+        CreativeVisualReviewRequest,
+        build_visual_review_task,
+    )
+
+    image = Image.new("RGB", (1, 1), (255, 255, 255))
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+
+    request = CreativeVisualReviewRequest(
+        final_png=buffer.getvalue(),
+        campaign_objective="O" * 120,
+        channel="C" * 40,
+        concept_name="N" * 100,
+        concept_expectations="E" * 600,
+        expected_headline="H" * 180,
+        expected_offer="F" * 160,
+        expected_cta="T" * 300,
+        brand_expectations="B" * 400,
+        quality_threshold=95,
+    )
+
+    task = build_visual_review_task(request)
+
+    assert len(task) <= 9000
+
+    # Formatting must reach the model as actual structure rather than escaped
+    # backslash+n text.
+    assert "\\n" not in task
+
+    for marker in (
+        "CAMPAIGN EXPECTATIONS:",
+        "SCORING STANDARD:",
+        "FOUR NON-NEGOTIABLE REVIEW LAYERS:",
+        "WORLD-CLASS COMMERCIAL REVIEW:",
+        "MANDATORY FAILURE MAPPING:",
+        "APPROVAL TEST:",
+    ):
+        assert marker in task
