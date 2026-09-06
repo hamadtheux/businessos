@@ -36,6 +36,9 @@ def _review(**updates: object) -> CreativeVisualReview:
         "offer_clarity": 90,
         "focal_relevance": 87,
         "product_relevance": 89,
+        "business_specific_relevance": 88,
+        "visual_storytelling": 86,
+        "commercial_sophistication": 87,
         "originality": 86,
         "scroll_stopping_strength": 84,
         "message_coherence": 90,
@@ -52,6 +55,10 @@ def _review(**updates: object) -> CreativeVisualReview:
         "irrelevant_visual": False,
         "irrelevant_decorative_art": False,
         "meaningless_focal_story": False,
+        "replaceable_brand_creative": False,
+        "decorative_abstraction_dominates": False,
+        "no_product_service_story": False,
+        "commercially_weak": False,
         "unnatural_headline_wrapping": False,
         "generic_template_output": False,
         "weak_brand_cta": False,
@@ -76,6 +83,9 @@ def _review_at_score(score: int) -> CreativeVisualReview:
         offer_clarity=score,
         focal_relevance=score,
         product_relevance=score,
+        business_specific_relevance=score,
+        visual_storytelling=score,
+        commercial_sophistication=score,
         originality=score,
         scroll_stopping_strength=score,
         message_coherence=score,
@@ -186,6 +196,23 @@ class CreativeVisualReviewSchemaTests(TestCase):
             meaningless_focal_story=True,
             hard_failures=("irrelevant_decorative_art", "meaningless_focal_story"),
             repair_instructions="Regenerate a product-relevant operational story.",
+        )
+        self.assertEqual(review.repair_class, "raw_visual")
+
+    def test_replaceable_brand_creative_requires_raw_regeneration(self) -> None:
+        review = _review(
+            approved=False,
+            repair_class="raw_visual",
+            business_specific_relevance=38,
+            replaceable_brand_creative=True,
+            decorative_abstraction_dominates=True,
+            no_product_service_story=True,
+            hard_failures=(
+                "replaceable_brand_creative",
+                "decorative_abstraction_dominates",
+                "no_product_service_story",
+            ),
+            repair_instructions="Replace decoration with a specific product story.",
         )
         self.assertEqual(review.repair_class, "raw_visual")
 

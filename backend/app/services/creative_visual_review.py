@@ -17,6 +17,10 @@ VisualHardFailure = Literal[
     "irrelevant_visual",
     "irrelevant_decorative_art",
     "meaningless_focal_story",
+    "replaceable_brand_creative",
+    "decorative_abstraction_dominates",
+    "no_product_service_story",
+    "commercially_weak",
     "unnatural_headline_wrapping",
     "generic_template_output",
     "weak_brand_cta",
@@ -33,6 +37,9 @@ _SEMANTIC_VISUAL_QUALITY_FIELDS = (
     "offer_clarity",
     "focal_relevance",
     "product_relevance",
+    "business_specific_relevance",
+    "visual_storytelling",
+    "commercial_sophistication",
     "originality",
     "scroll_stopping_strength",
     "message_coherence",
@@ -58,6 +65,9 @@ class CreativeVisualReview(BaseModel):
     offer_clarity: int = Field(ge=0, le=100)
     focal_relevance: int = Field(ge=0, le=100)
     product_relevance: int = Field(ge=0, le=100)
+    business_specific_relevance: int = Field(ge=0, le=100)
+    visual_storytelling: int = Field(ge=0, le=100)
+    commercial_sophistication: int = Field(ge=0, le=100)
     originality: int = Field(ge=0, le=100)
     scroll_stopping_strength: int = Field(ge=0, le=100)
     message_coherence: int = Field(ge=0, le=100)
@@ -74,13 +84,17 @@ class CreativeVisualReview(BaseModel):
     irrelevant_visual: bool
     irrelevant_decorative_art: bool
     meaningless_focal_story: bool
+    replaceable_brand_creative: bool
+    decorative_abstraction_dominates: bool
+    no_product_service_story: bool
+    commercially_weak: bool
     unnatural_headline_wrapping: bool
     generic_template_output: bool
     weak_brand_cta: bool
     excessive_dead_panel_space: bool
     hard_failures: tuple[VisualHardFailure, ...] = Field(
         default_factory=tuple,
-        max_length=12,
+        max_length=16,
     )
     approved: bool
     repair_class: VisualRepairClass
@@ -94,12 +108,16 @@ class CreativeVisualReview(BaseModel):
             or self.irrelevant_visual
             or self.irrelevant_decorative_art
             or self.meaningless_focal_story
+            or self.replaceable_brand_creative
+            or self.decorative_abstraction_dominates
+            or self.no_product_service_story
+            or self.commercially_weak
+            or self.generic_template_output
         )
         layout_failure = (
             self.excessive_whitespace
             or self.overcrowding
             or self.unnatural_headline_wrapping
-            or self.generic_template_output
             or self.weak_brand_cta
             or self.excessive_dead_panel_space
         )
@@ -113,6 +131,10 @@ class CreativeVisualReview(BaseModel):
                 ("irrelevant_visual", self.irrelevant_visual),
                 ("irrelevant_decorative_art", self.irrelevant_decorative_art),
                 ("meaningless_focal_story", self.meaningless_focal_story),
+                ("replaceable_brand_creative", self.replaceable_brand_creative),
+                ("decorative_abstraction_dominates", self.decorative_abstraction_dominates),
+                ("no_product_service_story", self.no_product_service_story),
+                ("commercially_weak", self.commercially_weak),
                 ("unnatural_headline_wrapping", self.unnatural_headline_wrapping),
                 ("generic_template_output", self.generic_template_output),
                 ("weak_brand_cta", self.weak_brand_cta),
@@ -132,6 +154,9 @@ class CreativeVisualReview(BaseModel):
             self.offer_clarity,
             self.focal_relevance,
             self.product_relevance,
+            self.business_specific_relevance,
+            self.visual_storytelling,
+            self.commercial_sophistication,
             self.originality,
             self.scroll_stopping_strength,
             self.message_coherence,
@@ -156,6 +181,9 @@ class CreativeVisualReview(BaseModel):
             relevance_failure = min(
                 self.focal_relevance,
                 self.product_relevance,
+                self.business_specific_relevance,
+                self.visual_storytelling,
+                self.commercial_sophistication,
                 self.campaign_alignment,
                 self.message_coherence,
             ) < 60
@@ -267,6 +295,7 @@ def build_visual_review_task(request: CreativeVisualReviewRequest) -> str:
         f"Approval floor: {request.quality_threshold}/100.\n"
         "Score hierarchy, composition, brand consistency, logo/identity quality, "
         "readability, CTA and offer clarity, focal and product/category relevance, "
+        "business-specific relevance, visual storytelling, commercial sophistication, "
         "originality, polish, scroll-stopping strength, message coherence, whitespace "
         "balance, typography, sophistication, and campaign alignment. Treat 68 as the "
         "minimum acceptable score for any individual dimension and reject generic-template "
@@ -276,11 +305,17 @@ def build_visual_review_task(request: CreativeVisualReviewRequest) -> str:
         "accidental words, fake letters, a second copy of the headline/offer/CTA "
         "(including a giant duplicate such as 50% OFF), a generic abstract SaaS "
         "background with no product/campaign relevance, irrelevant decorative art, "
-        "or no meaningful focal story, "
+        "or no meaningful focal story. Apply a swap-the-logo test: if the exact same "
+        "creative could advertise an unrelated company, mark replaceable_brand_creative. "
+        "Mark decorative_abstraction_dominates for gradients, rings, circles, waves, "
+        "or arbitrary geometry that substitutes for a product/service story. Mark "
+        "no_product_service_story when the supported offering or credible customer "
+        "outcome is not visually communicated, and commercially_weak when the output "
+        "looks like generic decoration rather than an art-directed campaign, "
         "or an artifact that cannot be repaired by rearranging deterministic layers. "
         "Reject as layout when the supplied artwork is usable but hierarchy, balance, "
         "spacing, crowding, excessive dead panel space, awkward short-headline wrapping, "
-        "weak/non-brand CTA treatment, disconnected identity, or template-like geometry "
+        "weak/non-brand CTA treatment, or disconnected identity "
         "requires another local composition. Reject technically valid but aesthetically "
         "mediocre output. Approve only a polished, readable, original, brand-consistent "
         "final with a commercially meaningful visual story. Keep repair "

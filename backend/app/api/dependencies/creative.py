@@ -26,6 +26,10 @@ from app.services.creative_visual_review import CreativeVisualReviewProvider
 from app.services.creative_visual_review_openai import (
     OpenAICreativeVisualReviewProvider,
 )
+from app.services.creative_video import (
+    UnavailableVideoGenerationProvider,
+    VideoGenerationProvider,
+)
 
 
 @lru_cache(maxsize=1)
@@ -41,6 +45,19 @@ def get_creative_generation_provider() -> CreativeGenerationProvider:
 CreativeGenerationProviderDependency = Annotated[
     CreativeGenerationProvider,
     Depends(get_creative_generation_provider),
+]
+
+
+@lru_cache(maxsize=1)
+def get_video_generation_provider() -> VideoGenerationProvider:
+    # The boundary is intentionally wired before a provider is selected. A real
+    # adapter can replace this dependency without changing tenant/state logic.
+    return UnavailableVideoGenerationProvider()
+
+
+VideoGenerationProviderDependency = Annotated[
+    VideoGenerationProvider,
+    Depends(get_video_generation_provider),
 ]
 
 

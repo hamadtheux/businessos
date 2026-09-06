@@ -25,6 +25,7 @@ ContentType = Literal["social_post", "ad_copy", "email_draft", "whatsapp_draft",
 SafeSlug = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]{0,47}$")]
 Money = Annotated[Decimal, Field(ge=0, le=Decimal("1000000000.00"), max_digits=14, decimal_places=2)]
 Ratio = Annotated[Decimal, Field(ge=0, le=1, decimal_places=3)]
+MAX_VIDEO_STRATEGY_BYTES = 12_000
 
 
 class MarketingSchema(BaseModel):
@@ -487,19 +488,113 @@ class CreativeBriefCreate(MarketingSchema):
     alt_text: str | None = Field(default=None, max_length=1000)
 
 
+CreativeVariationMode = Literal[
+    "alternate_metaphor",
+    "product_led",
+    "outcome_led",
+    "minimal",
+    "cinematic",
+    "alternate_composition",
+]
+
+
+class CreativeVariationRequest(MarketingSchema):
+    variation_mode: CreativeVariationMode = "alternate_metaphor"
+
+
+class VideoScene(MarketingSchema):
+    scene_number: int = Field(ge=1, le=8)
+    duration_seconds: int = Field(ge=1, le=30)
+    purpose: str = Field(min_length=1, max_length=160)
+    visual: str = Field(min_length=1, max_length=400)
+    motion: str = Field(min_length=1, max_length=240)
+    voiceover: str | None = Field(default=None, max_length=300)
+    on_screen_copy: str | None = Field(default=None, max_length=120)
+
+
+class VideoCreativeStrategy(MarketingSchema):
+    hook: str = Field(min_length=1, max_length=240)
+    script: str = Field(min_length=1, max_length=1200)
+    storyboard_summary: str = Field(min_length=1, max_length=600)
+    scenes: list[VideoScene] = Field(min_length=1, max_length=8)
+    shot_plan: list[str] = Field(min_length=1, max_length=8)
+    continuity_direction: str = Field(min_length=1, max_length=400)
+    reference_asset_strategy: str = Field(min_length=1, max_length=400)
+    audio_direction: str = Field(min_length=1, max_length=300)
+    caption_plan: str = Field(min_length=1, max_length=300)
+    end_card: str = Field(min_length=1, max_length=300)
+    duration_seconds: Literal[6, 8, 15, 30]
+    aspect_ratio: Literal["9:16", "16:9", "1:1"]
+    recommended_channel: Channel
+    offer: str | None = Field(default=None, max_length=160)
+    claim_source: Literal[
+        "authoritative_business_context",
+        "owner_provided_campaign_input",
+        "approved_content_context",
+        "none",
+    ] = "none"
+    cta: str | None = Field(default=None, max_length=300)
+    evidence_source_ids: list[str] = Field(default_factory=list, max_length=20)
+    recommendations: list[str] = Field(default_factory=list, max_length=20)
+    proposed_actions: list[AIAgentProposedAction] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_timeline(self) -> "VideoCreativeStrategy":
+        if sum(scene.duration_seconds for scene in self.scenes) != self.duration_seconds:
+            raise ValueError("video scene durations must equal the requested duration")
+        if [scene.scene_number for scene in self.scenes] != list(
+            range(1, len(self.scenes) + 1)
+        ):
+            raise ValueError("video scenes must be consecutively numbered")
+        if any(not value.strip() or len(value) > 300 for value in self.shot_plan):
+            raise ValueError("video shot plan entries are invalid")
+        if len(self.canonical_json().encode("utf-8")) > MAX_VIDEO_STRATEGY_BYTES:
+            raise ValueError(
+                f"video strategy exceeds the {MAX_VIDEO_STRATEGY_BYTES}-byte limit"
+            )
+        return self
+
+    def canonical_payload(self) -> dict[str, object]:
+        """Return only the bounded, provider-approved production strategy."""
+        return self.model_dump(
+            exclude={"evidence_source_ids", "recommendations", "proposed_actions"}
+        )
+
+    def canonical_json(self) -> str:
+        """Serialize the canonical production strategy without internal fields."""
+        return self.model_dump_json(
+            exclude={"evidence_source_ids", "recommendations", "proposed_actions"}
+        )
+
+
+class VideoCreativeCreateRequest(MarketingSchema):
+    campaign_id: UUID | None = None
+    content_id: UUID | None = None
+    duration_seconds: Literal[6, 8, 15, 30] = 15
+    aspect_ratio: Literal["9:16", "16:9", "1:1"] = "9:16"
+    instructions: str = Field(min_length=1, max_length=2000)
+    style: str | None = Field(default=None, max_length=160)
+    audio_preference: str | None = Field(default=None, max_length=160)
+    motion_preference: str | None = Field(default=None, max_length=160)
+
+
 class CreativeAssetResponse(MarketingRecord):
+    """Public creative projection; internal metadata and job references stay private."""
+
     campaign_id: UUID | None
     content_id: UUID | None
     asset_type: str
+    media_type: Literal["image", "video"]
     source_type: Literal["manual", "import", "ai_brief", "future_provider"]
     instructions: str | None
     visual_direction: str | None
-    generation_status: Literal["draft", "brief_ready", "provider_required", "ready", "failed", "archived"]
+    generation_status: Literal["draft", "brief_ready", "strategy_ready", "provider_required", "queued", "generating", "reviewing", "repairing", "ready", "failed", "archived"]
     storage_reference: str | None
     width: int | None
     height: int | None
     aspect_ratio: str | None
     alt_text: str | None
+    duration_seconds: int | None
 
 
 class ScheduleCreate(MarketingSchema):

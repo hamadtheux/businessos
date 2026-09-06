@@ -4,6 +4,10 @@ import type {
   MarketingContent,
   MarketingContentType,
 } from "../services/api-types.ts";
+import type {
+  ConnectorDefinition,
+  IntegrationConnection,
+} from "../services/integrations.ts";
 
 export type ChannelGenerationFailure = {
   channel: MarketingChannel;
@@ -49,7 +53,24 @@ export type CreativeFormat = {
   height: 1080 | 1920 | 628;
 };
 
-export type CreativePhase = "strategy" | "visual";
+export type CreativeMediaType = "image" | "video";
+export type PublishingCapabilityState =
+  | "ready"
+  | "checking"
+  | "unverified"
+  | "unsupported"
+  | "unavailable";
+export type PublishingCapability = {
+  canPrepare: boolean;
+  state: PublishingCapabilityState;
+  copy: string;
+};
+export type CreativePhase =
+  | "strategy"
+  | "visual"
+  | "video_strategy"
+  | "video_generation"
+  | "video_review";
 
 export type CreativeProgress = {
   phase: CreativePhase;
@@ -249,12 +270,127 @@ export function channelGenerationNotice(outcome: ChannelGenerationOutcome) {
 
 export function creativeResultNotice(asset: CreativeAsset) {
   if (asset.generation_status === "ready") {
-    return "Your final branded creative is ready for review.";
+    return `Your final branded ${asset.media_type} creative is ready for review.`;
   }
   if (asset.generation_status === "provider_required") {
-    return "Image generation is temporarily unavailable. Your creative strategy is saved. Try again shortly—nothing has been lost.";
+    return asset.media_type === "video"
+      ? "Your video strategy and storyboard are saved. Video generation isn’t connected yet, so no final video has been rendered."
+      : "Image generation is temporarily unavailable. Your creative strategy is saved. Try again shortly—nothing has been lost.";
+  }
+  if (["strategy_ready", "queued", "generating", "reviewing", "repairing"].includes(asset.generation_status)) {
+    return `Your ${asset.media_type} creative is ${asset.generation_status.replaceAll("_", " ")}.`;
   }
   return "The final creative could not be completed. Your saved strategy remains ready to retry.";
+}
+
+export function recommendedCreativeMediaForContent(
+  content: Pick<MarketingContent, "channel" | "content_type">,
+): CreativeMediaType {
+  const editorial = EDITORIAL_CONTENT_TYPES.has(content.content_type);
+  return content.channel === "tiktok" && !editorial ? "video" : "image";
+}
+
+export function videoFormatForContent(
+  content: Pick<MarketingContent, "channel" | "content_type">,
+) {
+  const isShortMessage = ["headline", "cta"].includes(content.content_type);
+  const isLongForm = ["blog_draft", "landing_page_copy", "content_package"].includes(
+    content.content_type,
+  );
+  const duration_seconds: 8 | 15 | 30 = isShortMessage
+    ? 8
+    : isLongForm
+      ? 30
+      : 15;
+
+  if (
+    content.channel === "tiktok" &&
+    !EDITORIAL_CONTENT_TYPES.has(content.content_type)
+  ) {
+    return { aspect_ratio: "9:16" as const, duration_seconds };
+  }
+  if (
+    content.channel === "website" ||
+    content.channel === "google_ads" ||
+    EDITORIAL_CONTENT_TYPES.has(content.content_type)
+  ) {
+    return { aspect_ratio: "16:9" as const, duration_seconds };
+  }
+  return { aspect_ratio: "1:1" as const, duration_seconds };
+}
+
+export function publishingCapability({
+  channel,
+  definition,
+  connection,
+  pending = false,
+  failed = false,
+}: {
+  channel: MarketingChannel;
+  definition?: ConnectorDefinition;
+  connection?: IntegrationConnection;
+  pending?: boolean;
+  failed?: boolean;
+}): PublishingCapability {
+  if (pending) {
+    return {
+      canPrepare: false,
+      state: "checking",
+      copy: "Checking channel publishing readiness…",
+    };
+  }
+  if (failed) {
+    return {
+      canPrepare: false,
+      state: "unverified",
+      copy: "Publishing readiness could not be verified. Scheduling remains available.",
+    };
+  }
+  if (!definition || definition.connector_type !== channel) {
+    return {
+      canPrepare: false,
+      state: "unsupported",
+      copy: "Publishing isn’t available for this channel yet. You can still schedule it.",
+    };
+  }
+
+  const publishingCapabilityName = "publish_social_post";
+  const hasCurrentPublishingCapability =
+    definition.capabilities.includes(publishingCapabilityName) &&
+    !definition.future_write_capabilities.includes(publishingCapabilityName);
+  if (
+    definition.setup_status !== "available" ||
+    !definition.external_writes_enabled ||
+    !hasCurrentPublishingCapability
+  ) {
+    return {
+      canPrepare: false,
+      state: "unsupported",
+      copy: `${definition.display_name} publishing isn’t available yet. You can still schedule it.`,
+    };
+  }
+
+  const resourcesReady = Boolean(
+    !definition.resource_selection_required || connection?.selected_resources.length,
+  );
+  const canPrepare = Boolean(
+    connection?.connector_type === definition.connector_type &&
+      connection?.status === "connected" &&
+      connection.authentication_state === "authorized" &&
+      connection.health === "healthy" &&
+      resourcesReady,
+  );
+  return canPrepare
+    ? {
+        canPrepare: true,
+        state: "ready",
+        copy: `${definition.display_name} is ready. Publishing will still require approval.`,
+      }
+    : {
+        canPrepare: false,
+        state: "unavailable",
+        copy: `${definition.display_name} needs a healthy authorized connection before publishing can be prepared. Scheduling remains available.`,
+      };
 }
 
 export function creativeFormatForContent(

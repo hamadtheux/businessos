@@ -943,13 +943,19 @@ export type CreativeAsset = {
   campaign_id: string | null;
   content_id: string | null;
   asset_type: string;
+  media_type: "image" | "video";
   source_type: "manual" | "import" | "ai_brief" | "future_provider";
   instructions: string | null;
   visual_direction: string | null;
   generation_status:
     | "draft"
     | "brief_ready"
+    | "strategy_ready"
     | "provider_required"
+    | "queued"
+    | "generating"
+    | "reviewing"
+    | "repairing"
     | "ready"
     | "failed"
     | "archived";
@@ -958,6 +964,7 @@ export type CreativeAsset = {
   height: number | null;
   aspect_ratio: string | null;
   alt_text: string | null;
+  duration_seconds: number | null;
   created_at: string;
   updated_at: string;
 };

@@ -40,10 +40,13 @@ from app.services.creative_visual_review import (  # noqa: E402
     CreativeVisualReviewResult,
 )
 from app.services.marketing import (  # noqa: E402
+    _CTACapabilities,
     _CREATIVE_STRATEGY_RUNTIME_RULE_MARGIN,
     _CREATIVE_STRATEGY_TASK_BUDGET,
     _allocate_budget,
+    _contains_creative_instruction_copy,
     _execute_creative_strategy,
+    _normalize_generated_cta,
     _page,
     _term,
     analyze_competitor,
@@ -162,6 +165,7 @@ def _creative_asset(
         campaign_id=None,
         content_id=None,
         asset_type="social_square",
+        media_type="image",
         source_type=source_type,
         instructions="create a grounded product post",
         visual_direction=(
@@ -209,6 +213,9 @@ def _visual_review(**updates: object) -> CreativeVisualReview:
         "offer_clarity": 90,
         "focal_relevance": 87,
         "product_relevance": 89,
+        "business_specific_relevance": 88,
+        "visual_storytelling": 87,
+        "commercial_sophistication": 86,
         "originality": 86,
         "scroll_stopping_strength": 85,
         "message_coherence": 90,
@@ -225,6 +232,10 @@ def _visual_review(**updates: object) -> CreativeVisualReview:
         "irrelevant_visual": False,
         "irrelevant_decorative_art": False,
         "meaningless_focal_story": False,
+        "replaceable_brand_creative": False,
+        "decorative_abstraction_dominates": False,
+        "no_product_service_story": False,
+        "commercially_weak": False,
         "unnatural_headline_wrapping": False,
         "generic_template_output": False,
         "weak_brand_cta": False,
@@ -244,7 +255,11 @@ def _visual_review(**updates: object) -> CreativeVisualReview:
             "overcrowding",
             "irrelevant_visual",
             "irrelevant_decorative_art",
-            "meaningless_focal_story",
+                "meaningless_focal_story",
+                "replaceable_brand_creative",
+                "decorative_abstraction_dominates",
+                "no_product_service_story",
+                "commercially_weak",
             "unnatural_headline_wrapping",
             "generic_template_output",
             "weak_brand_cta",
@@ -266,6 +281,9 @@ def _visual_review_at_score(score: int) -> CreativeVisualReview:
         offer_clarity=score,
         focal_relevance=score,
         product_relevance=score,
+        business_specific_relevance=score,
+        visual_storytelling=score,
+        commercial_sophistication=score,
         originality=score,
         scroll_stopping_strength=score,
         message_coherence=score,
@@ -312,6 +330,39 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["cpl"], Decimal("5.000000"))
         self.assertEqual(result["cpa"], Decimal("10.000000"))
         self.assertEqual(result["roas"], Decimal("5.000000"))
+
+    def test_creative_production_instructions_cannot_pass_as_customer_copy(self) -> None:
+        self.assertTrue(
+            _contains_creative_instruction_copy(
+                "Create a premium scroll-stopping social media visual with the logo top right."
+            )
+        )
+        self.assertFalse(
+            _contains_creative_instruction_copy(
+                "A practical product story for teams ready to work with confidence."
+            )
+        )
+
+    def test_generated_cta_is_canonical_and_requires_action_support(self) -> None:
+        self.assertIsNone(_normalize_generated_cta("click here"))
+        self.assertEqual(_normalize_generated_cta("buy Now"), "Learn More")
+        self.assertEqual(_normalize_generated_cta("shop now"), "Learn More")
+        self.assertEqual(_normalize_generated_cta("Start Trial"), "Learn More")
+        self.assertEqual(_normalize_generated_cta("Subscribe"), "Learn More")
+        self.assertEqual(
+            _normalize_generated_cta(
+                "buy Now",
+                capabilities=_CTACapabilities(can_shop=True),
+            ),
+            "Shop Now",
+        )
+        self.assertEqual(
+            _normalize_generated_cta(
+                "book now",
+                capabilities=_CTACapabilities(can_book=True),
+            ),
+            "Book Now",
+        )
 
     async def test_campaign_uses_trusted_business_currency(self) -> None:
         business = Business(id=BUSINESS_ID, name="Acme", slug="acme", business_type="retail", status="active", timezone="UTC", currency="PKR", locale="en", created_at=NOW, updated_at=NOW)
@@ -1132,6 +1183,7 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
             campaign_id=None,
             content_id=None,
             asset_type="social_square",
+            media_type="image",
             source_type="ai_brief",
             instructions="make a post",
             visual_direction=json.dumps(strategy),
@@ -1238,6 +1290,7 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
             campaign_id=None,
             content_id=None,
             asset_type="social_square",
+            media_type="image",
             source_type="ai_brief",
             instructions="promote business",
             visual_direction=json.dumps(strategy),
@@ -1924,6 +1977,7 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
             campaign_id=None,
             content_id=None,
             asset_type="social_square",
+            media_type="image",
             source_type="ai_brief",
             instructions="create visual",
             visual_direction=json.dumps(strategy),
@@ -1966,6 +2020,7 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
             campaign_id=None,
             content_id=None,
             asset_type="social_square",
+            media_type="image",
             source_type="future_provider",
             instructions="already generated",
             visual_direction="{}",
@@ -2431,6 +2486,8 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(original.generation_status, "ready")
         self.assertEqual(original.storage_reference, original_reference)
         self.assertNotEqual(revision.storage_reference, original_reference)
+        self.assertEqual(revision.creative_metadata["revision_of"], str(original.id))
+        self.assertNotIn("variation_mode", revision.creative_metadata)
 
     async def test_final_storage_is_compensated_when_database_flush_fails(self) -> None:
         asset = _creative_asset()
@@ -2579,6 +2636,191 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             any(isinstance(item, SocialSchedule) for item in session.added)
         )
+
+    async def test_generated_copy_cannot_self_authorize_transactional_cta(self) -> None:
+        execution = SimpleNamespace(
+            context_revision="7" * 64,
+            business_brain_source_count=1,
+            memory_source_count=0,
+            output=SimpleNamespace(
+                summary=json.dumps({
+                    "title": "Buy products today",
+                    "body": "Shop our products in our store.",
+                    "cta": "buy Now",
+                    "offer": None,
+                    "creative_brief": "Use a grounded product-led composition.",
+                    "recommended_channel": "instagram",
+                    "generation_reasoning": "Lead with a concise product story.",
+                    "evidence_source_ids": [],
+                }),
+                recommendations=[],
+                proposed_actions=[],
+            ),
+        )
+
+        with patch(
+            "app.services.marketing._execute_cmo",
+            new=AsyncMock(return_value=execution),
+        ):
+            content = await generate_content(
+                _ScalarSession([]),
+                business_id=BUSINESS_ID,
+                actor_user_id=USER_ID,
+                data=ContentGenerateRequest(
+                    prompt="Make me a Buy Now campaign",
+                    channel="instagram",
+                    content_type="social_post",
+                ),
+                provider=SimpleNamespace(),
+            )
+
+        self.assertEqual(content.cta, "Learn More")
+
+    async def test_structured_storefront_capability_allows_shop_cta(self) -> None:
+        execution = SimpleNamespace(
+            context_revision="8" * 64,
+            business_brain_source_count=1,
+            memory_source_count=0,
+            output=SimpleNamespace(
+                summary=json.dumps({
+                    "title": "Explore the supported collection",
+                    "body": "See the active products available from the storefront.",
+                    "cta": "buy Now",
+                    "offer": None,
+                    "creative_brief": "Use a grounded product-led composition.",
+                    "recommended_channel": "instagram",
+                    "generation_reasoning": "Lead with a concise product story.",
+                    "evidence_source_ids": [],
+                }),
+                recommendations=[],
+                proposed_actions=[],
+            ),
+        )
+        campaign = _campaign("draft")
+        session = _ScalarSession([campaign, True], rows=[[uuid4()]])
+
+        with patch(
+            "app.services.marketing._execute_cmo",
+            new=AsyncMock(return_value=execution),
+        ):
+            content = await generate_content(
+                session,
+                business_id=BUSINESS_ID,
+                actor_user_id=USER_ID,
+                data=ContentGenerateRequest(
+                    prompt="Promote the collection",
+                    campaign_id=campaign.id,
+                    channel="instagram",
+                    content_type="social_post",
+                ),
+                provider=SimpleNamespace(),
+            )
+
+        self.assertEqual(content.cta, "Shop Now")
+        self.assertEqual(len(session.scalars_statements), 1)
+        capability_statement = session.scalars_statements[0]
+        compiled = capability_statement.compile()
+        self.assertIn(BUSINESS_ID, compiled.params.values())
+        self.assertIn(campaign.id, compiled.params.values())
+        self.assertIn("campaign_product_selections", str(capability_statement))
+
+    async def test_unrelated_tenant_product_cannot_authorize_campaign_shop_cta(self) -> None:
+        execution = SimpleNamespace(
+            context_revision="9" * 64,
+            business_brain_source_count=1,
+            memory_source_count=0,
+            output=SimpleNamespace(
+                summary=json.dumps({
+                    "title": "Explore this service",
+                    "body": "Learn how this service supports the working day.",
+                    "cta": "Shop Now",
+                    "offer": None,
+                    "creative_brief": "Use a grounded service-led composition.",
+                    "recommended_channel": "instagram",
+                    "generation_reasoning": "Lead with a concise service story.",
+                    "evidence_source_ids": [],
+                }),
+                recommendations=[],
+                proposed_actions=[],
+            ),
+        )
+        campaign = _campaign("draft")
+        session = _ScalarSession([campaign, True], rows=[[]])
+
+        with patch(
+            "app.services.marketing._execute_cmo",
+            new=AsyncMock(return_value=execution),
+        ):
+            content = await generate_content(
+                session,
+                business_id=BUSINESS_ID,
+                actor_user_id=USER_ID,
+                data=ContentGenerateRequest(
+                    prompt="Promote the service",
+                    campaign_id=campaign.id,
+                    channel="instagram",
+                    content_type="social_post",
+                ),
+                provider=SimpleNamespace(),
+            )
+
+        self.assertEqual(content.cta, "Learn More")
+        capability_statement = session.scalars_statements[0]
+        self.assertIn(campaign.id, capability_statement.compile().params.values())
+        self.assertIn("campaign_product_selections", str(capability_statement))
+
+    async def test_existing_malformed_cta_is_revalidated_for_creative_strategy(self) -> None:
+        campaign = _campaign("draft")
+        content_id = uuid4()
+        content = MarketingContent(
+            id=content_id,
+            business_id=BUSINESS_ID,
+            campaign_id=campaign.id,
+            channel="instagram",
+            content_type="social_post",
+            title="Supported collection",
+            body="A grounded product story.",
+            cta="buy Now",
+            language="en",
+            status="approved",
+            ai_generated=True,
+            version=1,
+            parent_content_id=None,
+            root_content_id=content_id,
+            created_by_user_id=USER_ID,
+            source_evidence=[],
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        strategy_values = _creative_strategy()
+        strategy_values["cta"] = "buy Now"
+        execution = SimpleNamespace(
+            provider_metadata=SimpleNamespace(provider_request_id="req-cta"),
+            output=CreativeStrategyProposal.model_validate(strategy_values),
+        )
+        session = _ScalarSession([campaign, content], rows=[[uuid4()]])
+
+        with patch(
+            "app.services.marketing._execute_creative_strategy",
+            new=AsyncMock(return_value=execution),
+        ) as runtime:
+            asset = await create_creative_brief(
+                session,
+                business_id=BUSINESS_ID,
+                actor_user_id=USER_ID,
+                data=CreativeBriefCreate(
+                    campaign_id=campaign.id,
+                    content_id=content.id,
+                    asset_type="social_square",
+                    instructions="Create a product-led visual.",
+                    aspect_ratio="1:1",
+                ),
+                provider=SimpleNamespace(),
+            )
+
+        self.assertEqual(json.loads(asset.visual_direction)["cta"], "Shop Now")
+        self.assertIn("Shop Now", runtime.await_args.args[2])
+        self.assertNotIn("buy Now", runtime.await_args.args[2])
 
     async def test_owner_authorized_offer_survives_content_and_creative_strategy(self) -> None:
         content_execution = SimpleNamespace(
@@ -3037,12 +3279,14 @@ class _ScalarSession:
         self.added = []
         self.flush_calls = 0
         self.scalar_statements = []
+        self.scalars_statements = []
 
     async def scalar(self, statement):
         self.scalar_statements.append(statement)
         return self.values.pop(0) if self.values else None
 
-    async def scalars(self, _statement):
+    async def scalars(self, statement):
+        self.scalars_statements.append(statement)
         return _ScalarRows(self.rows.pop(0) if self.rows else [])
 
     def add(self, value):

@@ -44,8 +44,11 @@ import {
   creativePhaseForDisplay,
   creativeResultNotice,
   generateCampaignChannelDrafts,
+  publishingCapability,
   runCreativeOperationWithRecovery,
+  videoFormatForContent,
   type CampaignGenerationInput,
+  type CreativeMediaType,
   type CreativeProgress,
 } from "@/lib/cmo-ux";
 import { humanizeApiError } from "@/services/api-client";
@@ -1499,8 +1502,11 @@ export function SocialManagementPage() {
   const [schedule, setSchedule] = useState<MarketingContent | null>(null);
   const [postWorkspaceMode, setPostWorkspaceMode] =
     useState<PostWorkspaceMode>("overview");
+  const [creativeBriefMedia, setCreativeBriefMedia] =
+    useState<CreativeMediaType>("image");
   const [creativeProgress, setCreativeProgress] = useState<CreativeProgress>(null);
   const [creativeActionError, setCreativeActionError] = useState("");
+  const [advancedRequestHandled, setAdvancedRequestHandled] = useState(false);
   const creativeOperationLock = useRef(false);
   const [calendarDays, setCalendarDays] = useState<1 | 7 | 30>(7);
   const [calendarChannel, setCalendarChannel] = useState<MarketingChannel | "">(
@@ -1518,6 +1524,17 @@ export function SocialManagementPage() {
       ).toISOString(),
     [calendarStart, calendarDays],
   );
+  const advancedRequest = useMemo<{
+    contentId: string | null;
+    media: CreativeMediaType | null;
+  }>(() => {
+    const params = new URLSearchParams(window.location.search);
+    const media = params.get("creative");
+    return {
+      contentId: params.get("content"),
+      media: media === "image" || media === "video" ? media : null,
+    };
+  }, [location]);
 
   const content = useQuery({
     queryKey: ["marketing", activeBusinessId, "content", status, page],
@@ -1606,8 +1623,28 @@ export function SocialManagementPage() {
   });
   useEffect(() => {
     setCreativeActionError("");
-    setPostWorkspaceMode("overview");
-  }, [selected?.id]);
+    if (
+      !advancedRequestHandled ||
+      advancedRequest.contentId !== selected?.id
+    ) {
+      setPostWorkspaceMode("overview");
+    }
+  }, [advancedRequest.contentId, advancedRequestHandled, selected?.id]);
+  useEffect(() => {
+    if (advancedRequestHandled || !advancedRequest.contentId || !content.data) {
+      return;
+    }
+    const requestedContent = content.data.items.find(
+      (item) => item.id === advancedRequest.contentId,
+    );
+    if (!requestedContent) return;
+    setSelected(requestedContent);
+    if (advancedRequest.media) {
+      setCreativeBriefMedia(advancedRequest.media);
+      setPostWorkspaceMode("creative_brief");
+    }
+    setAdvancedRequestHandled(true);
+  }, [advancedRequest, advancedRequestHandled, content.data]);
   const move = useMutation({
     mutationFn: ({
       id,
@@ -1779,6 +1816,33 @@ export function SocialManagementPage() {
       ),
     onSettled: () => refreshCreatives(),
   });
+  const createVideoBrief = useMutation({
+    mutationFn: ({ item, instructions, duration, aspectRatio, style, audio, motion }: {
+      item: MarketingContent;
+      instructions: string;
+      duration: 6 | 8 | 15 | 30;
+      aspectRatio: "9:16" | "16:9" | "1:1";
+      style?: string;
+      audio?: string;
+      motion?: string;
+    }) => marketingApi.creative.videoStrategy(activeBusinessId, {
+      campaign_id: item.campaign_id,
+      content_id: item.id,
+      duration_seconds: duration,
+      aspect_ratio: aspectRatio,
+      instructions,
+      style: style || null,
+      audio_preference: audio || null,
+      motion_preference: motion || null,
+    }),
+    onSuccess: () => {
+      setPostWorkspaceMode("overview");
+      setNotice("Video strategy and storyboard were saved. No final video was rendered or published.");
+      setError("");
+    },
+    onError: (reason) => setError(humanizeApiError(reason, "The grounded video strategy could not be prepared.")),
+    onSettled: () => refreshCreatives(),
+  });
   const createCreative = useMutation({
     mutationFn: (item: MarketingContent) => createCreativeWithRecovery({
       contentId: item.id,
@@ -1810,10 +1874,36 @@ export function SocialManagementPage() {
       creativeOperationLock.current = false;
     },
   });
+  const createVideo = useMutation({
+    mutationFn: async (item: MarketingContent) => {
+      setCreativeProgress({ phase: "video_strategy", contentId: item.id });
+      try {
+        const strategy = await marketingApi.creative.videoStrategy(activeBusinessId, {
+          campaign_id: item.campaign_id,
+          content_id: item.id,
+          ...videoFormatForContent(item),
+          instructions: item.creative_brief || `Create a professional campaign video for ${item.title}.`,
+        });
+        setCreativeProgress({ phase: "video_generation", contentId: item.id, assetId: strategy.id });
+        return await marketingApi.creative.generateVideo(activeBusinessId, strategy.id);
+      } finally {
+        await refreshCreatives();
+        setCreativeProgress(null);
+      }
+    },
+    onSuccess: (asset) => {
+      setNotice(creativeResultNotice(asset));
+      setCreativeActionError("");
+      setError("");
+      void invalidate();
+    },
+    onError: (reason) => setCreativeActionError(humanizeApiError(reason, "The video strategy could not be completed.")),
+    onSettled: () => { creativeOperationLock.current = false; },
+  });
   const generateVisual = useMutation({
     mutationFn: (asset: CreativeAsset) => runCreativeOperationWithRecovery({
-      progress: { phase: "visual", contentId: asset.content_id || undefined, assetId: asset.id },
-      operation: () => marketingApi.creative.generate(activeBusinessId, asset.id),
+      progress: { phase: asset.media_type === "video" ? "video_generation" : "visual", contentId: asset.content_id || undefined, assetId: asset.id },
+      operation: () => asset.media_type === "video" ? marketingApi.creative.generateVideo(activeBusinessId, asset.id) : marketingApi.creative.generate(activeBusinessId, asset.id),
       refresh: refreshCreatives,
       onProgress: setCreativeProgress,
     }),
@@ -1835,9 +1925,9 @@ export function SocialManagementPage() {
     },
   });
   const regenerateVisual = useMutation({
-    mutationFn: (asset: CreativeAsset) => runCreativeOperationWithRecovery({
+    mutationFn: ({ asset, mode }: { asset: CreativeAsset; mode?: "alternate_metaphor" | "alternate_composition" }) => runCreativeOperationWithRecovery({
       progress: { phase: "visual", contentId: asset.content_id || undefined, assetId: asset.id },
-      operation: () => marketingApi.creative.regenerate(activeBusinessId, asset.id),
+      operation: () => marketingApi.creative.regenerate(activeBusinessId, asset.id, mode),
       refresh: refreshCreatives,
       onProgress: setCreativeProgress,
     }),
@@ -1910,7 +2000,7 @@ export function SocialManagementPage() {
       marketingApi.content.preparePublish(
         activeBusinessId,
         item.id,
-        item.channel as "facebook" | "instagram",
+        item.channel,
       ),
     onSuccess: (proposal) => {
       setNotice(
@@ -1934,21 +2024,15 @@ export function SocialManagementPage() {
   const selectedConnection = integrationConnections.data?.find(
     (item) => item.connector_type === selected?.channel,
   );
-  const selectedProviderWriteReady = Boolean(
-    selectedConnector?.external_writes_enabled &&
-      selectedConnector.setup_status === "available" &&
-      selectedConnection?.status === "connected" &&
-      selectedConnection.authentication_state === "authorized" &&
-      selectedConnection.health === "healthy",
-  );
-  const selectedProviderCopy = integrationRegistry.isPending ||
-    integrationConnections.isPending
-    ? "Provider write readiness is still being checked."
-    : integrationRegistry.isError || integrationConnections.isError
-      ? "Provider write readiness could not be verified."
-      : selectedProviderWriteReady
-        ? "A healthy authenticated write provider is available; approval is still mandatory."
-        : "A healthy authenticated provider with accepted write capability is still required.";
+  const selectedPublishCapability = publishingCapability({
+    channel: selected?.channel ?? "other",
+    definition: selectedConnector,
+    connection: selectedConnection,
+    pending: integrationRegistry.isPending || integrationConnections.isPending,
+    failed: integrationRegistry.isError || integrationConnections.isError,
+  });
+  const selectedProviderWriteReady = selectedPublishCapability.canPrepare;
+  const selectedProviderCopy = selectedPublishCapability.copy;
   const creativePhase = creativePhaseForDisplay(
     creativeProgress,
     selected?.id,
@@ -1962,12 +2046,14 @@ export function SocialManagementPage() {
       });
   const creativeOperationPending =
     createCreative.isPending ||
+    createVideo.isPending ||
     generateVisual.isPending ||
     regenerateVisual.isPending;
   const postWorkspaceBusy =
     creativeOperationPending ||
     edit.isPending ||
     createBrief.isPending ||
+    createVideoBrief.isPending ||
     regenerate.isPending ||
     move.isPending ||
     preparePublish.isPending;
@@ -1986,6 +2072,10 @@ export function SocialManagementPage() {
     setPostWorkspaceMode("overview");
     setError("");
   };
+  const createAnotherContent = () => {
+    closePostWorkspace();
+    setShowContentGenerator(true);
+  };
   const submitContentVersion = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!selected) return;
@@ -2001,6 +2091,18 @@ export function SocialManagementPage() {
     event.preventDefault();
     if (!selected) return;
     const form = new FormData(event.currentTarget);
+    if (creativeBriefMedia === "video") {
+      createVideoBrief.mutate({
+        item: selected,
+        instructions: String(form.get("instructions")),
+        duration: Number(form.get("duration_seconds")) as 6 | 8 | 15 | 30,
+        aspectRatio: String(form.get("aspect_ratio")) as "9:16" | "16:9" | "1:1",
+        style: String(form.get("style") || ""),
+        audio: String(form.get("audio_preference") || ""),
+        motion: String(form.get("motion_preference") || ""),
+      });
+      return;
+    }
     const width = String(form.get("width") || "");
     const height = String(form.get("height") || "");
     createBrief.mutate({
@@ -2020,6 +2122,14 @@ export function SocialManagementPage() {
   const postWorkspaceFooter = !selected ? undefined : postWorkspaceMode === "edit" ? (
     <div className="cmo-post-workspace-footer">
       <div className="cmo-post-workspace-secondary-actions">
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={edit.isPending}
+          onClick={createAnotherContent}
+        >
+          <Plus /> Create another
+        </Button>
         <Button
           type="button"
           variant="secondary"
@@ -2046,7 +2156,15 @@ export function SocialManagementPage() {
         <Button
           type="button"
           variant="secondary"
-          disabled={createBrief.isPending}
+          disabled={createBrief.isPending || createVideoBrief.isPending}
+          onClick={createAnotherContent}
+        >
+          <Plus /> Create another
+        </Button>
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={createBrief.isPending || createVideoBrief.isPending}
           onClick={returnToPostWorkspace}
         >
           Back to post
@@ -2057,16 +2175,23 @@ export function SocialManagementPage() {
           variant="primary"
           type="submit"
           form="cmo-creative-brief-form"
-          disabled={createBrief.isPending}
+          disabled={createBrief.isPending || createVideoBrief.isPending}
         >
           <Sparkles />
-          {createBrief.isPending ? "Preparing…" : "Prepare creative strategy"}
+          {createBrief.isPending || createVideoBrief.isPending ? "Preparing…" : `Prepare ${creativeBriefMedia} strategy`}
         </Button>
       </div>
     </div>
   ) : (
     <div className="cmo-post-workspace-footer">
       <div className="cmo-post-workspace-secondary-actions">
+        <Button
+          variant="secondary"
+          onClick={createAnotherContent}
+          disabled={postWorkspaceBusy}
+        >
+          <Plus /> Create another
+        </Button>
         <Button
           variant="secondary"
           onClick={() => {
@@ -2142,10 +2267,9 @@ export function SocialManagementPage() {
           </Button>
         )}
         {selectedProviderWriteReady &&
-          ["facebook", "instagram"].includes(selected.channel) &&
           ["approved", "scheduled", "ready_to_publish"].includes(selected.status) && (
             <Button
-              variant="primary"
+              variant="soft"
               disabled={postWorkspaceBusy}
               onClick={() => preparePublish.mutate(selected)}
             >
@@ -2180,15 +2304,15 @@ export function SocialManagementPage() {
       />
       <CmoDepartmentNav
         active={
-          location.endsWith("/content")
+          location.split("?")[0].endsWith("/content")
             ? "Content"
-            : location.endsWith("/calendar")
+            : location.split("?")[0].endsWith("/calendar")
               ? "Calendar"
               : "Social"
         }
       />
       {notice && (
-        <div className="ai-banner">
+        <div className="ai-banner" role="status" aria-live="polite">
           <Check /> {notice}
           <button className="close-btn" onClick={() => setNotice("")}>
             <X />
@@ -2196,7 +2320,7 @@ export function SocialManagementPage() {
         </div>
       )}
       {error && (
-        <div className="ai-banner">
+        <div className="ai-banner" role="alert" aria-live="assertive">
           <AlertCircle /> {error}
           <button className="close-btn" onClick={() => setError("")}>
             <X />
@@ -2251,20 +2375,15 @@ export function SocialManagementPage() {
                 connection.status,
               ),
           );
-          const writeReady = Boolean(
-            healthy &&
-              definition?.external_writes_enabled &&
-              definition.setup_status === "available",
-          );
-          const copy = healthy
-            ? writeReady
-              ? "Connected and healthy; governed publish preparation is available"
-              : "Connected and healthy; external publishing remains provider-disabled"
-            : needsAttention
-              ? "Connection needs attention before publishing can be prepared"
-              : definition
-                ? `${definition.setup_status.replaceAll("_", " ")} · planning remains available`
-                : "No connector is registered; internal planning only";
+          const capability = publishingCapability({
+            channel: platform as MarketingChannel,
+            definition,
+            connection,
+            pending: integrationRegistry.isPending || integrationConnections.isPending,
+            failed: integrationRegistry.isError || integrationConnections.isError,
+          });
+          const writeReady = capability.canPrepare;
+          const copy = capability.copy;
           return (
             <Card key={platform} className="social-channel">
               <Icon />
@@ -2316,9 +2435,17 @@ export function SocialManagementPage() {
               const Icon =
                 platformIcons[post.channel as keyof typeof platformIcons] ??
                 Sparkles;
-              const publishableChannel = ["facebook", "instagram"].includes(
-                post.channel,
-              );
+              const postPublishCapability = publishingCapability({
+                channel: post.channel,
+                definition: integrationRegistry.data?.find(
+                  (item) => item.connector_type === post.channel,
+                ),
+                connection: integrationConnections.data?.find(
+                  (item) => item.connector_type === post.channel,
+                ),
+                pending: integrationRegistry.isPending || integrationConnections.isPending,
+                failed: integrationRegistry.isError || integrationConnections.isError,
+              });
               return (
                 <Card className="social-post" key={post.id}>
                   <div className="social-post-head">
@@ -2381,7 +2508,7 @@ export function SocialManagementPage() {
                         <Calendar /> Schedule
                       </Button>
                     )}
-                    {publishableChannel &&
+                    {postPublishCapability.canPrepare &&
                       ["approved", "scheduled", "ready_to_publish"].includes(
                         post.status,
                       ) && (
@@ -2638,6 +2765,7 @@ export function SocialManagementPage() {
                   className="btn-sm"
                   onClick={() => {
                     setError("");
+                    setCreativeBriefMedia("image");
                     setPostWorkspaceMode("creative_brief");
                   }}
                   disabled={postWorkspaceBusy}
@@ -2653,10 +2781,22 @@ export function SocialManagementPage() {
                 actionError={creativeActionError}
                 isPending={postWorkspaceBusy}
                 phase={creativePhase}
-                onCreate={() => startCreativeOperation(() => createCreative.mutate(selected))}
+                contentId={selected.id}
+                channel={selected.channel}
+                contentType={selected.content_type}
+                onCreate={(mediaType) => startCreativeOperation(() => {
+                  if (mediaType === "video") createVideo.mutate(selected);
+                  else createCreative.mutate(selected);
+                })}
+                onEditDirection={(mediaType) => {
+                  setCreativeBriefMedia(mediaType);
+                  setError("");
+                  setPostWorkspaceMode("creative_brief");
+                }}
                 onReload={() => void assets.refetch()}
                 onRetry={(asset) => startCreativeOperation(() => generateVisual.mutate(asset))}
-                onRegenerate={(asset) => startCreativeOperation(() => regenerateVisual.mutate(asset))}
+                onRegenerate={(asset) => startCreativeOperation(() => regenerateVisual.mutate({ asset }))}
+                onVariation={(asset) => startCreativeOperation(() => regenerateVisual.mutate({ asset, mode: "alternate_metaphor" }))}
               />
             </section>
 
@@ -2761,7 +2901,7 @@ export function SocialManagementPage() {
               <div className="cmo-post-workspace-section-heading">
                 <div>
                   <div className="eyebrow">Advanced creative brief</div>
-                  <h2 id="cmo-creative-brief-heading">Prepare creative strategy</h2>
+                  <h2 id="cmo-creative-brief-heading">Prepare {creativeBriefMedia} strategy</h2>
                 </div>
               </div>
               <form
@@ -2771,31 +2911,56 @@ export function SocialManagementPage() {
               >
                 {error && <p className="form-error" role="alert">{error}</p>}
                 <div className="cmo-drawer-grid">
-                  <div className="field">
-                    <label>Asset type</label>
-                    <select name="asset_type" defaultValue={selectedCreativeFormat.asset_type}>
-                      <option value="social_square">Social square</option>
-                      <option value="story_reel">Story / reel</option>
-                      <option value="landscape_ad">Landscape ad</option>
-                      <option value="display_banner">Display banner</option>
-                      <option value="creative_brief">Creative brief only</option>
-                      <option value="other">Other</option>
-                    </select>
-                  </div>
-                  <div className="field">
-                    <label>Aspect ratio</label>
-                    <input name="aspect_ratio" maxLength={16} defaultValue={selectedCreativeFormat.aspect_ratio} />
-                  </div>
+                  {creativeBriefMedia === "video" ? (
+                    <>
+                      <div className="field">
+                        <label>Video format</label>
+                        <select name="aspect_ratio" defaultValue={videoFormatForContent(selected).aspect_ratio}>
+                          <option value="9:16">Vertical · 9:16</option>
+                          <option value="16:9">Landscape · 16:9</option>
+                          <option value="1:1">Square · 1:1</option>
+                        </select>
+                      </div>
+                      <div className="field">
+                        <label>Duration</label>
+                        <select name="duration_seconds" defaultValue={videoFormatForContent(selected).duration_seconds}>
+                          <option value="6">6 seconds</option>
+                          <option value="8">8 seconds</option>
+                          <option value="15">15 seconds</option>
+                          <option value="30">30 seconds</option>
+                        </select>
+                      </div>
+                      <div className="field"><label>Style</label><input name="style" maxLength={160} placeholder="Cinematic, editorial, product-led…" /></div>
+                      <div className="field"><label>Audio</label><input name="audio_preference" maxLength={160} placeholder="Voiceover, music, ambient…" /></div>
+                      <div className="field full"><label>Motion</label><input name="motion_preference" maxLength={160} placeholder="Camera and transition preference" /></div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="field">
+                        <label>Asset type</label>
+                        <select name="asset_type" defaultValue={selectedCreativeFormat.asset_type}>
+                          <option value="social_square">Social square</option>
+                          <option value="story_reel">Story / reel</option>
+                          <option value="landscape_ad">Landscape ad</option>
+                          <option value="display_banner">Display banner</option>
+                          <option value="creative_brief">Creative brief only</option>
+                          <option value="other">Other</option>
+                        </select>
+                      </div>
+                      <div className="field"><label>Aspect ratio</label><input name="aspect_ratio" maxLength={16} defaultValue={selectedCreativeFormat.aspect_ratio} /></div>
+                    </>
+                  )}
                   <div className="field full">
-                    <label>Visual instructions</label>
+                    <label>{creativeBriefMedia === "video" ? "Video direction" : "Visual instructions"}</label>
                     <textarea
                       name="instructions"
                       required
-                      maxLength={5000}
-                      placeholder="Describe composition, brand treatment, subject, and constraints using trusted product facts."
+                      maxLength={creativeBriefMedia === "video" ? 2000 : 5000}
+                      placeholder={creativeBriefMedia === "video" ? "Optional campaign idea, story, pacing, and production preferences. AI CMO will complete the professional brief." : "Describe composition, brand treatment, subject, and constraints using trusted product facts."}
+                      defaultValue={creativeBriefMedia === "video" ? selected.creative_brief || `Create a business-specific ${selected.channel.replaceAll("_", " ")} video for “${selected.title}”.` : ""}
                     />
                   </div>
-                  <div className="field">
+                  {creativeBriefMedia === "image" && <><div className="field">
                     <label>Width</label>
                     <input
                       name="width"
@@ -2804,8 +2969,7 @@ export function SocialManagementPage() {
                       max="20000"
                       defaultValue={selectedCreativeFormat.width}
                     />
-                  </div>
-                  <div className="field">
+                  </div><div className="field">
                     <label>Height</label>
                     <input
                       name="height"
@@ -2814,11 +2978,10 @@ export function SocialManagementPage() {
                       max="20000"
                       defaultValue={selectedCreativeFormat.height}
                     />
-                  </div>
-                  <div className="field full">
+                  </div><div className="field full">
                     <label>Alt text</label>
                     <textarea name="alt_text" maxLength={1000} />
-                  </div>
+                  </div></>}
                 </div>
               </form>
             </section>

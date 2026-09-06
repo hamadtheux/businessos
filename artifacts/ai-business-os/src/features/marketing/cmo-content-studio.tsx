@@ -5,7 +5,9 @@ import {
   Check,
   FileClock,
   Pencil,
+  Plus,
   RefreshCw,
+  Send,
   ShieldCheck,
   Sparkles,
   Wand2,
@@ -21,7 +23,12 @@ import {
 import {
   CmoCreativePanel,
   type CreativePhase,
+  type CreativeVariationMode,
 } from "@/features/marketing/cmo-creative-panel";
+import type {
+  CreativeMediaType,
+  PublishingCapability,
+} from "@/lib/cmo-ux";
 import type {
   CreativeAsset,
   MarketingContent,
@@ -38,6 +45,7 @@ type ContentStudioCardProps = {
   creative?: CreativeAsset;
   creatives?: CreativeAsset[];
   isCreativeLoading?: boolean;
+  isCreativePending?: boolean;
   creativeError?: string | null;
   creativePhase?: CreativePhase | null;
   onRetry?: () => void;
@@ -45,12 +53,21 @@ type ContentStudioCardProps = {
   onRegenerate: (content: MarketingContent) => void;
   onApprove: (content: MarketingContent) => void;
   onSchedule: (content: MarketingContent) => void;
+  publishingCapability?: PublishingCapability;
+  isPreparingPublish?: boolean;
+  onPreparePublish?: (content: MarketingContent) => void;
+  onConnectChannel?: () => void;
   onEdit?: (content: MarketingContent) => void;
   onHistory?: (content: MarketingContent) => void;
-  onCreateCreative: () => void;
+  onCreateCreative: (mediaType: CreativeMediaType) => void;
+  onEditCreativeDirection?: (mediaType: CreativeMediaType) => void;
   onReloadCreative?: () => void;
   onRetryCreative: (creative: CreativeAsset) => void;
   onRegenerateCreative: (creative: CreativeAsset) => void;
+  onVariationCreative?: (
+    creative: CreativeAsset,
+    mode: CreativeVariationMode,
+  ) => void;
 };
 
 const studioGridStyle: CSSProperties = {
@@ -195,6 +212,7 @@ export function CmoContentStudioCard({
   creative,
   creatives,
   isCreativeLoading = false,
+  isCreativePending = false,
   creativeError,
   creativePhase = null,
   onRetry,
@@ -202,12 +220,18 @@ export function CmoContentStudioCard({
   onRegenerate,
   onApprove,
   onSchedule,
+  publishingCapability,
+  isPreparingPublish = false,
+  onPreparePublish,
+  onConnectChannel,
   onEdit,
   onHistory,
   onCreateCreative,
+  onEditCreativeDirection,
   onReloadCreative,
   onRetryCreative,
   onRegenerateCreative,
+  onVariationCreative,
 }: ContentStudioCardProps) {
   if (isLoading) {
     return (
@@ -217,7 +241,7 @@ export function CmoContentStudioCard({
           action={<Badge>AI CMO</Badge>}
         />
 
-        <div className="empty">
+        <div className="empty" role="status" aria-live="polite">
           <RefreshCw className="spin" />
           <p>Loading your content workspace…</p>
         </div>
@@ -233,7 +257,7 @@ export function CmoContentStudioCard({
           action={<Badge tone="warning">Needs attention</Badge>}
         />
 
-        <div className="empty">
+        <div className="empty" role="alert" aria-live="assertive">
           <AlertCircle />
           <h3>Content Studio could not load</h3>
           <p>{error}</p>
@@ -266,7 +290,7 @@ export function CmoContentStudioCard({
 
           <Button variant="primary" className="cmo-card-cta" onClick={onGenerate}>
             <WandSparkles />
-            Generate content
+            New content
           </Button>
         </div>
       </Card>
@@ -275,6 +299,15 @@ export function CmoContentStudioCard({
 
   const groundingSummary = evidenceSummary(content);
   const sourceCount = content.source_evidence?.length ?? 0;
+  const publishingEligible = ["approved", "scheduled", "ready_to_publish"].includes(
+    content.status,
+  );
+  const contentActionPending = isRegenerating || isApproving || isPreparingPublish;
+  const publishingLive = publishingCapability?.state === "checking"
+    ? "polite"
+    : publishingCapability?.state === "unverified"
+      ? "assertive"
+      : undefined;
 
   return (
     <Card>
@@ -421,10 +454,16 @@ export function CmoContentStudioCard({
           isLoading={isCreativeLoading}
           error={creativeError}
           phase={creativePhase}
+          contentId={content.id}
+          channel={content.channel}
+          contentType={content.content_type}
+          isPending={isCreativePending}
           onCreate={onCreateCreative}
+          onEditDirection={onEditCreativeDirection}
           onReload={onReloadCreative}
           onRetry={onRetryCreative}
           onRegenerate={onRegenerateCreative}
+          onVariation={onVariationCreative}
         />
       </div>
 
@@ -442,6 +481,7 @@ export function CmoContentStudioCard({
             <Button
               variant="secondary"
               className="btn-sm"
+              disabled={contentActionPending}
               onClick={() => onEdit(content)}
             >
               <Pencil />
@@ -452,7 +492,7 @@ export function CmoContentStudioCard({
           <Button
             variant="secondary"
             className="btn-sm"
-            disabled={isRegenerating}
+            disabled={contentActionPending}
             onClick={() => onRegenerate(content)}
             data-testid="button-regenerate-content"
           >
@@ -464,6 +504,7 @@ export function CmoContentStudioCard({
             <Button
               variant="secondary"
               className="btn-sm"
+              disabled={contentActionPending}
               onClick={() => onHistory(content)}
             >
               <FileClock />
@@ -475,9 +516,9 @@ export function CmoContentStudioCard({
         <div className="toolbar">
           {["draft", "review"].includes(content.status) && (
             <Button
-              variant="soft"
+              variant="primary"
               className="btn-sm"
-              disabled={isApproving}
+              disabled={contentActionPending}
               onClick={() => onApprove(content)}
               data-testid="button-approve-content"
             >
@@ -490,6 +531,7 @@ export function CmoContentStudioCard({
             <Button
               variant="primary"
               className="btn-sm"
+              disabled={contentActionPending}
               onClick={() => onSchedule(content)}
               data-testid="button-schedule-content"
             >
@@ -497,8 +539,37 @@ export function CmoContentStudioCard({
               Schedule
             </Button>
           )}
+          {publishingEligible && publishingCapability?.canPrepare && onPreparePublish && (
+            <Button
+              variant="soft"
+              className="btn-sm"
+              disabled={contentActionPending}
+              onClick={() => onPreparePublish(content)}
+              data-testid="button-prepare-publish"
+            >
+              <Send /> {isPreparingPublish ? "Preparing…" : "Prepare publish"}
+            </Button>
+          )}
+          <Button variant="secondary" className="btn-sm" onClick={onGenerate} disabled={contentActionPending}>
+            <Plus /> Create another
+          </Button>
         </div>
       </div>
+      {publishingEligible && publishingCapability && !publishingCapability.canPrepare && (
+        <div
+          className="cmo-publishing-readiness"
+          aria-live={publishingLive}
+          role={publishingLive === "polite" ? "status" : publishingLive === "assertive" ? "alert" : undefined}
+        >
+          <Send />
+          <span>{publishingCapability.copy}</span>
+          {onConnectChannel && publishingCapability.state === "unavailable" && (
+            <Button variant="tertiary" className="btn-sm" onClick={onConnectChannel}>
+              Connect channel
+            </Button>
+          )}
+        </div>
+      )}
     </Card>
   );
 }

@@ -14,6 +14,7 @@ from app.api.dependencies.creative import (
     CreativeGenerationProviderDependency,
     CreativeResearchEngineDependency,
     CreativeVisualReviewProviderDependency,
+    VideoGenerationProviderDependency,
 )
 from app.core.config import settings
 from app.storage.factory import ObjectStorageDependency
@@ -63,6 +64,7 @@ from app.schemas.marketing import (
     ContentVersionCreate,
     CreativeAssetResponse,
     CreativeBriefCreate,
+    CreativeVariationRequest,
     LearningResponse,
     MarketingAutomationRunResponse,
     MarketingAnalyticsResponse,
@@ -83,6 +85,7 @@ from app.schemas.marketing import (
     TrendOpportunityRequest,
     TrendResponse,
     TrendStatus,
+    VideoCreativeCreateRequest,
     AudienceHypothesisResponse,
     MarketingActionProposalResponse,
     PrepareCampaignActionRequest,
@@ -367,6 +370,57 @@ async def create_creative_brief(data: CreativeBriefCreate, access: BusinessAcces
 
 
 @router.post(
+    "/creative-assets/video/strategy",
+    response_model=CreativeAssetResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_video_creative_strategy(
+    data: VideoCreativeCreateRequest,
+    access: BusinessAccessDependency,
+    response: Response,
+    session: SessionDependency,
+    provider: AIAgentProviderDependency,
+):
+    await _guard(session, access.business.id, "marketing_cmo", ai=True)
+    return await _mutate(
+        response,
+        session,
+        service.create_video_creative_strategy(
+            session,
+            business_id=access.business.id,
+            actor_user_id=access.user.id,
+            data=data,
+            provider=provider,
+        ),
+    )
+
+
+@router.post(
+    "/creative-assets/{creative_asset_id}/video/generate",
+    response_model=CreativeAssetResponse,
+)
+async def start_video_generation(
+    creative_asset_id: UUID,
+    access: BusinessAccessDependency,
+    response: Response,
+    session: SessionDependency,
+    provider: VideoGenerationProviderDependency,
+):
+    await _guard(session, access.business.id, "marketing_cmo", ai=True)
+    return await _mutate(
+        response,
+        session,
+        service.start_video_generation(
+            session,
+            business_id=access.business.id,
+            creative_asset_id=creative_asset_id,
+            actor_user_id=access.user.id,
+            provider=provider,
+        ),
+    )
+
+
+@router.post(
     "/creative-assets/{creative_asset_id}/generate",
     response_model=CreativeAssetResponse,
 )
@@ -424,6 +478,7 @@ async def regenerate_creative_asset(
     visual_review_provider: CreativeVisualReviewProviderDependency,
     research_engine: CreativeResearchEngineDependency,
     storage: ObjectStorageDependency,
+    data: CreativeVariationRequest | None = None,
 ):
     await _guard(
         session,
@@ -449,6 +504,7 @@ async def regenerate_creative_asset(
             max_image_attempts=settings.creative_max_image_attempts,
             max_composition_attempts=settings.creative_max_composition_attempts,
             quality_threshold=settings.creative_quality_threshold,
+            variation_mode=(data.variation_mode if data is not None else None),
         ),
     )
 

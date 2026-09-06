@@ -7,6 +7,10 @@ import type {
   MarketingContent,
 } from "../services/api-types.ts";
 import { ApiError, humanizeApiError } from "../services/api-client.ts";
+import type {
+  ConnectorDefinition,
+  IntegrationConnection,
+} from "../services/integrations.ts";
 import {
   AUDIENCE_GUIDANCE_MAX,
   CONTENT_PROMPT_MAX,
@@ -18,10 +22,43 @@ import {
   creativePhaseForDisplay,
   creativeResultNotice,
   generateCampaignChannelDrafts,
+  publishingCapability,
+  recommendedCreativeMediaForContent,
   runCreativeOperationWithRecovery,
   safeCreativeMediaUrl,
+  videoFormatForContent,
   type CreativeProgress,
 } from "./cmo-ux.ts";
+
+type PrivateCreativeAssetKeys = Extract<
+  keyof CreativeAsset,
+  "provider_key" | "provider_job_reference" | "creative_metadata"
+>;
+const privateCreativeAssetKeysStayServerSide: PrivateCreativeAssetKeys extends never
+  ? true
+  : never = true;
+void privateCreativeAssetKeysStayServerSide;
+
+const publicCreativeAsset: CreativeAsset = {
+  id: "creative-one",
+  business_id: "business-one",
+  campaign_id: null,
+  content_id: "content-one",
+  asset_type: "social_square",
+  media_type: "image",
+  source_type: "ai_brief",
+  instructions: "Create a grounded campaign visual.",
+  visual_direction: "A product-led composition.",
+  generation_status: "ready",
+  storage_reference: "/media/creative-one.png",
+  width: 1080,
+  height: 1080,
+  aspect_ratio: "1:1",
+  alt_text: "Grounded campaign creative",
+  duration_seconds: null,
+  created_at: "2026-09-06T00:00:00Z",
+  updated_at: "2026-09-06T00:00:00Z",
+};
 
 function content(
   channel: MarketingChannel,
@@ -431,14 +468,189 @@ test("creative format mapping stays within supported deterministic formats", () 
   );
 });
 
+test("public creative assets contain only the approved response fields", () => {
+  assert.deepEqual(Object.keys(publicCreativeAsset).sort(), [
+    "alt_text",
+    "aspect_ratio",
+    "asset_type",
+    "business_id",
+    "campaign_id",
+    "content_id",
+    "created_at",
+    "duration_seconds",
+    "generation_status",
+    "height",
+    "id",
+    "instructions",
+    "media_type",
+    "source_type",
+    "storage_reference",
+    "updated_at",
+    "visual_direction",
+    "width",
+  ]);
+});
+
+test("creative media recommendation is deterministic and user-overridable", () => {
+  assert.equal(
+    recommendedCreativeMediaForContent({ channel: "tiktok", content_type: "social_post" }),
+    "video",
+  );
+  assert.equal(
+    recommendedCreativeMediaForContent({ channel: "tiktok", content_type: "blog_draft" }),
+    "image",
+  );
+  assert.equal(
+    recommendedCreativeMediaForContent({ channel: "instagram", content_type: "social_post" }),
+    "image",
+  );
+  assert.equal(
+    recommendedCreativeMediaForContent({ channel: "email", content_type: "email_draft" }),
+    "image",
+  );
+});
+
+test("video format mapping reflects both channel and content type", () => {
+  assert.deepEqual(
+    videoFormatForContent({ channel: "instagram", content_type: "social_post" }),
+    { aspect_ratio: "1:1", duration_seconds: 15 },
+  );
+  assert.deepEqual(
+    videoFormatForContent({ channel: "tiktok", content_type: "social_post" }),
+    { aspect_ratio: "9:16", duration_seconds: 15 },
+  );
+  assert.deepEqual(
+    videoFormatForContent({ channel: "website", content_type: "landing_page_copy" }),
+    { aspect_ratio: "16:9", duration_seconds: 30 },
+  );
+  assert.deepEqual(
+    videoFormatForContent({ channel: "google_ads", content_type: "cta" }),
+    { aspect_ratio: "16:9", duration_seconds: 8 },
+  );
+  assert.deepEqual(
+    videoFormatForContent({ channel: "linkedin", content_type: "social_post" }),
+    { aspect_ratio: "1:1", duration_seconds: 15 },
+  );
+});
+
+test("publishing derives readiness from current connector capabilities and fails closed", () => {
+  const definition: ConnectorDefinition = {
+    connector_type: "instagram",
+    display_name: "Instagram",
+    description: "Governed social publishing",
+    category: "social",
+    authentication_type: "oauth2",
+    capabilities: ["read_content_performance", "publish_social_post"],
+    read_capabilities: [],
+    future_write_capabilities: ["future_publish_content"],
+    requested_scopes: [],
+    webhook_support: false,
+    external_writes_enabled: true,
+    resource_types: ["page"],
+    configuration_requirements: [],
+    resource_selection_required: true,
+    setup_status: "available",
+  };
+  const connection: IntegrationConnection = {
+    id: "connection-one",
+    business_id: "business-one",
+    connector_type: "instagram",
+    display_name: "Instagram",
+    status: "connected",
+    authentication_state: "authorized",
+    health: "healthy",
+    external_account_reference: "account-one",
+    external_account_display_name: "Business account",
+    selected_resources: [
+      {
+        resource_type: "page",
+        external_reference: "page-one",
+        display_name: "Business page",
+      },
+    ],
+    scopes_granted: [],
+    connected_by_user_id: "user-one",
+    connected_at: "2026-09-06T00:00:00Z",
+    last_health_check_at: "2026-09-06T00:00:00Z",
+    last_successful_sync_at: null,
+    failure_code: null,
+    created_at: "2026-09-06T00:00:00Z",
+    updated_at: "2026-09-06T00:00:00Z",
+  };
+
+  assert.equal(
+    publishingCapability({ channel: "instagram", definition, connection }).canPrepare,
+    true,
+  );
+  const futureOnly = publishingCapability({
+    channel: "instagram",
+    definition: {
+      ...definition,
+      capabilities: ["future_publish_content"],
+      future_write_capabilities: ["future_publish_content"],
+    },
+    connection,
+  });
+  assert.equal(futureOnly.canPrepare, false);
+  assert.equal(futureOnly.state, "unsupported");
+  const writesDisabled = publishingCapability({
+    channel: "instagram",
+    definition: { ...definition, external_writes_enabled: false },
+    connection,
+  });
+  assert.equal(writesDisabled.canPrepare, false);
+  assert.equal(writesDisabled.state, "unsupported");
+  const pending = publishingCapability({
+    channel: "instagram",
+    definition,
+    connection,
+    pending: true,
+  });
+  assert.equal(pending.canPrepare, false);
+  assert.equal(pending.state, "checking");
+  const failed = publishingCapability({
+    channel: "instagram",
+    definition,
+    connection,
+    failed: true,
+  });
+  assert.equal(failed.canPrepare, false);
+  assert.equal(failed.state, "unverified");
+  const unhealthy = publishingCapability({
+    channel: "instagram",
+    definition,
+    connection: { ...connection, health: "degraded" },
+  });
+  assert.equal(unhealthy.canPrepare, false);
+  assert.equal(unhealthy.state, "unavailable");
+  const missingResource = publishingCapability({
+    channel: "instagram",
+    definition,
+    connection: { ...connection, selected_resources: [] },
+  });
+  assert.equal(missingResource.canPrepare, false);
+  assert.equal(missingResource.state, "unavailable");
+  assert.equal(
+    publishingCapability({ channel: "linkedin" }).state,
+    "unsupported",
+  );
+});
+
 test("provider-required creative copy stays customer-facing", () => {
   const notice = creativeResultNotice({
     generation_status: "provider_required",
+    media_type: "video",
   } as CreativeAsset);
 
-  assert.match(notice, /temporarily unavailable/);
-  assert.match(notice, /nothing has been lost/);
-  for (const forbidden of ["server-side", "OpenAI", "API key"]) {
+  assert.match(notice, /isn’t connected yet/);
+  assert.match(notice, /strategy and storyboard are saved/);
+  for (const forbidden of [
+    "provider job",
+    "job reference",
+    "reconciliation",
+    "pipeline",
+    "internal state",
+  ]) {
     assert.equal(notice.toLowerCase().includes(forbidden.toLowerCase()), false);
   }
 });

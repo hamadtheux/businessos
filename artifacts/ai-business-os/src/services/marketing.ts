@@ -365,7 +365,7 @@ export function createMarketingApi(client: ApiClient) {
       preparePublish: (
         id: string,
         contentId: string,
-        channel?: "facebook" | "instagram",
+        channel?: MarketingChannel,
       ) =>
         client.request<MarketingActionProposal>(
           marketingPath(id, `/content/${contentId}/prepare-publish`),
@@ -412,11 +412,48 @@ export function createMarketingApi(client: ApiClient) {
           ),
           { method: "POST" },
         ),
-      regenerate: (id: string, creativeAssetId: string) =>
+      regenerate: (
+        id: string,
+        creativeAssetId: string,
+        variationMode?:
+          | "alternate_metaphor"
+          | "product_led"
+          | "outcome_led"
+          | "minimal"
+          | "cinematic"
+          | "alternate_composition",
+      ) =>
         client.request<CreativeAsset>(
           marketingPath(
             id,
             `/creative-assets/${encodeURIComponent(creativeAssetId)}/regenerate`,
+          ),
+          variationMode
+            ? { method: "POST", json: { variation_mode: variationMode } }
+            : { method: "POST" },
+        ),
+      videoStrategy: (
+        id: string,
+        data: {
+          campaign_id?: string | null;
+          content_id?: string | null;
+          duration_seconds: 6 | 8 | 15 | 30;
+          aspect_ratio: "9:16" | "16:9" | "1:1";
+          instructions: string;
+          style?: string | null;
+          audio_preference?: string | null;
+          motion_preference?: string | null;
+        },
+      ) =>
+        client.request<CreativeAsset>(
+          marketingPath(id, "/creative-assets/video/strategy"),
+          { method: "POST", json: data },
+        ),
+      generateVideo: (id: string, creativeAssetId: string) =>
+        client.request<CreativeAsset>(
+          marketingPath(
+            id,
+            `/creative-assets/${encodeURIComponent(creativeAssetId)}/video/generate`,
           ),
           { method: "POST" },
         ),

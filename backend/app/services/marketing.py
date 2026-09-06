@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Literal
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,6 +50,7 @@ from app.services.creative_direction import (
     build_creative_director_task,
     build_creative_direction,
     build_visual_art_direction,
+    creative_direction_meets_quality_floor,
 )
 from app.services.creative_quality import (
     CreativeQualityAssessment,
@@ -67,6 +70,12 @@ from app.services.creative_visual_review import (
     CreativeVisualReviewRequest,
     CreativeVisualReviewResult,
     semantic_visual_review_meets_threshold,
+)
+from app.services.creative_video import (
+    VideoGenerationProvider,
+    VideoGenerationRequest,
+    VideoProviderError,
+    VideoProviderNotConfiguredError,
 )
 from app.models.business import Business
 from app.models.business_branding import BusinessBranding
@@ -109,6 +118,7 @@ from app.schemas.marketing import (
     ContentGenerateRequest,
     ContentVersionCreate,
     CreativeBriefCreate,
+    CreativeVariationMode,
     CreativeStrategyProposal,
     LearningResponse,
     MarketingAnalyticsResponse,
@@ -123,6 +133,8 @@ from app.schemas.marketing import (
     TopContent,
     TrendCreate,
     TrendOpportunityRequest,
+    VideoCreativeCreateRequest,
+    VideoCreativeStrategy,
 )
 from app.schemas.operations import OpportunityCreate
 from app.services.operations import create_opportunity, record_audit
@@ -145,12 +157,75 @@ _PROMOTIONAL_CLAIM = re.compile(
     r"\b\d{1,3}(?:\.\d+)?\s*%\s*(?:off|discount)\b",
     re.IGNORECASE,
 )
+_CREATIVE_INSTRUCTION_AS_COPY = re.compile(
+    r"^\s*(?:please\s+)?(?:create|design|generate|render|compose|place|position|use)\b"
+    r".{0,180}\b(?:ad|advert|background|camera|composition|creative|graphic|image|"
+    r"layout|lighting|logo|post|typography|visual)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_WEAK_CTA_VALUES = frozenset(
+    {
+        "buy",
+        "click",
+        "click here",
+        "go",
+        "submit",
+        "tap here",
+    }
+)
+_CANONICAL_CTA_VALUES = {
+    "book a demo": "Book a Demo",
+    "book now": "Book Now",
+    "buy now": "Buy Now",
+    "contact us": "Contact Us",
+    "explore": "Explore",
+    "explore now": "Explore Now",
+    "get started": "Get Started",
+    "learn more": "Learn More",
+    "see how it works": "See How It Works",
+    "shop now": "Shop Now",
+    "start free": "Start Free",
+    "start trial": "Start Trial",
+    "subscribe": "Subscribe",
+}
+_SHOP_CTA_PATTERN = re.compile(
+    r"\b(?:add\s+to\s+cart|buy|cart|checkout|order|purchase|shop)\b",
+    re.IGNORECASE,
+)
+_BOOK_CTA_PATTERN = re.compile(
+    r"\b(?:appointment|book|booking|demo|reservation|reserve|schedule)\b",
+    re.IGNORECASE,
+)
+_UNSUPPORTED_FULFILLMENT_CTA_PATTERN = re.compile(
+    r"\b(?:apply|claim|contact|download|get\s+started|join|register|"
+    r"request\s+(?:a\s+)?quote|sign\s+up|start\s+(?:free|trial)|subscribe|try)\b",
+    re.IGNORECASE,
+)
+_SAFE_INFORMATIONAL_CTA_PATTERN = re.compile(
+    r"^(?:discover|explore|learn|read|see|view)\b",
+    re.IGNORECASE,
+)
 _CLAIM_SOURCES = {
     "authoritative_business_context",
     "owner_provided_campaign_input",
 }
 OfferAuthorizationRole = Literal["owner", "admin"]
 _OFFER_AUTHORIZATION_ROLES = frozenset({"owner", "admin"})
+_VIDEO_IDEMPOTENCY_NAMESPACE = UUID("d3c22980-4a70-4b73-975b-b8ac1fc57d96")
+_VIDEO_PIPELINE = "provider_neutral_video_v1"
+_VIDEO_STRATEGY_SCHEMA_VERSION = 1
+_CREATIVE_METADATA_MAX_BYTES = 16_384
+
+
+@dataclass(frozen=True, slots=True)
+class _CTACapabilities:
+    """Subject-scoped fulfillment paths proven by durable structured records."""
+
+    can_shop: bool = False
+    can_book: bool = False
+
+
+_NO_CTA_CAPABILITIES = _CTACapabilities()
 
 
 def _normalized_claim(value: str | None) -> str | None:
@@ -230,6 +305,75 @@ def _offer_evidence(
 
 def _contains_unclassified_promotional_claim(*values: str | None) -> bool:
     return any(_PROMOTIONAL_CLAIM.search(value or "") for value in values)
+
+
+def _contains_creative_instruction_copy(*values: str | None) -> bool:
+    """Detect imperative art direction accidentally returned as ad copy."""
+    return any(
+        _CREATIVE_INSTRUCTION_AS_COPY.search(value or "")
+        for value in values
+    )
+
+
+def _normalize_generated_cta(
+    value: str | None,
+    *,
+    capabilities: _CTACapabilities = _NO_CTA_CAPABILITIES,
+) -> str | None:
+    """Normalize CTAs using only tenant-scoped fulfillment capability records."""
+    normalized = " ".join((value or "").split())
+    if not normalized or normalized.casefold() in _WEAK_CTA_VALUES:
+        return None
+    canonical = _CANONICAL_CTA_VALUES.get(normalized.casefold(), normalized)
+    if _SHOP_CTA_PATTERN.search(canonical):
+        return "Shop Now" if capabilities.can_shop else "Learn More"
+    if _BOOK_CTA_PATTERN.search(canonical):
+        return "Book Now" if capabilities.can_book else "See How It Works"
+    if _UNSUPPORTED_FULFILLMENT_CTA_PATTERN.search(canonical):
+        return "Learn More"
+    return canonical if _SAFE_INFORMATIONAL_CTA_PATTERN.search(canonical) else "Learn More"
+
+
+async def _trusted_cta_capabilities(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    campaign_id: UUID | None,
+) -> _CTACapabilities:
+    """Resolve fulfillment authority for an explicitly associated campaign subject."""
+    if campaign_id is None:
+        return _NO_CTA_CAPABILITIES
+    product_statement = (
+        select(CatalogItem.id)
+        .join(
+            CampaignProductSelection,
+            and_(
+                CampaignProductSelection.catalog_item_id == CatalogItem.id,
+                CampaignProductSelection.business_id == CatalogItem.business_id,
+            ),
+        )
+        .where(
+            CatalogItem.business_id == business_id,
+            CampaignProductSelection.business_id == business_id,
+            CampaignProductSelection.campaign_id == campaign_id,
+            CatalogItem.item_type == "product",
+            CatalogItem.status == "active",
+            CatalogItem.published.is_(True),
+            CatalogItem.availability.in_(("in_stock", "preorder", "backorder")),
+            func.lower(CatalogItem.product_url).like("https://%"),
+        )
+        .limit(1)
+    )
+    try:
+        product_ids = list((await session.scalars(product_statement)).all())
+    except SQLAlchemyError:
+        raise MarketingPersistenceError from None
+    return _CTACapabilities(
+        can_shop=bool(product_ids),
+        # No current durable association links a campaign/content subject to an
+        # appointment type. Tenant-wide bookability must not authorize Book Now.
+        can_book=False,
+    )
 
 
 def _page(page: int, page_size: int) -> tuple[int, int]:
@@ -1248,6 +1392,15 @@ async def generate_content(
     if explicit_owner_offer is not None:
         authorized_offer = explicit_owner_offer
         claim_source = "owner_provided_campaign_input"
+    cta_capabilities = await _trusted_cta_capabilities(
+        session,
+        business_id=business_id,
+        campaign_id=(
+            campaign.id
+            if campaign is not None
+            else parent.campaign_id if parent is not None else None
+        ),
+    )
 
     if campaign is not None:
         campaign_context = (
@@ -1276,6 +1429,13 @@ async def generate_content(
         "Do not invent products, prices, offers, claims, testimonials, customer facts, "
         "business facts, or capabilities that are not supported by the provided context. "
         "Adapt the copy naturally to the requested channel and content type. "
+        "Keep customer-facing title, body, and CTA separate from production direction: "
+        "never place instructions about layout, imagery, cameras, lighting, typography, "
+        "logos, or visual generation in customer-facing copy. "
+        "Choose a concise, correctly capitalized CTA for the funnel stage only when the "
+        "trusted context supports that action. Do not use vague CTAs such as Click Here, "
+        "and do not suggest buying, booking, a demo, contact, or a free trial unless that "
+        "fulfillment path is supported by trusted context. "
         "The creative brief should describe a polished on-brand visual direction using "
         "known brand identity and product/service context without pretending an image "
         "has already been generated. "
@@ -1311,6 +1471,26 @@ async def generate_content(
         or proposal.evidence_source_ids
     ):
         raise MarketingAIError
+
+    if _contains_creative_instruction_copy(
+        proposal.title,
+        proposal.body,
+        proposal.cta,
+    ):
+        logger.info(
+            "marketing_content_quality_rejected reason=creative_instruction_as_copy",
+            extra={"reason": "creative_instruction_as_copy"},
+        )
+        raise MarketingAIError
+
+    proposal = proposal.model_copy(
+        update={
+            "cta": _normalize_generated_cta(
+                proposal.cta,
+                capabilities=cta_capabilities,
+            )
+        }
+    )
 
     returned_offer = _normalized_claim(proposal.offer)
     if authorized_offer is not None:
@@ -1406,46 +1586,36 @@ _CREATIVE_STRATEGY_TASK_PREAMBLE = (
 
 _CREATIVE_STRATEGY_TASK_CONTRACT = (
     "\n\nGROUNDING RULES:\n"
-    "- Owner instructions express desired intent, not authoritative business facts.\n"
-    "- Only the server-classified offer above may be used as an offer. If it is "
-    "present, preserve it exactly; if absent, do not invent a discount or price.\n"
-    "- Use only products, services, prices, offers, benefits, brand details, "
-    "business facts, claims, and capabilities supported by trusted context.\n"
-    "- Never invent testimonials, awards, certifications, statistics, customer "
-    "facts, inventory, discounts, urgency, guarantees, medical outcomes, property "
-    "inventory, or performance claims.\n"
-    "- If the owner gives weak instructions, make professional creative decisions "
-    "from available context rather than asking them to become a prompt engineer.\n"
-    "- If some detail is unavailable, use a tasteful generic creative treatment "
-    "instead of fabricating a fact.\n\n"
+    "- Owner instructions are intent, not authoritative facts. Use only products, "
+    "services, prices, benefits, brand details, claims and capabilities supported by "
+    "trusted context. Never invent offers. Never invent testimonials, awards, "
+    "certifications, statistics, customer facts, inventory, urgency, guarantees or outcomes.\n"
+    "- Only the server-classified offer above may be used as an offer. Preserve it "
+    "exactly, or use no offer when absent.\n"
+    "- Resolve weak input professionally from context. Use truthful category context "
+    "for missing detail, never fabricated facts or generic decorative abstraction.\n\n"
     "MARKETING + PR STANDARD:\n"
-    "- Determine the strongest defensible audience, marketing angle, hook, "
-    "headline, supporting message and CTA.\n"
-    "- Keep an explicit authorized offer separate from the headline. A discount "
-    "or number is a compact supporting component unless an exceptional "
-    "typography-led concept is explicitly justified.\n"
-    "- Protect brand reputation and avoid manipulative, deceptive, unsafe, or "
-    "unsupported wording.\n"
-    "- Adapt the strategy to the requested asset and known channel.\n"
-    "- Make the creative direction specific enough that an expert graphic "
-    "designer could execute it without guessing.\n"
-    "- The visual concept must reserve useful negative space for deterministic "
-    "logo, headline, supporting copy and CTA composition.\n"
-    "- Do not tell an image model to redraw the logo or render final typography.\n"
-    "- Do not claim that an image has already been generated.\n\n"
+    "- Produce a defensible audience, angle, hook, headline, supporting message and CTA.\n"
+    "- headline, supporting_message and cta are customer-facing copy. Never put "
+    "layout, camera, lighting, image, typography, logo or design instructions there.\n"
+    "- Use a concise, correctly capitalized CTA only when the trusted context supports "
+    "the action; otherwise null. Keep any offer separate and visually supporting.\n"
+    "- Avoid manipulative, deceptive, unsafe or unsupported wording. Adapt to the "
+    "requested asset and known channel. Give executable expert design direction.\n"
+    "- Require a business-specific product/service story. Gradients, rings, circles, "
+    "waves and arbitrary geometry are not a story. Apply the swap-logo test: another "
+    "company must not fit the same idea unchanged.\n"
+    "- Reserve negative space for deterministic logo and exact copy. Never ask an "
+    "image model to draw logos or final typography. Do not claim an image exists.\n\n"
     "OUTPUT CONTRACT:\n"
-    "Return exactly one CreativeStrategyProposal through the required typed "
-    "output schema. Do not wrap it in a summary string, markdown, or a second "
-    "serialized JSON document. Set recommendations, proposed_actions, and "
-    "evidence_source_ids to empty lists. Use these exact strategy fields:\n"
+    "Return exactly one CreativeStrategyProposal, without markdown or nested JSON. Set "
+    "recommendations, proposed_actions and evidence_source_ids to empty lists. Fields:\n"
     "marketing_goal, target_audience, audience_insight, campaign_angle, hook, "
     "headline, supporting_message, offer, claim_source, cta, visual_concept, composition_direction, "
     "subject_focus, mood, lighting, negative_space, brand_treatment, "
     "recommended_channel, pr_guardrails, prohibited_claims, evidence_source_ids.\n"
-    "pr_guardrails and prohibited_claims must be short user-visible lists. "
-    "Set claim_source to none; authoritative provenance is owned and applied by "
-    "the server after validation. Never include hidden "
-    "reasoning or chain-of-thought."
+    "Use short user-visible guardrail lists. Set claim_source to none; the server "
+    "applies provenance after validation. Never include hidden reasoning or chain-of-thought."
 )
 
 
@@ -1714,6 +1884,19 @@ async def create_creative_brief(
     if content_offer is not None:
         authorized_offer = content_offer
         claim_source = content_claim_source
+    cta_capabilities = await _trusted_cta_capabilities(
+        session,
+        business_id=business_id,
+        campaign_id=(
+            campaign.id
+            if campaign is not None
+            else content.campaign_id if content is not None else None
+        ),
+    )
+    trusted_content_cta = _normalize_generated_cta(
+        content.cta if content is not None else None,
+        capabilities=cta_capabilities,
+    )
 
     expected_channel: str | None = None
 
@@ -1731,7 +1914,7 @@ async def create_creative_brief(
         content_type=content.content_type if content is not None else None,
         content_title=content.title if content is not None else None,
         content_body=content.body if content is not None else None,
-        content_cta=content.cta if content is not None else None,
+        content_cta=trusted_content_cta,
         existing_creative_brief=(
             content.creative_brief if content is not None else None
         ),
@@ -1787,6 +1970,28 @@ async def create_creative_brief(
             provider_request_id=_creative_strategy_request_id(execution),
         )
         raise MarketingAIError
+
+    if _contains_creative_instruction_copy(
+        strategy.headline,
+        strategy.supporting_message,
+        strategy.cta,
+    ):
+        _log_creative_strategy_failure(
+            "creative_strategy_instruction_as_copy_rejected",
+            provider=provider,
+            expected_channel=expected_channel,
+            returned_channel=strategy.recommended_channel,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
+        raise MarketingAIError
+
+    strategy_cta = _normalize_generated_cta(
+        strategy.cta,
+        capabilities=cta_capabilities,
+    )
+    if content is not None and content.cta is not None:
+        strategy_cta = trusted_content_cta
+    strategy = strategy.model_copy(update={"cta": strategy_cta})
 
     returned_offer = _normalized_claim(strategy.offer)
     if strategy.claim_source != "none":
@@ -1869,6 +2074,7 @@ async def create_creative_brief(
         campaign_id=data.campaign_id,
         content_id=data.content_id,
         asset_type=data.asset_type,
+        media_type="image",
         source_type="ai_brief",
         instructions=data.instructions,
         visual_direction=visual_direction,
@@ -1895,6 +2101,585 @@ async def create_creative_brief(
         ),
     )
 
+    return value
+
+
+_VIDEO_STRATEGY_TASK_PREAMBLE = (
+    "Act as a senior campaign video director. Prepare a production-ready, "
+    "provider-neutral short-form video strategy; do not claim a video exists.\n"
+)
+
+_VIDEO_STRATEGY_TASK_CONTRACT = (
+    "\n\nReturn exactly one VideoCreativeStrategy in the required typed schema. "
+    "Build a hook, concise script, storyboard, consecutive timed scenes, shot "
+    "plan, continuity, reference-asset strategy, audio direction, captions, and "
+    "end card. Scene durations must sum exactly to the requested duration. "
+    "Preserve the requested ratio and known channel exactly. Preserve the exact "
+    "content CTA or use null; never substitute a different action. Keep copy "
+    "customer-facing and keep production instructions in visual/motion fields. "
+    "Use only supported business, product, service, offer, and brand facts. Never "
+    "invent prices, discounts, urgency, outcomes, testimonials, statistics, "
+    "certifications, inventory, UI, packaging, or capabilities. If an authorized "
+    "offer exists, return it exactly; otherwise offer must be null. Set "
+    "claim_source to none and evidence_source_ids, recommendations, and "
+    "proposed_actions to empty lists. Do not browse, publish, submit a provider "
+    "job, reveal chain-of-thought, or include hidden reasoning."
+)
+
+
+def _build_video_strategy_task(
+    *,
+    data: VideoCreativeCreateRequest,
+    campaign: Campaign | None,
+    content: MarketingContent | None,
+    trusted_content_cta: str | None,
+    authorized_offer: str | None,
+    claim_source: str,
+) -> str:
+    """Build a bounded video task without truncating governance or exact fields."""
+    fields: list[dict[str, object]] = [
+        {
+            "key": "owner_intent",
+            "prefix": "Owner intent: ",
+            "value": _normalize_creative_strategy_context(data.instructions),
+            "cap": 700,
+            "minimum": 64,
+            "priority": 1,
+            "exact": False,
+        },
+        {
+            "key": "duration",
+            "prefix": "\nDuration: ",
+            "value": f"{data.duration_seconds} seconds exactly.",
+            "priority": 0,
+            "exact": True,
+        },
+        {
+            "key": "aspect_ratio",
+            "prefix": "\nAspect ratio: ",
+            "value": f"{data.aspect_ratio} exactly.",
+            "priority": 0,
+            "exact": True,
+        },
+        {
+            "key": "channel",
+            "prefix": "\nChannel: ",
+            "value": content.channel if content else "choose a supported channel",
+            "priority": 0,
+            "exact": True,
+        },
+        {
+            "key": "validated_cta",
+            "prefix": "\nValidated content CTA: ",
+            "value": trusted_content_cta or "none",
+            "priority": 0,
+            "exact": True,
+        },
+        {
+            "key": "authorized_offer",
+            "prefix": "\nAuthorized offer: ",
+            "value": authorized_offer or "none",
+            "priority": 0,
+            "exact": True,
+        },
+        {
+            "key": "claim_source",
+            "prefix": "\nServer claim source: ",
+            "value": f"{claim_source}.",
+            "priority": 0,
+            "exact": True,
+        },
+        {
+            "key": "campaign_name",
+            "prefix": "\nCampaign: ",
+            "value": _normalize_creative_strategy_context(
+                campaign.name if campaign else None
+            ) or "none",
+            "cap": 180,
+            "minimum": 24,
+            "priority": 2,
+            "exact": False,
+        },
+        {
+            "key": "campaign_objective",
+            "prefix": "\nCampaign objective: ",
+            "value": _normalize_creative_strategy_context(
+                campaign.objective if campaign else None
+            ) or "none",
+            "cap": 360,
+            "minimum": 32,
+            "priority": 3,
+            "exact": False,
+        },
+        {
+            "key": "content_title",
+            "prefix": "\nContent title: ",
+            "value": _normalize_creative_strategy_context(
+                content.title if content else None
+            ) or "none",
+            "cap": 180,
+            "minimum": 24,
+            "priority": 4,
+            "exact": False,
+        },
+        {
+            "key": "content_body",
+            "prefix": "\nContent body: ",
+            "value": _normalize_creative_strategy_context(
+                content.body if content else None
+            ) or "none",
+            "cap": 700,
+            "minimum": 32,
+            "priority": 5,
+            "exact": False,
+        },
+        {
+            "key": "style",
+            "prefix": "\nStyle preference: ",
+            "value": _normalize_creative_strategy_context(data.style)
+            or "decide professionally",
+            "cap": 160,
+            "minimum": 16,
+            "priority": 6,
+            "exact": False,
+        },
+        {
+            "key": "audio",
+            "prefix": "\nAudio preference: ",
+            "value": _normalize_creative_strategy_context(data.audio_preference)
+            or "decide professionally",
+            "cap": 160,
+            "minimum": 16,
+            "priority": 7,
+            "exact": False,
+        },
+        {
+            "key": "motion",
+            "prefix": "\nMotion preference: ",
+            "value": _normalize_creative_strategy_context(data.motion_preference)
+            or "decide professionally",
+            "cap": 160,
+            "minimum": 16,
+            "priority": 8,
+            "exact": False,
+        },
+    ]
+    available_values = (
+        _CREATIVE_STRATEGY_TASK_BUDGET
+        - len(_VIDEO_STRATEGY_TASK_PREAMBLE)
+        - len(_VIDEO_STRATEGY_TASK_CONTRACT)
+        - sum(len(str(field["prefix"])) for field in fields)
+    )
+    allocations: dict[str, int] = {}
+    for field in fields:
+        value = str(field["value"])
+        allocations[str(field["key"])] = (
+            len(value)
+            if bool(field["exact"])
+            else min(len(value), int(field["minimum"]))
+        )
+
+    overflow = sum(allocations.values()) - available_values
+    if overflow > 0:
+        for field in sorted(
+            fields,
+            key=lambda item: int(item["priority"]),
+            reverse=True,
+        ):
+            if bool(field["exact"]):
+                continue
+            key = str(field["key"])
+            reduction = min(max(0, allocations[key] - 1), overflow)
+            allocations[key] -= reduction
+            overflow -= reduction
+            if overflow == 0:
+                break
+    if overflow > 0:
+        raise MarketingAIError
+
+    remaining = available_values - sum(allocations.values())
+    for field in sorted(fields, key=lambda item: int(item["priority"])):
+        if remaining <= 0:
+            break
+        key = str(field["key"])
+        value = str(field["value"])
+        target = len(value) if bool(field["exact"]) else min(
+            len(value), int(field["cap"])
+        )
+        growth = min(max(0, target - allocations[key]), remaining)
+        allocations[key] += growth
+        remaining -= growth
+
+    context = "".join(
+        f"{field['prefix']}"
+        f"{_shorten_creative_strategy_context(str(field['value']), allocations[str(field['key'])])}"
+        for field in fields
+    )
+    task = (
+        _VIDEO_STRATEGY_TASK_PREAMBLE
+        + context
+        + _VIDEO_STRATEGY_TASK_CONTRACT
+    )
+    if len(task) > _CREATIVE_STRATEGY_TASK_BUDGET:
+        raise MarketingAIError
+    return task
+
+
+def _video_strategy_metadata(
+    strategy: VideoCreativeStrategy,
+    *,
+    phase: str,
+) -> dict[str, object]:
+    """Build the versioned, bounded JSONB envelope for a video strategy."""
+    metadata: dict[str, object] = {
+        "schema_version": _VIDEO_STRATEGY_SCHEMA_VERSION,
+        "pipeline": _VIDEO_PIPELINE,
+        "phase": phase,
+        "video_strategy": strategy.canonical_payload(),
+    }
+    serialized = json.dumps(
+        metadata,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    if len(serialized.encode("utf-8")) > _CREATIVE_METADATA_MAX_BYTES:
+        raise MarketingAIError
+    return metadata
+
+
+def _video_strategy_from_asset(value: CreativeAsset) -> VideoCreativeStrategy:
+    """Load only the canonical versioned strategy from bounded server metadata."""
+    metadata = value.creative_metadata
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("schema_version") != _VIDEO_STRATEGY_SCHEMA_VERSION
+        or metadata.get("pipeline") != _VIDEO_PIPELINE
+        or not isinstance(metadata.get("video_strategy"), dict)
+    ):
+        raise MarketingValidationError
+    try:
+        strategy = VideoCreativeStrategy.model_validate(metadata["video_strategy"])
+    except ValidationError:
+        raise MarketingValidationError from None
+    if (
+        strategy.duration_seconds != value.duration_seconds
+        or strategy.aspect_ratio != value.aspect_ratio
+    ):
+        raise MarketingValidationError
+    return strategy
+
+
+def _valid_video_provider_identifier(value: object, *, maximum: int) -> bool:
+    return (
+        isinstance(value, str)
+        and value == value.strip()
+        and 1 <= len(value) <= maximum
+    )
+
+
+def _safe_video_provider_key(provider: VideoGenerationProvider) -> str | None:
+    value = _safe_provider_attribute(provider, "provider_name")
+    return value if _valid_video_provider_identifier(value, maximum=64) else None
+
+
+async def create_video_creative_strategy(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    actor_user_id: UUID,
+    data: VideoCreativeCreateRequest,
+    provider: AIAgentProvider,
+) -> CreativeAsset:
+    campaign = (
+        await get_campaign(session, business_id=business_id, campaign_id=data.campaign_id)
+        if data.campaign_id
+        else None
+    )
+    content = (
+        await get_content(session, business_id=business_id, content_id=data.content_id)
+        if data.content_id
+        else None
+    )
+    if campaign and content and content.campaign_id != campaign.id:
+        raise MarketingValidationError
+
+    authorized_offer, claim_source = _campaign_offer_claim(campaign)
+    content_offer, content_claim_source = _content_offer_claim(content)
+    if content_offer is not None:
+        authorized_offer, claim_source = content_offer, content_claim_source
+    cta_capabilities = await _trusted_cta_capabilities(
+        session,
+        business_id=business_id,
+        campaign_id=(
+            campaign.id
+            if campaign is not None
+            else content.campaign_id if content is not None else None
+        ),
+    )
+    trusted_content_cta = _normalize_generated_cta(
+        content.cta if content is not None else None,
+        capabilities=cta_capabilities,
+    )
+
+    task = _build_video_strategy_task(
+        data=data,
+        campaign=campaign,
+        content=content,
+        trusted_content_cta=trusted_content_cta,
+        authorized_offer=authorized_offer,
+        claim_source=claim_source,
+    )
+    try:
+        request = await _build_cmo_execution_request(session, business_id, task)
+    except ValidationError:
+        _log_creative_strategy_failure(
+            "video_strategy_request_invalid",
+            provider=provider,
+            expected_channel=content.channel if content is not None else None,
+        )
+        raise MarketingAIError from None
+
+    try:
+        execution = await execute_ai_agent_typed_with_metadata(
+            session,
+            business_id,
+            request,
+            provider,
+            VideoCreativeStrategy,
+            max_output_tokens=4_000,
+        )
+    except AIAgentResponseError:
+        _log_creative_strategy_failure(
+            "video_strategy_schema_invalid",
+            provider=provider,
+            expected_channel=content.channel if content is not None else None,
+        )
+        raise MarketingAIError from None
+    except AIAgentProviderError:
+        _log_creative_strategy_failure(
+            "video_strategy_provider_failed",
+            provider=provider,
+            expected_channel=content.channel if content is not None else None,
+        )
+        raise MarketingAIError from None
+    except AIAgentError:
+        raise MarketingAIError from None
+
+    try:
+        strategy = VideoCreativeStrategy.model_validate(execution.output)
+    except ValidationError:
+        _log_creative_strategy_failure(
+            "video_strategy_schema_invalid",
+            provider=provider,
+            expected_channel=content.channel if content is not None else None,
+            provider_request_id=_creative_strategy_request_id(execution),
+        )
+        raise MarketingAIError from None
+
+    if strategy.recommendations or strategy.proposed_actions or strategy.evidence_source_ids:
+        raise MarketingAIError
+    if strategy.duration_seconds != data.duration_seconds or strategy.aspect_ratio != data.aspect_ratio:
+        raise MarketingAIError
+    if content is not None and strategy.recommended_channel != content.channel:
+        raise MarketingAIError
+    strategy_cta = _normalize_generated_cta(
+        strategy.cta,
+        capabilities=cta_capabilities,
+    )
+    if content is not None and content.cta is not None:
+        strategy_cta = trusted_content_cta
+    strategy = strategy.model_copy(update={"cta": strategy_cta})
+    if _contains_creative_instruction_copy(
+        strategy.hook,
+        strategy.script,
+        strategy.cta,
+        strategy.end_card,
+        *(scene.on_screen_copy for scene in strategy.scenes),
+        *(scene.voiceover for scene in strategy.scenes),
+    ):
+        raise MarketingAIError
+
+    returned_offer = _normalized_claim(strategy.offer)
+    if strategy.claim_source != "none":
+        raise MarketingAIError
+    if authorized_offer is not None:
+        if returned_offer not in {None, authorized_offer}:
+            raise MarketingAIError
+        strategy = strategy.model_copy(
+            update={"offer": authorized_offer, "claim_source": claim_source}
+        )
+    elif returned_offer is not None or _contains_unclassified_promotional_claim(
+        strategy.hook,
+        strategy.script,
+        strategy.end_card,
+        *(scene.on_screen_copy for scene in strategy.scenes),
+        *(scene.voiceover for scene in strategy.scenes),
+    ):
+        raise MarketingAIError
+
+    try:
+        strategy = VideoCreativeStrategy.model_validate(strategy.model_dump())
+    except ValidationError:
+        raise MarketingAIError from None
+    asset_type = {
+        "9:16": "video_vertical",
+        "16:9": "video_landscape",
+        "1:1": "video_square",
+    }[data.aspect_ratio]
+    dimensions = {
+        "9:16": (1080, 1920),
+        "16:9": (1920, 1080),
+        "1:1": (1080, 1080),
+    }[data.aspect_ratio]
+    value = CreativeAsset(
+        business_id=business_id,
+        campaign_id=data.campaign_id,
+        content_id=data.content_id,
+        asset_type=asset_type,
+        media_type="video",
+        source_type="ai_brief",
+        instructions=data.instructions,
+        visual_direction=strategy.storyboard_summary,
+        generation_status="strategy_ready",
+        storage_reference=None,
+        width=dimensions[0],
+        height=dimensions[1],
+        aspect_ratio=data.aspect_ratio,
+        alt_text=None,
+        duration_seconds=data.duration_seconds,
+        creative_metadata=_video_strategy_metadata(
+            strategy,
+            phase="planning_complete",
+        ),
+    )
+    session.add(value)
+    await _flush(session)
+    record_audit(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        event_type="marketing.video_strategy_created",
+        entity_type="marketing_creative_asset",
+        entity_id=value.id,
+        summary=(
+            "Created a bounded, grounded video strategy; no generation provider "
+            "was called and nothing was published."
+        ),
+        after_value=_provider_usage_audit_value(execution.provider_metadata),
+    )
+    return value
+
+
+async def start_video_generation(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    creative_asset_id: UUID,
+    actor_user_id: UUID,
+    provider: VideoGenerationProvider,
+) -> CreativeAsset:
+    value = await _lock_creative_asset(
+        session,
+        business_id=business_id,
+        creative_asset_id=creative_asset_id,
+    )
+    if value.business_id != business_id:
+        raise MarketingNotFoundError
+    if value.media_type != "video":
+        raise MarketingStateError
+    if value.provider_job_reference is not None:
+        if not _valid_video_provider_identifier(value.provider_key, maximum=64):
+            raise MarketingValidationError
+        if not _valid_video_provider_identifier(
+            value.provider_job_reference,
+            maximum=255,
+        ):
+            raise MarketingValidationError
+        return value
+    if value.generation_status not in {
+        "strategy_ready",
+        "provider_required",
+        "failed",
+    }:
+        raise MarketingStateError
+    try:
+        strategy = _video_strategy_from_asset(value)
+        idempotency_key = str(
+            uuid5(
+                _VIDEO_IDEMPOTENCY_NAMESPACE,
+                f"{business_id}:{value.id}",
+            )
+        )
+        request = VideoGenerationRequest(
+            business_id=business_id,
+            creative_asset_id=value.id,
+            strategy_json=strategy.canonical_json(),
+            duration_seconds=value.duration_seconds or 0,
+            aspect_ratio=value.aspect_ratio or "",
+            idempotency_key=idempotency_key,
+        )
+    except (MarketingValidationError, ValueError):
+        raise MarketingValidationError from None
+
+    if not provider.configured:
+        value.generation_status = "provider_required"
+        value.provider_key = None
+        value.provider_job_reference = None
+        value.creative_metadata = {
+            **(value.creative_metadata or {}),
+            "phase": "provider_required",
+        }
+        await _flush(session)
+        record_audit(
+            session,
+            business_id=business_id,
+            actor_user_id=actor_user_id,
+            event_type="marketing.video_generation_provider_required",
+            entity_type="marketing_creative_asset",
+            entity_id=value.id,
+            summary=(
+                "Video strategy is ready, but no video provider is configured; "
+                "no video was generated and nothing was published."
+            ),
+        )
+        return value
+
+    value.creative_metadata = {
+        **(value.creative_metadata or {}),
+        "submission_idempotency_key": idempotency_key,
+    }
+    try:
+        submission = await provider.submit(request)
+    except VideoProviderNotConfiguredError:
+        value.generation_status = "provider_required"
+        value.provider_key = None
+        value.provider_job_reference = None
+    except VideoProviderError:
+        value.generation_status = "failed"
+        value.provider_key = _safe_video_provider_key(provider)
+        value.provider_job_reference = None
+    else:
+        value.generation_status = "queued"
+        value.provider_key = submission.provider_name
+        value.provider_job_reference = submission.provider_job_reference
+    value.creative_metadata = {
+        **(value.creative_metadata or {}),
+        "phase": value.generation_status,
+    }
+    await _flush(session)
+    record_audit(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        event_type="marketing.video_generation_submission_recorded",
+        entity_type="marketing_creative_asset",
+        entity_id=value.id,
+        summary=(
+            f"Recorded truthful video generation state {value.generation_status}; "
+            "nothing was published."
+        ),
+    )
     return value
 
 
@@ -1945,10 +2730,14 @@ async def _creative_direction_with_fallback(
             extra={"provider": "unconfigured", "reason": "unavailable"},
         )
         return (
-            build_creative_direction(
-                strategy=strategy,
-                research=research,
-                context=context,
+            _require_viable_creative_direction(
+                build_creative_direction(
+                    strategy=strategy,
+                    research=research,
+                    context=context,
+                ),
+                provider=provider,
+                source="deterministic_fallback",
             ),
             empty_metadata,
         )
@@ -1984,12 +2773,37 @@ async def _creative_direction_with_fallback(
             },
         )
         return (
-            build_creative_direction(
-                strategy=strategy,
-                research=research,
-                context=context,
+            _require_viable_creative_direction(
+                build_creative_direction(
+                    strategy=strategy,
+                    research=research,
+                    context=context,
+                ),
+                provider=provider,
+                source="provider_failure_fallback",
             ),
             empty_metadata,
+        )
+
+    if not creative_direction_meets_quality_floor(direction):
+        logger.info(
+            "creative_director_degraded reason=generic_or_replaceable_concept",
+            extra={
+                "provider": _safe_provider_attribute(provider, "provider_name"),
+                "reason": "generic_or_replaceable_concept",
+            },
+        )
+        return (
+            _require_viable_creative_direction(
+                build_creative_direction(
+                    strategy=strategy,
+                    research=research,
+                    context=context,
+                ),
+                provider=provider,
+                source="low_quality_ai_fallback",
+            ),
+            execution.provider_metadata,
         )
 
     logger.info(
@@ -2003,7 +2817,35 @@ async def _creative_direction_with_fallback(
             "output_tokens": execution.provider_metadata.output_tokens,
         },
     )
-    return direction, execution.provider_metadata
+    return (
+        _require_viable_creative_direction(
+            direction,
+            provider=provider,
+            source="ai_synthesis",
+        ),
+        execution.provider_metadata,
+    )
+
+
+def _require_viable_creative_direction(
+    direction: CreativeDirectionPlan,
+    *,
+    provider: AIAgentProvider | None,
+    source: str,
+) -> CreativeDirectionPlan:
+    """Apply the same server-owned floor to every renderer-bound direction."""
+    if creative_direction_meets_quality_floor(direction):
+        return direction
+    logger.info(
+        "creative_direction_rejected source=%s",
+        source,
+        extra={
+            "provider": _safe_provider_attribute(provider, "provider_name"),
+            "reason": "direction_quality_floor_failed",
+            "source": source,
+        },
+    )
+    raise MarketingAIError
 
 
 def _provider_usage_audit_value(
@@ -2088,6 +2930,7 @@ async def regenerate_creative_asset(
     max_image_attempts: int = 2,
     max_composition_attempts: int = 5,
     quality_threshold: int = 82,
+    variation_mode: CreativeVariationMode | None = None,
 ) -> CreativeAsset:
     """Create and generate a new immutable creative revision."""
     source = await _get(
@@ -2096,7 +2939,11 @@ async def regenerate_creative_asset(
         business_id,
         creative_asset_id,
     )
-    if source.generation_status != "ready" or source.source_type != "future_provider":
+    if (
+        source.media_type != "image"
+        or source.generation_status != "ready"
+        or source.source_type != "future_provider"
+    ):
         raise MarketingStateError
     if not source.visual_direction:
         raise MarketingValidationError
@@ -2107,6 +2954,7 @@ async def regenerate_creative_asset(
         campaign_id=source.campaign_id,
         content_id=source.content_id,
         asset_type=source.asset_type,
+        media_type="image",
         source_type="ai_brief",
         instructions=source.instructions,
         visual_direction=source.visual_direction,
@@ -2116,6 +2964,14 @@ async def regenerate_creative_asset(
         height=source.height,
         aspect_ratio=source.aspect_ratio,
         alt_text=source.alt_text,
+        creative_metadata={
+            "revision_of": str(source.id),
+            **(
+                {"variation_mode": variation_mode}
+                if variation_mode is not None
+                else {}
+            ),
+        },
     )
     session.add(revision)
     await _flush(session)
@@ -2168,6 +3024,8 @@ async def _generate_creative_asset_value(
 ) -> CreativeAsset:
     if value.business_id != business_id:
         raise MarketingNotFoundError
+    if value.media_type != "image":
+        raise MarketingStateError
     if value.generation_status in {"ready", "archived"}:
         raise MarketingStateError
 
@@ -2295,7 +3153,7 @@ async def _generate_creative_asset_value(
 
     final: CreativeCompositionResult | None = None
     quality: CreativeQualityAssessment | None = None
-    correction: str | None = None
+    correction = _creative_variation_direction(value.creative_metadata)
     visual_review_calls = 0
     for image_attempt in range(1, max_image_attempts + 1):
         instructions = _creative_visual_generation_instructions(
@@ -2536,7 +3394,8 @@ async def _generate_creative_asset_value(
                 entity_id=value.id,
                 summary=(
                     "Semantic visual review completed for one deterministic "
-                    f"candidate with decision {review.repair_class}."
+                    f"candidate with decision {review.repair_class}; hard failures: "
+                    f"{','.join(review.hard_failures) or 'none'}."
                 ),
                 after_value=_provider_usage_audit_value(review_result.metadata),
             )
@@ -2585,7 +3444,7 @@ async def _generate_creative_asset_value(
             stage="quality",
         )
 
-    value = await _lock_creative_for_finalization(
+    value = await _lock_creative_asset(
         session,
         business_id=business_id,
         creative_asset_id=value.id,
@@ -2732,10 +3591,61 @@ def _raw_visual_regeneration_correction(
             "a restrained background, and a quiet copy corridor. Keep all typography "
             "absent."
         )
+    if review is not None and (
+        review.replaceable_brand_creative
+        or review.generic_template_output
+        or review.decorative_abstraction_dominates
+    ):
+        return (
+            "Regenerate a business-specific campaign scene that would stop making "
+            "sense if an unrelated company replaced the brand. Show the supported "
+            "product or service doing meaningful work for its customer. Do not use "
+            "gradients, rings, circles, waves, or arbitrary geometry as the central "
+            "idea. Keep all typography absent and preserve a quiet copy corridor."
+        )
+    if review is not None and (
+        review.no_product_service_story
+        or review.meaningless_focal_story
+        or review.commercially_weak
+        or review.irrelevant_decorative_art
+    ):
+        return (
+            "Regenerate an art-directed commercial story with one credible product "
+            "or service moment and a visible customer-relevant outcome. Remove "
+            "decorative filler and generic stock-template cues. Keep all typography "
+            "absent and preserve a quiet copy corridor."
+        )
     return (
         "Reduce background noise and competing focal points. Keep one clear subject, "
         "a large low-detail copy zone, and keep all typography absent."
     )
+
+
+def _creative_variation_direction(
+    metadata: dict[str, object] | None,
+) -> str | None:
+    mode = (metadata or {}).get("variation_mode")
+    return {
+        "alternate_metaphor": (
+            "Use a materially different business-specific marketing metaphor and "
+            "hero story, not a recolor or crop of the previous direction."
+        ),
+        "product_led": (
+            "Make the supported product or service unmistakably lead the visual story."
+        ),
+        "outcome_led": (
+            "Lead with a credible customer-relevant outcome caused by the supported offering."
+        ),
+        "minimal": (
+            "Use a restrained editorial composition with one relevant hero and no decorative filler."
+        ),
+        "cinematic": (
+            "Use an art-directed cinematic commercial scene with credible depth and a specific story."
+        ),
+        "alternate_composition": (
+            "Change the spatial rhythm, camera framing, hero placement, and copy corridor materially."
+        ),
+    }.get(mode if isinstance(mode, str) else "")
 
 
 def _is_retryable_raw_visual_failure(
@@ -2760,13 +3670,13 @@ def _is_retryable_raw_visual_failure(
     return False
 
 
-async def _lock_creative_for_finalization(
+async def _lock_creative_asset(
     session: AsyncSession,
     *,
     business_id: UUID,
     creative_asset_id: UUID,
 ) -> CreativeAsset:
-    """Lock a freshly reloaded tenant asset for the short finalization window."""
+    """Lock a freshly reloaded tenant asset for a state-changing operation."""
     statement = (
         select(CreativeAsset)
         .where(
@@ -2781,6 +3691,8 @@ async def _lock_creative_for_finalization(
     except SQLAlchemyError:
         raise MarketingPersistenceError from None
     if value is None:
+        raise MarketingNotFoundError
+    if value.business_id != business_id:
         raise MarketingNotFoundError
     return value
 

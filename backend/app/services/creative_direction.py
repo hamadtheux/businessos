@@ -61,11 +61,16 @@ _STOPWORDS = frozenset(
 
 class CreativeConceptScorecard(DirectionSchema):
     brand_fit: int = Field(ge=0, le=100)
+    business_specific_relevance: int = Field(ge=0, le=100)
     marketing_strength: int = Field(ge=0, le=100)
+    marketing_idea_strength: int = Field(ge=0, le=100)
     distinctiveness: int = Field(ge=0, le=100)
     visual_sophistication: int = Field(ge=0, le=100)
+    commercial_sophistication: int = Field(ge=0, le=100)
     audience_relevance: int = Field(ge=0, le=100)
     product_relevance: int = Field(ge=0, le=100)
+    visual_storytelling: int = Field(ge=0, le=100)
+    scroll_stopping_potential: int = Field(ge=0, le=100)
     platform_suitability: int = Field(ge=0, le=100)
     offer_clarity: int = Field(ge=0, le=100)
     cta_clarity: int = Field(ge=0, le=100)
@@ -73,6 +78,8 @@ class CreativeConceptScorecard(DirectionSchema):
     originality: int = Field(ge=0, le=100)
     pr_safety: int = Field(ge=0, le=100)
     business_brain_grounding: int = Field(ge=0, le=100)
+    genericness_risk: int = Field(ge=0, le=100)
+    replaceable_brand_risk: int = Field(ge=0, le=100)
     overall_score: int = Field(ge=0, le=100)
 
 
@@ -80,6 +87,8 @@ class CreativeConceptProposal(DirectionSchema):
     """One safe Creative Director proposal before server-owned scoring."""
 
     concept_name: str = Field(min_length=1, max_length=100)
+    marketing_idea: str = Field(min_length=1, max_length=300)
+    customer_care_reason: str = Field(min_length=1, max_length=300)
     strategic_reason: str = Field(min_length=1, max_length=300)
     hero_subject: str = Field(min_length=1, max_length=500)
     hero_relevance: str = Field(min_length=1, max_length=300)
@@ -105,6 +114,8 @@ class CreativeConceptProposal(DirectionSchema):
 
     @field_validator(
         "concept_name",
+        "marketing_idea",
+        "customer_care_reason",
         "strategic_reason",
         "hero_subject",
         "hero_relevance",
@@ -168,8 +179,14 @@ class CreativeDirectorSynthesis(DirectionSchema):
             " ".join(candidate.visual_metaphor.casefold().split())
             for candidate in self.candidates
         }
-        if len(names) != 3 or len(metaphors) != 3:
-            raise ValueError("creative concepts must have distinct names and metaphors")
+        ideas = {
+            " ".join(candidate.marketing_idea.casefold().split())
+            for candidate in self.candidates
+        }
+        if len(names) != 3 or len(metaphors) != 3 or len(ideas) != 3:
+            raise ValueError(
+                "creative concepts must have distinct names, ideas, and metaphors"
+            )
         signatures = tuple(_concept_signature(candidate) for candidate in self.candidates)
         for index, first in enumerate(signatures):
             for second in signatures[index + 1 :]:
@@ -457,7 +474,10 @@ def build_creative_director_task(
         "materially different, executable visual concepts in one typed response. "
         "The candidates must differ in hero idea, metaphor, image-making approach, "
         "product representation, camera direction, and spatial rhythm—not merely "
-        "color or crop. Do not self-score.\n\n"
+        "color or crop. Each marketing_idea must state the campaign mechanism and "
+        "customer_care_reason must explain why the target customer will care. Reject "
+        "replaceable-brand ideas, decorative abstraction, generic gradients, rings, "
+        "circles, waves, or geometry with no product/service story. Do not self-score.\n\n"
         "TRUSTED CAMPAIGN STRATEGY:\n"
         f"- Goal: {strategy.marketing_goal}\n"
         f"- Audience: {strategy.target_audience}\n"
@@ -649,6 +669,14 @@ def _build_pattern_proposal(
     principles = _selected_principles(research, pattern)
     return CreativeConceptProposal(
         concept_name=pattern.name,
+        marketing_idea=(
+            f"Make {strategy.subject_focus[:170].rstrip('.')} visibly demonstrate "
+            f"the {context.campaign_objective} promise through {pattern.visual_metaphor.lower()}."
+        )[:300],
+        customer_care_reason=(
+            f"The audience can immediately connect the supported offering to "
+            f"{strategy.audience_insight[:210].rstrip('.')} instead of decoding decoration."
+        )[:300],
         strategic_reason=(
             f"Translate a {context.industry} {context.campaign_objective} into a "
             f"{context.style_family} "
@@ -810,14 +838,62 @@ def _score_candidates(
             ),
             strategy_tokens,
         )
+        product_story_text = (
+            f"{proposal.marketing_idea} {proposal.hero_subject} "
+            f"{proposal.hero_relevance} {proposal.product_story} "
+            f"{proposal.customer_care_reason} {proposal.visual_metaphor}"
+        )
+        story_tokens = _tokens(product_story_text)
+        genericness_risk = _genericness_risk(product_story_text)
+        replaceable_brand_risk = _replaceable_brand_risk(
+            story_tokens=story_tokens,
+            strategy_tokens=strategy_tokens,
+            proposal=proposal,
+        )
+        story_mechanism = _contains_any(
+            product_story_text,
+            (
+                "before and after",
+                "connect",
+                "coordinate",
+                "demonstrate",
+                "in use",
+                "outcome",
+                "problem",
+                "solve",
+                "transform",
+                "workflow",
+            ),
+        )
+        commercial_language = _contains_any(
+            proposal_text,
+            (
+                "commercial",
+                "editorial",
+                "environment",
+                "photography",
+                "product",
+                "credible",
+                "tactile",
+            ),
+        )
 
         dimensions = {
             "brand_fit": _bounded_score(
                 48 + brand_overlap * 32 + (12 if brand_controls else 0)
             ),
+            "business_specific_relevance": _bounded_score(
+                40 + grounding_overlap * 34 + product_overlap * 26
+                - replaceable_brand_risk * 0.35
+            ),
             "marketing_strength": _bounded_score(
                 45 + objective_fit * 0.28 + grounding_overlap * 22
                 + (8 if compact_offer and strategy.offer else 0)
+            ),
+            "marketing_idea_strength": _bounded_score(
+                42 + product_overlap * 24 + grounding_overlap * 16
+                + (14 if story_mechanism else 0)
+                - genericness_risk * 0.28
             ),
             "distinctiveness": distinctiveness,
             "visual_sophistication": _bounded_score(
@@ -825,12 +901,30 @@ def _score_candidates(
                 + (10 if proposal.camera_direction and proposal.lighting else 0)
                 + (8 if manageable_density else 0)
             ),
+            "commercial_sophistication": _bounded_score(
+                48 + (18 if commercial_language else 0)
+                + (12 if story_mechanism else 0)
+                + specificity * 12
+                - genericness_risk * 0.24
+            ),
             "audience_relevance": _bounded_score(
                 44 + grounding_overlap * 34 + industry_fit * 0.18
             ),
             "product_relevance": _bounded_score(
-                42 + product_overlap * 46
+                38 + product_overlap * 44
                 + (8 if len(_tokens(proposal.product_story)) >= 8 else 0)
+                + (10 if story_mechanism else 0)
+                - genericness_risk * 0.32
+            ),
+            "visual_storytelling": _bounded_score(
+                40 + product_overlap * 24 + (20 if story_mechanism else 0)
+                + min(12, len(story_tokens) / 8)
+                - genericness_risk * 0.30
+            ),
+            "scroll_stopping_potential": _bounded_score(
+                44 + distinctiveness * 0.24
+                + (14 if proposal.scroll_stopping_hook else 0)
+                - genericness_risk * 0.25
             ),
             "platform_suitability": _bounded_score(
                 35 + channel_fit * 0.30 + format_fit * 0.35
@@ -858,12 +952,53 @@ def _score_candidates(
             "business_brain_grounding": _bounded_score(
                 42 + grounding_overlap * 48
             ),
+            "genericness_risk": genericness_risk,
+            "replaceable_brand_risk": replaceable_brand_risk,
         }
-        overall = round(sum(dimensions.values()) / len(dimensions))
+        positive_dimensions = {
+            key: value
+            for key, value in dimensions.items()
+            if key not in {"genericness_risk", "replaceable_brand_risk"}
+        }
+        weights = {
+            "business_specific_relevance": 1.7,
+            "marketing_idea_strength": 1.5,
+            "commercial_sophistication": 1.3,
+            "product_relevance": 1.8,
+            "visual_storytelling": 1.6,
+            "scroll_stopping_potential": 1.2,
+        }
+        weight_total = sum(weights.get(key, 1.0) for key in positive_dimensions)
+        overall = _bounded_score(
+            sum(
+                score * weights.get(key, 1.0)
+                for key, score in positive_dimensions.items()
+            )
+            / weight_total
+            - genericness_risk * 0.16
+            - replaceable_brand_risk * 0.18
+        )
+        if genericness_risk >= 65 or replaceable_brand_risk >= 72:
+            overall = min(overall, 58)
         results.append(
             CreativeConceptScorecard(**dimensions, overall_score=overall)
         )
     return tuple(results)
+
+
+def creative_direction_meets_quality_floor(
+    direction: CreativeDirectionPlan,
+) -> bool:
+    """Reject a polished-looking concept that could belong to any business."""
+    score = direction.selected_concept.scorecard
+    return (
+        score.business_specific_relevance >= 55
+        and score.marketing_idea_strength >= 55
+        and score.product_relevance >= 55
+        and score.visual_storytelling >= 55
+        and score.genericness_risk < 65
+        and score.replaceable_brand_risk < 72
+    )
 
 
 def _pattern_fit(
@@ -896,6 +1031,8 @@ def _concept_signature(
         " ".join(
             (
                 proposal.concept_name,
+                proposal.marketing_idea,
+                proposal.customer_care_reason,
                 proposal.visual_metaphor,
                 proposal.product_story,
                 proposal.scroll_stopping_hook,
@@ -943,12 +1080,108 @@ def _dimension_relevance(
 
 
 def _contains_any(value: str, markers: tuple[str, ...]) -> bool:
-    normalized = value.casefold()
-    return any(marker in normalized for marker in markers)
+    value_tokens = tuple(_TOKEN.findall(value.casefold()))
+    for marker in markers:
+        marker_tokens = tuple(_TOKEN.findall(marker.casefold()))
+        if not marker_tokens:
+            continue
+        marker_length = len(marker_tokens)
+        if any(
+            value_tokens[index : index + marker_length] == marker_tokens
+            for index in range(len(value_tokens) - marker_length + 1)
+        ):
+            return True
+    return False
 
 
 def _bounded_score(value: float) -> int:
     return max(0, min(100, round(value)))
+
+
+def _genericness_risk(value: str) -> int:
+    decorative_markers = (
+        "abstract",
+        "circle",
+        "circles",
+        "concentric",
+        "decorative",
+        "geometric",
+        "geometry",
+        "gradient",
+        "gradients",
+        "orb",
+        "orbs",
+        "ring",
+        "rings",
+        "shape",
+        "shapes",
+        "swirl",
+        "swirls",
+        "wave",
+        "waves",
+    )
+    meaningful_markers = (
+        "customer",
+        "customers",
+        "demonstrate",
+        "demonstrates",
+        "human",
+        "humans",
+        "in use",
+        "operation",
+        "operational",
+        "operations",
+        "outcome",
+        "outcomes",
+        "offering",
+        "offerings",
+        "product",
+        "products",
+        "service",
+        "services",
+        "transform",
+        "transformation",
+        "workflow",
+        "workflows",
+    )
+    decorative_count = sum(
+        _contains_any(value, (marker,)) for marker in decorative_markers
+    )
+    meaningful_count = sum(
+        _contains_any(value, (marker,)) for marker in meaningful_markers
+    )
+    return _bounded_score(24 + decorative_count * 15 - meaningful_count * 7)
+
+
+def _replaceable_brand_risk(
+    *,
+    story_tokens: frozenset[str],
+    strategy_tokens: frozenset[str],
+    proposal: CreativeConceptProposal,
+) -> int:
+    overlap = _overlap_ratio(story_tokens, strategy_tokens)
+    explicit_story = _contains_any(
+        f"{proposal.marketing_idea} {proposal.product_story} {proposal.hero_relevance}",
+        (
+            "demonstrate",
+            "demonstrates",
+            "in use",
+            "operation",
+            "operational",
+            "operations",
+            "outcome",
+            "outcomes",
+            "service",
+            "services",
+            "transform",
+            "transformation",
+            "workflow",
+            "workflows",
+        ),
+    )
+    return _bounded_score(
+        82 - overlap * 58 - (14 if explicit_story else 0)
+    )
 
 
 def _selected_principles(

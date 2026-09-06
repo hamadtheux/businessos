@@ -17,12 +17,16 @@ os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 from app.schemas.marketing import CreativeStrategyProposal  # noqa: E402
 from app.agents.provider import AIAgentProviderMetadata  # noqa: E402
 from app.exceptions.ai_agent import AIAgentProviderError  # noqa: E402
+from app.exceptions.marketing import MarketingAIError  # noqa: E402
 from app.services.creative_direction import (  # noqa: E402
+    _contains_any,
+    _genericness_risk,
     CreativeConceptProposal,
     CreativeDirectorSynthesis,
     build_creative_director_task,
     build_creative_direction,
     build_visual_art_direction,
+    creative_direction_meets_quality_floor,
 )
 from app.services.creative_research import (  # noqa: E402
     PublicCreativeResearchContext,
@@ -73,6 +77,18 @@ class CreativeDirectionTests(TestCase):
             build_research_request(context, max_results=12),
             provider="internal_patterns",
         )
+
+    def test_generic_markers_use_token_and_phrase_boundaries(self) -> None:
+        self.assertFalse(_contains_any("supported offering", ("ring",)))
+        self.assertLess(_genericness_risk("supported business offering"), 24)
+        for phrase in (
+            "blue rings",
+            "concentric rings",
+            "abstract gradient",
+            "decorative circles",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertGreater(_genericness_risk(phrase), 24)
 
     def test_strategy_rejects_duplicate_headline_and_offer(self) -> None:
         values = _strategy().model_dump()
@@ -249,6 +265,76 @@ class CreativeDirectionTests(TestCase):
         ):
             self.assertNotIn(exact_copy or "[missing]", prompt)
 
+    def test_generic_blue_circle_concepts_fail_server_owned_direction_floor(self) -> None:
+        context = _context()
+        research = self._research()
+        fallback = build_creative_direction(
+            strategy=_strategy(),
+            research=research,
+            context=context,
+        )
+        generic_values = (
+            {
+                "concept_name": "Blue Circle Future",
+                "marketing_idea": "Decorative blue circles signal modern technology.",
+                "customer_care_reason": "The audience sees a familiar software aesthetic.",
+                "hero_subject": "Concentric blue circles on a dark gradient.",
+                "hero_relevance": "Abstract circles imply technology.",
+                "product_story": "Decorative rings create a generic innovation mood.",
+                "scroll_stopping_hook": "Bright concentric rings.",
+                "visual_metaphor": "Concentric blue rings.",
+            },
+            {
+                "concept_name": "Gradient Network",
+                "marketing_idea": "A blue gradient and geometric shapes signal connected technology.",
+                "customer_care_reason": "The audience recognizes a generic digital theme.",
+                "hero_subject": "Abstract blue network shapes.",
+                "hero_relevance": "Geometry implies software.",
+                "product_story": "Floating abstract nodes create a technology mood.",
+                "scroll_stopping_hook": "Glowing geometric nodes.",
+                "visual_metaphor": "Abstract connected shapes.",
+            },
+            {
+                "concept_name": "Digital Wave",
+                "marketing_idea": "A glowing blue wave creates a futuristic software mood.",
+                "customer_care_reason": "The audience recognizes premium technology styling.",
+                "hero_subject": "Decorative blue wave and floating orbs.",
+                "hero_relevance": "The wave implies digital motion.",
+                "product_story": "A gradient wave and orbs suggest generic innovation.",
+                "scroll_stopping_hook": "Glowing blue wave.",
+                "visual_metaphor": "Futuristic blue wave.",
+            },
+        )
+        proposals = tuple(
+            CreativeConceptProposal.model_validate(
+                {
+                    **candidate.model_dump(exclude={"scorecard"}),
+                    **generic,
+                }
+            )
+            for candidate, generic in zip(
+                fallback.candidates,
+                generic_values,
+                strict=True,
+            )
+        )
+
+        direction = build_creative_direction(
+            strategy=_strategy(),
+            research=research,
+            context=context,
+            synthesis=CreativeDirectorSynthesis(candidates=proposals),
+        )
+
+        self.assertFalse(creative_direction_meets_quality_floor(direction))
+        self.assertTrue(
+            all(candidate.scorecard.overall_score <= 58 for candidate in direction.candidates)
+        )
+        self.assertGreaterEqual(
+            direction.selected_concept.scorecard.genericness_risk,
+            65,
+        )
+
 
 class CreativeDirectorRuntimeTests(IsolatedAsyncioTestCase):
     def _inputs(self):
@@ -271,6 +357,107 @@ class CreativeDirectorRuntimeTests(IsolatedAsyncioTestCase):
             )
         )
         return context, research, synthesis
+
+    def _weak_direction(self, field: str):
+        context, research, _synthesis = self._inputs()
+        direction = build_creative_direction(
+            strategy=_strategy(),
+            research=research,
+            context=context,
+        )
+        weak_score = direction.selected_concept.scorecard.model_copy(
+            update={field: 54}
+        )
+        weak_selected = direction.selected_concept.model_copy(
+            update={"scorecard": weak_score}
+        )
+        return context, research, direction.model_copy(
+            update={"selected_concept": weak_selected}
+        )
+
+    async def test_weak_deterministic_fallback_cannot_bypass_any_core_floor(self) -> None:
+        for field in (
+            "business_specific_relevance",
+            "product_relevance",
+            "marketing_idea_strength",
+            "visual_storytelling",
+        ):
+            with self.subTest(field=field):
+                context, research, weak = self._weak_direction(field)
+                with (
+                    patch(
+                        "app.services.marketing.build_creative_direction",
+                        return_value=weak,
+                    ),
+                    self.assertRaises(MarketingAIError),
+                ):
+                    await _creative_direction_with_fallback(
+                        object(),
+                        business_id=uuid4(),
+                        strategy=_strategy(),
+                        research=research,
+                        context=context,
+                        provider=None,
+                        max_output_tokens=4_000,
+                    )
+
+    async def test_provider_failure_fallback_is_quality_gated(self) -> None:
+        context, research, weak = self._weak_direction("product_relevance")
+        with (
+            patch(
+                "app.services.marketing._build_cmo_execution_request",
+                new=AsyncMock(return_value=object()),
+            ),
+            patch(
+                "app.services.marketing.execute_ai_agent_typed_with_metadata",
+                new=AsyncMock(side_effect=AIAgentProviderError("safe failure")),
+            ),
+            patch(
+                "app.services.marketing.build_creative_direction",
+                return_value=weak,
+            ),
+            self.assertRaises(MarketingAIError),
+        ):
+            await _creative_direction_with_fallback(
+                object(),
+                business_id=uuid4(),
+                strategy=_strategy(),
+                research=research,
+                context=context,
+                provider=SimpleNamespace(provider_name="test_director"),
+                max_output_tokens=4_000,
+            )
+
+    async def test_low_quality_ai_fallback_is_also_quality_gated(self) -> None:
+        context, research, weak = self._weak_direction("visual_storytelling")
+        execution = SimpleNamespace(
+            output=SimpleNamespace(),
+            provider_metadata=AIAgentProviderMetadata(),
+        )
+        with (
+            patch(
+                "app.services.marketing._build_cmo_execution_request",
+                new=AsyncMock(return_value=object()),
+            ),
+            patch(
+                "app.services.marketing.execute_ai_agent_typed_with_metadata",
+                new=AsyncMock(return_value=execution),
+            ),
+            patch(
+                "app.services.marketing.build_creative_direction",
+                side_effect=[weak, weak],
+            ),
+            self.assertRaises(MarketingAIError),
+        ):
+            await _creative_direction_with_fallback(
+                object(),
+                business_id=uuid4(),
+                strategy=_strategy(),
+                research=research,
+                context=context,
+                provider=SimpleNamespace(provider_name="test_director"),
+                max_output_tokens=4_000,
+            )
 
     async def test_one_typed_director_call_drives_server_scored_selection(self) -> None:
         context, research, synthesis = self._inputs()

@@ -353,23 +353,44 @@ class CreativeAsset(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         ForeignKeyConstraint(["campaign_id", "business_id"], ["marketing_campaigns.id", "marketing_campaigns.business_id"], name="fk_marketing_creative_assets_campaign_business"),
         ForeignKeyConstraint(["content_id", "business_id"], ["marketing_content.id", "marketing_content.business_id"], name="fk_marketing_creative_assets_content_business"),
-        CheckConstraint("asset_type IN ('social_square','story_reel','landscape_ad','display_banner','creative_brief','other')", name="valid_asset_type"),
+        CheckConstraint("asset_type IN ('social_square','story_reel','landscape_ad','display_banner','creative_brief','other','video_vertical','video_landscape','video_square')", name="valid_asset_type"),
+        CheckConstraint("media_type IN ('image','video')", name="valid_media_type"),
+        CheckConstraint("(media_type = 'image' AND asset_type IN ('social_square','story_reel','landscape_ad','display_banner','creative_brief','other')) OR (media_type = 'video' AND asset_type IN ('video_vertical','video_landscape','video_square'))", name="consistent_media_asset_type"),
         CheckConstraint("source_type IN ('manual','import','ai_brief','future_provider')", name="valid_source_type"),
         CheckConstraint("instructions IS NULL OR char_length(instructions) <= 5000", name="valid_instructions"),
         CheckConstraint("visual_direction IS NULL OR char_length(visual_direction) <= 5000", name="valid_visual_direction"),
-        CheckConstraint("generation_status IN ('draft','brief_ready','provider_required','ready','failed','archived')", name="valid_generation_status"),
+        CheckConstraint("generation_status IN ('draft','brief_ready','strategy_ready','provider_required','queued','generating','reviewing','repairing','ready','failed','archived')", name="valid_generation_status"),
         CheckConstraint("storage_reference IS NULL OR char_length(storage_reference) <= 1024", name="valid_storage_reference"),
         CheckConstraint("width IS NULL OR width BETWEEN 1 AND 20000", name="valid_width"),
         CheckConstraint("height IS NULL OR height BETWEEN 1 AND 20000", name="valid_height"),
         CheckConstraint("alt_text IS NULL OR char_length(alt_text) <= 1000", name="valid_alt_text"),
+        CheckConstraint("duration_seconds IS NULL OR duration_seconds IN (6,8,15,30)", name="valid_duration_seconds"),
+        CheckConstraint("provider_key IS NULL OR char_length(btrim(provider_key)) BETWEEN 1 AND 64", name="valid_provider_key"),
+        CheckConstraint("provider_job_reference IS NULL OR char_length(btrim(provider_job_reference)) BETWEEN 1 AND 255", name="valid_provider_job_reference"),
+        CheckConstraint("jsonb_typeof(creative_metadata) = 'object' AND octet_length(creative_metadata::text) <= 16384", name="valid_creative_metadata"),
+        CheckConstraint("(media_type = 'image' AND duration_seconds IS NULL) OR (media_type = 'video' AND duration_seconds IS NOT NULL)", name="consistent_media_duration"),
+        CheckConstraint("provider_job_reference IS NULL OR provider_key IS NOT NULL", name="consistent_provider_job_identity"),
+        CheckConstraint("media_type <> 'image' OR (provider_key IS NULL AND provider_job_reference IS NULL)", name="consistent_image_provider_identity"),
+        CheckConstraint("generation_status <> 'provider_required' OR (provider_key IS NULL AND provider_job_reference IS NULL AND storage_reference IS NULL)", name="consistent_provider_required_state"),
+        CheckConstraint("generation_status <> 'strategy_ready' OR (media_type = 'video' AND provider_key IS NULL AND provider_job_reference IS NULL AND storage_reference IS NULL)", name="consistent_video_strategy_state"),
+        CheckConstraint("generation_status NOT IN ('queued','generating','reviewing','repairing') OR (media_type = 'video' AND provider_key IS NOT NULL AND provider_job_reference IS NOT NULL AND storage_reference IS NULL)", name="consistent_video_async_state"),
+        CheckConstraint("NOT (media_type = 'video' AND generation_status = 'ready') OR (provider_key IS NOT NULL AND provider_job_reference IS NOT NULL AND storage_reference IS NOT NULL)", name="consistent_ready_video_state"),
         UniqueConstraint("id", "business_id", name="uq_marketing_creative_assets_id_business"),
         Index("ix_marketing_creative_assets_business_campaign", "business_id", "campaign_id", "id"),
+        Index(
+            "uq_marketing_creative_assets_provider_job",
+            "provider_key",
+            "provider_job_reference",
+            unique=True,
+            postgresql_where=text("provider_job_reference IS NOT NULL"),
+        ),
     )
 
     business_id: Mapped[UUID] = mapped_column(ForeignKey("businesses.id", ondelete="CASCADE"), nullable=False)
     campaign_id: Mapped[UUID | None] = mapped_column(nullable=True)
     content_id: Mapped[UUID | None] = mapped_column(nullable=True)
     asset_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(16), nullable=False, default="image", server_default="image")
     source_type: Mapped[str] = mapped_column(String(24), nullable=False)
     instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
     visual_direction: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -379,6 +400,10 @@ class CreativeAsset(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
     aspect_ratio: Mapped[str | None] = mapped_column(String(16), nullable=True)
     alt_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    provider_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provider_job_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    creative_metadata: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
 
 
 class SocialSchedule(UUIDPrimaryKeyMixin, TimestampMixin, Base):

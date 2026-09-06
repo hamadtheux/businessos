@@ -1,6 +1,7 @@
 import { useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, BarChart3, Calendar, Check, Globe2, RefreshCw, Sparkles, Target, TrendingUp, Wand2, WandSparkles, X } from "lucide-react";
+import { AlertCircle, BarChart3, Calendar, Check, Globe2, Plus, RefreshCw, Send, Sparkles, Target, TrendingUp, Wand2, X } from "lucide-react";
+import { useLocation } from "wouter";
 import { useBusiness } from "@/business-context";
 import { Badge, Button, Card, Modal, PageHeader, SectionTitle, WorkspaceDrawer } from "@/components/product-ui";
 import { CmoContentGeneratorDrawer } from "@/features/marketing/cmo-content-generator-drawer";
@@ -13,13 +14,16 @@ import {
   creativePhaseForDisplay,
   creativeResultNotice,
   generateCampaignChannelDrafts,
+  publishingCapability,
   runCreativeOperationWithRecovery,
+  videoFormatForContent,
   type CampaignGenerationInput,
   type CreativeProgress,
 } from "@/lib/cmo-ux";
 import { businessDateRange } from "@/lib/operational-dates";
 import { humanizeApiError } from "@/services/api-client";
 import type { CreativeAsset, MarketingChannel, MarketingContent } from "@/services/api-types";
+import { integrationsApi } from "@/services/integrations";
 import { marketingApi } from "@/services/marketing";
 
 function Kpi({ title, value, foot, icon, tone }: { title: string; value: string; foot: string; icon: ReactNode; tone: string }) {
@@ -65,6 +69,7 @@ type UpdatePlanValues = {
 };
 
 export function CmoPage() {
+  const [, navigate] = useLocation();
   const { activeBusinessId, activeBusiness } = useBusiness();
   const canAuthorizeOffer = ["owner", "admin"].includes(
     activeBusiness?.membershipRole ?? "",
@@ -88,6 +93,8 @@ export function CmoPage() {
   const analytics = useQuery({ queryKey: ["marketing", activeBusinessId, "analytics", period.start, period.end], queryFn: ({ signal }) => marketingApi.analytics(activeBusinessId, period.start, period.end, signal), enabled: Boolean(activeBusinessId) });
   const calendar = useQuery({ queryKey: ["marketing", activeBusinessId, "calendar", "cmo"], queryFn: ({ signal }) => marketingApi.calendar.list(activeBusinessId, new Date().toISOString(), calendarEnd, {}, signal), enabled: Boolean(activeBusinessId) });
   const campaigns = useQuery({ queryKey: ["marketing", activeBusinessId, "campaigns", "cmo"], queryFn: ({ signal }) => marketingApi.campaigns.list(activeBusinessId, { pageSize: 10 }, signal), enabled: Boolean(activeBusinessId) });
+  const integrationRegistry = useQuery({ queryKey: ["integrations", activeBusinessId, "registry", "social"], queryFn: ({ signal }) => integrationsApi.registry(activeBusinessId, signal), enabled: Boolean(activeBusinessId) });
+  const integrationConnections = useQuery({ queryKey: ["integrations", activeBusinessId, "connections", "social"], queryFn: ({ signal }) => integrationsApi.connections(activeBusinessId, signal), enabled: Boolean(activeBusinessId) });
   const primary = content.data?.items[0];
   const creativeAssets = useQuery({
     queryKey: ["marketing", activeBusinessId, "creative-assets", "cmo", primary?.id],
@@ -214,7 +221,7 @@ export function CmoPage() {
         values.contentId,
         values.scheduledFor,
       ),
-    onSuccess: () => { setSchedule(null); setNotice("Content was added to the internal calendar. External connection is still required to publish."); setError(""); void refresh(); },
+    onSuccess: () => { setSchedule(null); setNotice("Content was added to the internal calendar. No platform was contacted."); setError(""); void refresh(); },
     onError: (reason) => setError(humanizeApiError(reason, "Content could not be scheduled. Approve it first.")),
   });
   const submitSchedule = (event: FormEvent<HTMLFormElement>) => {
@@ -236,6 +243,28 @@ export function CmoPage() {
       scheduledFor: scheduledDate.toISOString(),
     });
   };
+  const preparePublish = useMutation({
+    mutationFn: (item: MarketingContent) =>
+      marketingApi.content.preparePublish(
+        activeBusinessId,
+        item.id,
+        item.channel,
+      ),
+    onSuccess: (proposal) => {
+      setNotice(
+        `${proposal.action_status.replaceAll("_", " ")}: ${proposal.connector_message}`,
+      );
+      setError("");
+      void refresh();
+    },
+    onError: (reason) =>
+      setError(
+        humanizeApiError(
+          reason,
+          "A governed publish action could not be prepared.",
+        ),
+      ),
+  });
   const generatePlan = useMutation({
     mutationFn: (values: GeneratePlanValues) =>
       marketingApi.plans.generate(activeBusinessId, values),
@@ -323,10 +352,30 @@ export function CmoPage() {
     onSuccess: (asset) => { setNotice(creativeResultNotice(asset)); setError(""); },
     onError: () => setError("The visual creative could not be completed. Refresh to see saved progress and try again."),
   });
+  const createVideo = useMutation({
+    mutationFn: async (item: MarketingContent) => {
+      setCreativeProgress({ phase: "video_strategy", contentId: item.id });
+      try {
+        const strategy = await marketingApi.creative.videoStrategy(activeBusinessId, {
+          campaign_id: item.campaign_id,
+          content_id: item.id,
+          ...videoFormatForContent(item),
+          instructions: item.creative_brief || `Create a professional campaign video for ${item.title}.`,
+        });
+        setCreativeProgress({ phase: "video_generation", contentId: item.id, assetId: strategy.id });
+        return await marketingApi.creative.generateVideo(activeBusinessId, strategy.id);
+      } finally {
+        await refreshCreatives();
+        setCreativeProgress(null);
+      }
+    },
+    onSuccess: (asset) => { setNotice(creativeResultNotice(asset)); setError(""); },
+    onError: () => setError("The video strategy could not be completed. Existing content and creative history remain available."),
+  });
   const retryCreative = useMutation({
     mutationFn: (asset: CreativeAsset) => runCreativeOperationWithRecovery({
-      progress: { phase: "visual", contentId: asset.content_id || undefined, assetId: asset.id },
-      operation: () => marketingApi.creative.generate(activeBusinessId, asset.id),
+      progress: { phase: asset.media_type === "video" ? "video_generation" : "visual", contentId: asset.content_id || undefined, assetId: asset.id },
+      operation: () => asset.media_type === "video" ? marketingApi.creative.generateVideo(activeBusinessId, asset.id) : marketingApi.creative.generate(activeBusinessId, asset.id),
       refresh: refreshCreatives,
       onProgress: setCreativeProgress,
     }),
@@ -334,9 +383,9 @@ export function CmoPage() {
     onError: () => setError("The visual creative could not be completed. Refresh to see saved progress and try again."),
   });
   const regenerateCreative = useMutation({
-    mutationFn: (asset: CreativeAsset) => runCreativeOperationWithRecovery({
+    mutationFn: ({ asset, mode }: { asset: CreativeAsset; mode?: "alternate_metaphor" | "alternate_composition" }) => runCreativeOperationWithRecovery({
       progress: { phase: "visual", contentId: asset.content_id || undefined, assetId: asset.id },
-      operation: () => marketingApi.creative.regenerate(activeBusinessId, asset.id),
+      operation: () => marketingApi.creative.regenerate(activeBusinessId, asset.id, mode),
       refresh: refreshCreatives,
       onProgress: setCreativeProgress,
     }),
@@ -349,6 +398,24 @@ export function CmoPage() {
     primary?.id,
     creativeAssets.data?.[0]?.id,
   );
+  const primaryConnector = integrationRegistry.data?.find(
+    (item) => item.connector_type === primary?.channel,
+  );
+  const primaryConnection = integrationConnections.data?.find(
+    (item) => item.connector_type === primary?.channel,
+  );
+  const primaryPublishingCapability = publishingCapability({
+    channel: primary?.channel ?? "other",
+    definition: primaryConnector,
+    connection: primaryConnection,
+    pending: integrationRegistry.isPending || integrationConnections.isPending,
+    failed: integrationRegistry.isError || integrationConnections.isError,
+  });
+  const creativePending =
+    createCreative.isPending ||
+    createVideo.isPending ||
+    retryCreative.isPending ||
+    regenerateCreative.isPending;
 
   const metrics = analytics.data;
   const currency = metrics?.currency || activeBusiness?.currency || "USD";
@@ -365,6 +432,14 @@ export function CmoPage() {
   const openContentDrawer = () => {
     setError("");
     setShowContentGenerator(true);
+  };
+  const openAdvancedCreativeDirection = (mediaType: "image" | "video") => {
+    if (!primary) return;
+    const params = new URLSearchParams({
+      content: primary.id,
+      creative: mediaType,
+    });
+    navigate(`/marketing/content?${params.toString()}`);
   };
 
   return <>
@@ -390,15 +465,15 @@ export function CmoPage() {
             onClick={openContentDrawer}
             data-testid="button-generate-content"
           >
-            <WandSparkles />
-            Generate content
+            <Plus />
+            New content
           </Button>
         </>
       }
     />
     <CmoDepartmentNav active={activeTab} />
-    {notice && <div className="ai-banner"><Check /> {notice}<button className="close-btn" onClick={() => setNotice("")}><X /></button></div>}
-    {error && <div className="ai-banner"><AlertCircle /> {error}<button className="close-btn" onClick={() => setError("")}><X /></button></div>}
+    {notice && <div className="ai-banner" role="status" aria-live="polite"><Check /> {notice}<button className="close-btn" onClick={() => setNotice("")}><X /></button></div>}
+    {error && <div className="ai-banner" role="alert" aria-live="assertive"><AlertCircle /> {error}<button className="close-btn" onClick={() => setError("")}><X /></button></div>}
     {hasPartialFailure && <div className="ai-banner"><AlertCircle />Some marketing sections could not refresh. Available internal planning data remains usable.<Button className="btn-sm" onClick={() => void refresh()}>Retry failed sections</Button></div>}
     {initialLoading ? <Card><div className="empty"><RefreshCw className="spin" /><p>Assembling the marketing workspace…</p></div></Card> : <>
       {analytics.isError ? <Card><div className="empty"><BarChart3 /><h3>Recorded performance could not load</h3><p>{humanizeApiError(analytics.error, "Retry the performance section. Internal plans and content are still available.")}</p><Button onClick={() => void analytics.refetch()}>Retry performance</Button></div></Card> : <div className="grid kpi-grid"><Kpi title="Reach" value={(metrics?.reach ?? 0).toLocaleString()} foot="Recorded in selected period" icon={<Globe2 />} tone="green" /><Kpi title="Click-through rate" value={`${Number(metrics?.ctr ?? 0).toFixed(2)}%`} foot={`${metrics?.clicks ?? 0} recorded clicks`} icon={<TrendingUp />} tone="orange" /><Kpi title="Leads" value={String(metrics?.leads ?? 0)} foot="Attributed records only" icon={<Target />} tone="brown" /><Kpi title="Revenue / ROAS" value={`${money(metrics?.revenue ?? "0")} · ${Number(metrics?.roas ?? 0).toFixed(2)}x`} foot={`${money(metrics?.spend ?? "0")} recorded spend`} icon={<BarChart3 />} tone="rose" /></div>}
@@ -421,6 +496,7 @@ export function CmoPage() {
           creative={creativeAssets.data?.[0]}
           creatives={creativeAssets.data}
           isCreativeLoading={creativeAssets.isLoading}
+          isCreativePending={creativePending}
           creativeError={creativeAssets.isError ? humanizeApiError(creativeAssets.error, "Retry loading creative history.") : null}
           creativePhase={creativePhase}
           onRetry={() => void content.refetch()}
@@ -428,6 +504,10 @@ export function CmoPage() {
           onRegenerate={(item) => regenerate.mutate(item)}
           onApprove={(item) => approve.mutate(item)}
           onSchedule={(item) => setSchedule(item)}
+          publishingCapability={primaryPublishingCapability}
+          isPreparingPublish={preparePublish.isPending}
+          onPreparePublish={(item) => preparePublish.mutate(item)}
+          onConnectChannel={primaryConnector ? () => navigate("/integrations") : undefined}
           onEdit={(item) => {
             setError("");
             setEditingContent(item);
@@ -436,12 +516,17 @@ export function CmoPage() {
             setError("");
             setHistoryContent(item);
           }}
-          onCreateCreative={() => {
-            if (primary) createCreative.mutate(primary);
+          onCreateCreative={(mediaType) => {
+            if (primary) {
+              if (mediaType === "video") createVideo.mutate(primary);
+              else createCreative.mutate(primary);
+            }
           }}
+          onEditCreativeDirection={openAdvancedCreativeDirection}
           onReloadCreative={() => void creativeAssets.refetch()}
           onRetryCreative={(asset) => retryCreative.mutate(asset)}
-          onRegenerateCreative={(asset) => regenerateCreative.mutate(asset)}
+          onRegenerateCreative={(asset) => regenerateCreative.mutate({ asset })}
+          onVariationCreative={(asset) => regenerateCreative.mutate({ asset, mode: "alternate_metaphor" })}
         />
         <Card><SectionTitle title="Content calendar" action={<Badge>{calendar.data?.length ?? 0} upcoming</Badge>} />{calendar.isError ? <div className="empty"><AlertCircle /><h3>Calendar could not load</h3><p>{humanizeApiError(calendar.error, "Retry the internal calendar.")}</p><Button onClick={() => void calendar.refetch()}>Retry calendar</Button></div> : calendar.isLoading ? <div className="empty"><RefreshCw className="spin" /><p>Loading calendar…</p></div> : <>{calendar.data?.slice(0, 8).map((item) => { const contentItem = content.data?.items.find((value) => value.id === item.content_id); return <div className="list-row" key={item.id}><div style={{ width: 86, color: "#938c83", fontSize: 10 }}>{new Date(item.scheduled_for).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}</div><div className="row-main"><div className="row-title">{contentItem?.title || `${item.channel} content`}</div><div className="row-copy">{new Date(item.scheduled_for).toLocaleTimeString()} · {item.timezone}</div></div><Badge tone="success">{item.status.replaceAll("_", " ")}</Badge></div>; })}{!calendar.data?.length && <div className="empty"><Calendar /><h3>No content scheduled</h3><p>Approved content can be added to the internal calendar without a publishing provider.</p></div>}</>}</Card></div>
     </>}

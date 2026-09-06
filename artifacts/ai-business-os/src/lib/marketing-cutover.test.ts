@@ -136,6 +136,14 @@ test("creative briefing, generation, and regeneration use tenant-scoped POST end
   });
   await api.creative.generate(businessA, "creative-one");
   await api.creative.regenerate(businessA, "creative-one");
+  await api.creative.videoStrategy(businessA, {
+    campaign_id: "campaign-one",
+    content_id: "content-one",
+    duration_seconds: 15,
+    aspect_ratio: "9:16",
+    instructions: "Create a grounded campaign video",
+  });
+  await api.creative.generateVideo(businessA, "video-one");
 
   assert.deepEqual(requests, [
     {
@@ -150,6 +158,35 @@ test("creative briefing, generation, and regeneration use tenant-scoped POST end
       path: `/api/v1/businesses/${businessA}/marketing/creative-assets/creative-one/regenerate`,
       method: "POST",
     },
+    {
+      path: `/api/v1/businesses/${businessA}/marketing/creative-assets/video/strategy`,
+      method: "POST",
+    },
+    {
+      path: `/api/v1/businesses/${businessA}/marketing/creative-assets/video-one/video/generate`,
+      method: "POST",
+    },
+  ]);
+});
+
+test("plain regeneration sends no body while variation is explicit", async () => {
+  const requests: Array<{ body: string | undefined }> = [];
+  const api = await authenticated(async (input, init) => {
+    if (String(input).endsWith("/login")) return json(session);
+    requests.push({ body: typeof init?.body === "string" ? init.body : undefined });
+    return json({});
+  });
+
+  await api.creative.regenerate(businessA, "creative-one");
+  await api.creative.regenerate(
+    businessA,
+    "creative-one",
+    "alternate_metaphor",
+  );
+
+  assert.deepEqual(requests, [
+    { body: undefined },
+    { body: JSON.stringify({ variation_mode: "alternate_metaphor" }) },
   ]);
 });
 
@@ -163,8 +200,8 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
     readFile(new URL("../features/marketing/cmo-content-generator-drawer.tsx", import.meta.url), "utf8"),
   ]);
 
+  assert.match(panel, /creative-\$\{mediaType\}-empty-state/);
   for (const state of [
-    "creative-empty-state",
     "creative-provider-required",
     "creative-failed-state",
     "creative-ready-preview",
@@ -173,19 +210,27 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
   }
   assert.match(panel, /creative-loading-\$\{phase\}/);
   assert.match(panel, /Preparing creative direction/);
-  assert.match(panel, /Generating your branded visual/);
-  assert.match(panel, /Create a branded visual for this post/);
+  assert.match(panel, /Generating branded image/);
+  assert.match(panel, /Create a branded image/);
+  assert.match(panel, /Create a branded campaign video/);
+  assert.match(panel, /Video generation isn’t connected yet/);
   assert.match(panel, /Nothing will be published automatically/);
-  assert.match(panel, /Regenerate visual/);
-  assert.match(panel, /Previous artwork remains in history|preserved in history/);
+  assert.match(panel, /Variations/);
+  assert.match(panel, /Regenerate/);
+  assert.doesNotMatch(panel, /Create another/);
+  assert.match(panel, /role="group" aria-label="Creative media type"/);
+  assert.match(panel, /aria-expanded=\{historyOpen\}/);
+  assert.match(panel, /aria-controls=\{`creative-history-\$\{mediaType\}`\}/);
+  assert.match(panel, /testId=\{`creative-loading-\$\{phase\}`\} live="polite"/);
+  assert.match(panel, /testId="creative-error" live="assertive"/);
+  assert.match(panel, /Previous media remains read-only and is never overwritten/);
   assert.match(panel, /safeCreativeMediaUrl/);
   assert.match(panel, /onError=\{\(\) => setFailedPreviewId/);
   assert.match(panel, /creative-preview-unavailable/);
   assert.match(panel, /button-retry-preview/);
   assert.match(panel, /Creative is ready, but the preview could not be loaded/);
-  assert.match(panel, /Creative history ·/);
-  assert.match(panel, /Previous creative artwork/);
-  assert.match(panel, /remains read-only here/);
+  assert.match(panel, /Immutable \{mediaType\} history/);
+  assert.match(panel, /Previous \$\{mediaType\} creative/);
   assert.match(panel, /button-reload-creatives/);
   assert.match(panel, /creative-operation-error/);
   assert.match(panel, /button-retry-creative-operation/);
@@ -196,6 +241,10 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
   }
   assert.match(studio, /button-approve-content/);
   assert.match(studio, /button-schedule-content/);
+  assert.match(studio, /button-prepare-publish/);
+  assert.equal(studio.match(/Create another/g)?.length, 1);
+  assert.match(studio, /onClick=\{onGenerate\}/);
+  assert.match(studio, /onEditDirection=\{onEditCreativeDirection\}/);
   assert.match(studio, /onHistory/);
   assert.match(studio, /creatives=\{creatives\}/);
   assert.match(page, /Saving creates a new immutable version/);
@@ -209,6 +258,9 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
   assert.match(page, /runCreativeOperationWithRecovery/);
   assert.match(page, /creativePhaseForDisplay/);
   assert.match(page, /creatives=\{creativeAssets\.data\}/);
+  assert.match(page, /publishingCapability/);
+  assert.match(page, /marketingApi\.content\.preparePublish/);
+  assert.match(page, /navigate\(`\/marketing\/content\?\$\{params\.toString\(\)\}`\)/);
   assert.match(page, /humanizeApiError/);
   assert.match(social, /creatives=\{assets\.data\}/);
   assert.match(social, /creativePhaseForDisplay/);
@@ -218,6 +270,8 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
   assert.match(social, /marketingApi\.creative\.brief/);
   assert.match(social, /marketingApi\.creative\.generate/);
   assert.match(social, /marketingApi\.creative\.regenerate/);
+  assert.match(social, /regenerateVisual\.mutate\(\{ asset \}\)/);
+  assert.match(social, /regenerateVisual\.mutate\(\{ asset, mode: "alternate_metaphor" \}\)/);
   assert.match(social, /creativeOperationLock\.current/);
   assert.match(social, /if \(postWorkspaceBusy \|\| creativeOperationLock\.current\) return/);
   assert.match(social, /creativeOperationLock\.current = false/);
@@ -299,14 +353,15 @@ test("AI CMO content details use a governed right-side post workspace", async ()
 
   assert.match(drawer, /data-testid="cmo-post-preview"/);
   assert.match(drawer, /<CmoCreativePanel/);
-  assert.match(drawer, /onCreate=\{\(\) => startCreativeOperation\(\(\) => createCreative\.mutate\(selected\)\)\}/);
+  assert.match(drawer, /onCreate=\{\(mediaType\) => startCreativeOperation/);
+  assert.match(drawer, /if \(mediaType === "video"\) createVideo\.mutate\(selected\)/);
   assert.match(drawer, /actionError=\{creativeActionError\}/);
   assert.match(drawer, /onRetry=\{\(asset\) => startCreativeOperation/);
   assert.match(drawer, /onRegenerate=\{\(asset\) => startCreativeOperation/);
   assert.match(drawer, /isPending=\{postWorkspaceBusy\}/);
   assert.match(drawer, /phase=\{creativePhase\}/);
-  assert.match(panel, /data-testid="button-create-visual"/);
-  assert.match(panel, /data-testid="creative-operation-error"/);
+  assert.match(panel, /data-testid=\{`button-create-\$\{mediaType\}`\}/);
+  assert.match(panel, /testId="creative-operation-error"/);
   assert.match(panel, /data-testid="button-retry-creative-operation"/);
   assert.match(drawer, /postWorkspaceMode === "edit"/);
   assert.match(drawer, /postWorkspaceMode === "creative_brief"/);
@@ -386,12 +441,12 @@ test("AI CMO content details use a governed right-side post workspace", async ()
   assert.match(footer, /form="cmo-edit-post-form"/);
   assert.match(footer, /Save new version/);
   assert.match(footer, /form="cmo-creative-brief-form"/);
-  assert.match(footer, /Prepare creative strategy/);
+  assert.match(footer, /Prepare \$\{creativeBriefMedia\} strategy/);
   assert.match(footer, /Back to post/);
-  assert.equal((footer.match(/disabled=\{postWorkspaceBusy\}/g) || []).length, 9);
+  assert.equal((footer.match(/disabled=\{postWorkspaceBusy\}/g) || []).length, 10);
   assert.match(drawer, /setPostWorkspaceMode\("creative_brief"\);[\s\S]*disabled=\{postWorkspaceBusy\}[\s\S]*Advanced brief/);
   assert.match(footer, /disabled=\{edit\.isPending\}[\s\S]*form="cmo-edit-post-form"[\s\S]*disabled=\{edit\.isPending\}/);
-  assert.match(footer, /disabled=\{createBrief\.isPending\}[\s\S]*form="cmo-creative-brief-form"[\s\S]*disabled=\{createBrief\.isPending\}/);
+  assert.match(footer, /disabled=\{createBrief\.isPending \|\| createVideoBrief\.isPending\}[\s\S]*form="cmo-creative-brief-form"[\s\S]*disabled=\{createBrief\.isPending \|\| createVideoBrief\.isPending\}/);
   assert.match(social, /if \(postWorkspaceBusy \|\| creativeOperationLock\.current\) return/);
 
   assert.match(drawer, /versions\.data\?\.map/);
@@ -406,7 +461,8 @@ test("AI CMO content details use a governed right-side post workspace", async ()
     footer.indexOf("</div>\n    </div>", footer.indexOf("{selectedProviderWriteReady &&")),
   );
   assert.match(publishGuard, /selectedProviderWriteReady/);
-  assert.match(publishGuard, /\["facebook", "instagram"\]\.includes\(selected\.channel\)/);
+  assert.doesNotMatch(publishGuard, /\["facebook", "instagram"\]\.includes\(selected\.channel\)/);
+  assert.match(social, /const selectedPublishCapability = publishingCapability\(/);
   assert.match(publishGuard, /\["approved", "scheduled", "ready_to_publish"\]\.includes\(selected\.status\)/);
   assert.match(publishGuard, /preparePublish\.mutate\(selected\)/);
   assert.doesNotMatch(footer.slice(0, footer.indexOf("{selectedProviderWriteReady &&")), /preparePublish\.mutate/);
@@ -440,7 +496,7 @@ test("AI CMO creation flows use the accessible responsive workspace drawer", asy
   ]);
 
   assert.match(page, /Generate strategy/);
-  assert.match(page, /Generate content/);
+  assert.match(page, /New content/);
   assert.match(page, /button-generate-strategy/);
   assert.match(page, /button-generate-content/);
   assert.match(page, /actionClassName="cmo-overview-actions"/);
@@ -452,7 +508,7 @@ test("AI CMO creation flows use the accessible responsive workspace drawer", asy
   assert.match(headerActions, /cmo-overview-action cmo-overview-action-secondary/);
   assert.match(headerActions, /cmo-overview-action cmo-overview-action-primary/);
   assert.match(headerActions, /<Target \/>\s*Generate strategy/);
-  assert.match(headerActions, /<WandSparkles \/>\s*Generate content/);
+  assert.match(headerActions, /<Plus \/>\s*New content/);
   assert.doesNotMatch(headerActions, /icon-(?:badge|chip)|cmo-action-context|<span/);
 
   const studioEmptyState = studio.slice(
@@ -460,7 +516,7 @@ test("AI CMO creation flows use the accessible responsive workspace drawer", asy
     studio.indexOf("const groundingSummary"),
   );
   assert.match(studioEmptyState, /className="cmo-card-cta" onClick=\{onGenerate\}/);
-  assert.match(studioEmptyState, /<WandSparkles \/>\s*Generate content/);
+  assert.match(studioEmptyState, /<WandSparkles \/>\s*New content/);
   assert.doesNotMatch(studioEmptyState, /<Wand2 \/>|<Sparkles \/>/);
   assert.match(page, /className="cmo-card-cta" onClick=\{openStrategyDrawer\}/);
   assert.match(page, /<LinkButton href="\/campaigns\?new=1">Prepare campaign<\/LinkButton>/);
@@ -737,8 +793,11 @@ test("completed marketing screens contain no workspace or localStorage dependenc
 });
 
 test("marketing routes are production-ungated and avoid false launch language", async () => {
-  const app = await readFile(new URL("../App.tsx", import.meta.url), "utf8");
-  const marketing = await readFile(new URL("../features/marketing/marketing-pages.tsx", import.meta.url), "utf8");
+  const [app, marketing, helpers] = await Promise.all([
+    readFile(new URL("../App.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../features/marketing/marketing-pages.tsx", import.meta.url), "utf8"),
+    readFile(new URL("./cmo-ux.ts", import.meta.url), "utf8"),
+  ]);
   for (const component of ["CmoPage", "CampaignsPage", "SocialManagementPage", "CompetitorIntelligencePage", "TrendIntelligencePage"]) {
     assert.match(app, new RegExp(`component=\\{${component}\\}`));
     assert.doesNotMatch(app, new RegExp(`workspaceModule\\(${component}\\)`));
@@ -747,7 +806,8 @@ test("marketing routes are production-ungated and avoid false launch language", 
   assert.equal(marketing.includes("launched successfully"), false);
   assert.match(marketing, /integrationsApi\.registry/);
   assert.match(marketing, /integrationsApi\.connections/);
-  assert.match(marketing, /external_writes_enabled/);
-  assert.match(marketing, /No connector is registered; internal planning only/);
+  assert.match(marketing, /publishingCapability/);
+  assert.match(helpers, /external_writes_enabled/);
+  assert.match(helpers, /Publishing isn’t available for this channel yet/);
   assert.doesNotMatch(marketing, /Authenticated external writes are provider-disabled/);
 });
