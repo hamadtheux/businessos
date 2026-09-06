@@ -74,6 +74,7 @@ from app.services.creative_visual_review import (
     CreativeVisualReviewProvider,
     CreativeVisualReviewRequest,
     CreativeVisualReviewResult,
+    semantic_visual_quality_score,
     semantic_visual_review_meets_threshold,
 )
 from app.services.creative_video import (
@@ -3685,9 +3686,14 @@ async def _generate_creative_asset_value(
                     "an uncluttered copy corridor; keep all typography absent."
                 )
                 logger.info(
-                    "creative_quality_retry attempt=%d reason=raw_visual",
+                    "creative_quality_retry attempt=%d reason=raw_visual "
+                    "source=composition_exception",
                     image_attempt,
-                    extra={"attempt_number": image_attempt, "reason": "raw_visual"},
+                    extra={
+                        "attempt_number": image_attempt,
+                        "reason": "raw_visual",
+                        "source": "composition_exception",
+                    },
                 )
                 continue
             return await _fail_creative_generation(
@@ -3720,9 +3726,14 @@ async def _generate_creative_asset_value(
             if all_failed_from_raw_visual and image_attempt < max_image_attempts:
                 correction = _raw_visual_regeneration_correction()
                 logger.info(
-                    "creative_quality_retry attempt=%d reason=raw_visual",
+                    "creative_quality_retry attempt=%d reason=raw_visual "
+                    "source=deterministic_quality",
                     image_attempt,
-                    extra={"attempt_number": image_attempt, "reason": "raw_visual"},
+                    extra={
+                        "attempt_number": image_attempt,
+                        "reason": "raw_visual",
+                        "source": "deterministic_quality",
+                    },
                 )
                 continue
             return await _fail_creative_generation(
@@ -3839,6 +3850,26 @@ async def _generate_creative_asset_value(
                 break
 
             review = review_result.review
+
+            # Operational diagnosis only. These values are bounded typed
+            # classifications from the visual-review schema. Never log image
+            # bytes, prompts, Business Brain context, arbitrary repair text,
+            # credentials, provider payloads, or tenant storage identifiers.
+            logger.info(
+                "creative_visual_review_completed "
+                "repair_class=%s approved=%s score=%d hard_failures=%s",
+                review.repair_class,
+                review.approved,
+                semantic_visual_quality_score(review),
+                ",".join(review.hard_failures) or "none",
+                extra={
+                    "repair_class": review.repair_class,
+                    "approved": review.approved,
+                    "semantic_score": semantic_visual_quality_score(review),
+                    "hard_failures": ",".join(review.hard_failures) or "none",
+                },
+            )
+
             record_audit(
                 session,
                 business_id=business_id,
@@ -3876,9 +3907,14 @@ async def _generate_creative_asset_value(
             break
         if critic_raw_failure and image_attempt < max_image_attempts:
             logger.info(
-                "creative_quality_retry attempt=%d reason=raw_visual",
+                "creative_quality_retry attempt=%d reason=raw_visual "
+                "source=semantic_review",
                 image_attempt,
-                extra={"attempt_number": image_attempt, "reason": "raw_visual"},
+                extra={
+                    "attempt_number": image_attempt,
+                    "reason": "raw_visual",
+                    "source": "semantic_review",
+                },
             )
             continue
         return await _fail_creative_generation(
