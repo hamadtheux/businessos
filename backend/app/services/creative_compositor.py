@@ -82,7 +82,7 @@ class CreativeCompositionInput:
     target_height: int
     asset_type: str
     headline: str
-    supporting_copy: str
+    supporting_copy: str | None
     cta: str | None
     business_name: str
     primary_color: str | None = None
@@ -122,7 +122,8 @@ class CreativeCompositionInput:
         ):
             raise CreativeCompositionError("Final creative dimensions are unsupported")
         _bounded_text(self.headline, "headline", 180)
-        _bounded_text(self.supporting_copy, "supporting copy", 600)
+        if self.supporting_copy is not None:
+            _bounded_text(self.supporting_copy, "supporting copy", 600)
         if self.cta is not None:
             _bounded_text(self.cta, "CTA", 300)
         if self.offer is not None:
@@ -444,23 +445,24 @@ class CreativeCompositor:
             headline_fit.text,
         )
 
-        supporting_fit = self._fit_text(
-            canvas,
-            value.supporting_copy,
-            plan.supporting_box,
-            max_size=max(20, round(min(width, height) * 0.030)),
-            min_size=max(14, round(min(width, height) * 0.017)),
-            max_lines=9,
-        )
-        _verify_exact_copy(
-            "supporting copy",
-            value.supporting_copy,
-            supporting_fit.text,
-        )
-        text_bounds["supporting_copy"] = supporting_fit.bounds
-        rendered_text["supporting_copy"] = supporting_fit.text
-        font_sizes["supporting_copy"] = supporting_fit.font_size
-        line_counts["supporting_copy"] = supporting_fit.line_count
+        if value.supporting_copy is not None:
+            supporting_fit = self._fit_text(
+                canvas,
+                value.supporting_copy,
+                plan.supporting_box,
+                max_size=max(20, round(min(width, height) * 0.030)),
+                min_size=max(14, round(min(width, height) * 0.017)),
+                max_lines=9,
+            )
+            _verify_exact_copy(
+                "supporting copy",
+                value.supporting_copy,
+                supporting_fit.text,
+            )
+            text_bounds["supporting_copy"] = supporting_fit.bounds
+            rendered_text["supporting_copy"] = supporting_fit.text
+            font_sizes["supporting_copy"] = supporting_fit.font_size
+            line_counts["supporting_copy"] = supporting_fit.line_count
 
         # Capture the prepared background before drawing any typography so
         # foreground pixels can never inflate the measured contrast score.
@@ -487,7 +489,8 @@ class CreativeCompositor:
             text_color,
             stroke_width=max(0, round(headline_fit.font_size * 0.012)),
         )
-        _draw_text_fit(ImageDraw.Draw(canvas), supporting_fit, text_color)
+        if value.supporting_copy is not None:
+            _draw_text_fit(ImageDraw.Draw(canvas), supporting_fit, text_color)
 
         cta_contrast: float | None = None
         cta_fill: RGB | None = None
@@ -677,7 +680,7 @@ class CreativeCompositor:
         missing = _glyph_signature(font, "\U0010ffff")
         text_values = (
             value.headline,
-            value.supporting_copy,
+            value.supporting_copy or "",
             value.cta or "",
             value.offer or "",
             value.business_name if value.logo_content is None else "",
@@ -1292,14 +1295,15 @@ def _select_layout(
     source: Image.Image,
 ) -> LayoutFamily:
     ratio = value.target_width / value.target_height
+    supporting_length = len(value.supporting_copy or "")
     direction = f"{value.composition_direction} {value.negative_space}".casefold()
     if value.asset_type == "story_reel" or ratio <= 0.7:
         return "vertical_story"
     if ratio >= 1.45 or any(word in direction for word in ("split", "side panel")):
         return "editorial_split"
-    if len(value.supporting_copy) > 260 or len(value.headline) > 95:
+    if supporting_length > 260 or len(value.headline) > 95:
         return "framed_campaign"
-    if len(value.headline) <= 48 and len(value.supporting_copy) <= 180:
+    if len(value.headline) <= 48 and supporting_length <= 180:
         return "minimal_hero"
     luminance = ImageStat.Stat(source.resize((1, 1)).convert("L")).mean[0]
     if 70 <= luminance <= 205:
@@ -1349,7 +1353,7 @@ def _score_layout_candidate(
         score += 8 if ratio >= 1.35 else 2
 
     if family == "framed_campaign":
-        score += 6 if len(value.supporting_copy) > 220 else 1
+        score += 6 if len(value.supporting_copy or "") > 220 else 1
 
     if family in {"minimal_hero", "cinematic_overlay", "vertical_story"}:
         score += quiet_score * 10
@@ -1370,7 +1374,7 @@ def _score_layout_candidate(
             score += 18
 
     if family == "minimal_hero" and (
-        len(value.headline) > 90 or len(value.supporting_copy) > 240
+        len(value.headline) > 90 or len(value.supporting_copy or "") > 240
     ):
         score -= 12
 

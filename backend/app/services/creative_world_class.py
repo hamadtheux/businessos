@@ -18,6 +18,9 @@ WorldClassFailure = Literal[
 ]
 
 
+CreativeStoryMode = Literal["offering_proof", "brand_offer"]
+
+
 _TOKEN = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 
 _STOPWORDS: Final[frozenset[str]] = frozenset(
@@ -114,7 +117,7 @@ _DECORATIVE_MARKERS: Final[tuple[str, ...]] = (
 )
 
 
-_MECHANISM_MARKERS: Final[tuple[str, ...]] = (
+_OFFERING_MECHANISM_MARKERS: Final[tuple[str, ...]] = (
     "agent",
     "agents",
     "automation",
@@ -144,10 +147,26 @@ _MECHANISM_MARKERS: Final[tuple[str, ...]] = (
     "workflows",
 )
 
+_BRAND_OFFER_MECHANISM_MARKERS: Final[tuple[str, ...]] = (
+    "before and after",
+    "campaign mechanism",
+    "consequence",
+    "contrast",
+    "customer tension",
+    "occasion",
+    "reveal",
+    "transition",
+    "transformation",
+    "unexpected",
+    "visual reveal",
+    "visual tension",
+)
+
 
 _CUSTOMER_CAUSALITY_MARKERS: Final[tuple[str, ...]] = (
     "because",
     "causes",
+    "consequence",
     "creates",
     "delivers",
     "enables",
@@ -177,6 +196,21 @@ _VISUAL_PROOF_MARKERS: Final[tuple[str, ...]] = (
     "service in action",
     "transformation",
     "workflow",
+)
+
+_BRAND_OFFER_VISUAL_PROOF_MARKERS: Final[tuple[str, ...]] = (
+    "before and after",
+    "campaign moment",
+    "consequence",
+    "contrast",
+    "occasion",
+    "reveal",
+    "transition",
+    "transformation",
+    "unexpected",
+    "visual proof",
+    "visual reveal",
+    "visual tension",
 )
 
 
@@ -363,14 +397,25 @@ def assess_world_class_creative(
     product_story: str,
     visual_metaphor: str,
     scroll_stopping_hook: str,
+    story_mode: CreativeStoryMode = "offering_proof",
 ) -> WorldClassCreativeAssessment:
     """
     Deterministically reject attractive-but-generic advertising concepts.
 
-    This function intentionally does not ask an AI model whether a concept is good.
-    It measures whether the concept carries enough business-specific mechanism,
-    customer causality, commercial idea, and visual proof to deserve rendering.
+    ``offering_proof`` means a tenant-scoped campaign selection authoritatively
+    establishes a real catalog product/service. Visible offering proof is therefore
+    mandatory.
+
+    ``brand_offer`` means no campaign-selected catalog offering is authoritative.
+    The engine must not invent one. The compatibility field
+    ``product_service_mechanism`` then measures the strength of the grounded
+    campaign/brand mechanism instead.
+
+    Numeric quality floors remain unchanged in both modes.
     """
+
+    if story_mode not in {"offering_proof", "brand_offer"}:
+        raise ValueError("Creative story mode is invalid")
 
     strategy_text = " ".join(
         (
@@ -405,10 +450,16 @@ def assess_world_class_creative(
     subject_overlap = _overlap(concept_tokens, subject_tokens)
     business_overlap = _overlap(concept_tokens, business_tokens)
 
+    # In offering mode, only the selected offering focus may exempt a normally
+    # generic prop. In brand mode, generated subject_focus is not authoritative;
+    # only the caller's grounded business/category context may do so.
+    grounded_subject_context = (
+        subject_focus if story_mode == "offering_proof" else business_context
+    )
     lifestyle_count = _count_contextually_irrelevant_matches(
         concept_text,
         _GENERIC_LIFESTYLE_MARKERS,
-        subject_focus=subject_focus,
+        subject_focus=grounded_subject_context,
     )
     productivity_count = _count_matches(
         full_text,
@@ -417,19 +468,29 @@ def assess_world_class_creative(
     decorative_count = _count_contextually_irrelevant_matches(
         concept_text,
         _DECORATIVE_MARKERS,
-        subject_focus=subject_focus,
+        subject_focus=grounded_subject_context,
+    )
+    mechanism_markers = (
+        _OFFERING_MECHANISM_MARKERS
+        if story_mode == "offering_proof"
+        else _BRAND_OFFER_MECHANISM_MARKERS
     )
     mechanism_count = _count_matches(
         concept_text,
-        _MECHANISM_MARKERS,
+        mechanism_markers,
     )
     causality_count = _count_matches(
         f"{customer_care_reason} {product_story} {marketing_idea}",
         _CUSTOMER_CAUSALITY_MARKERS,
     )
+    proof_markers = (
+        _VISUAL_PROOF_MARKERS
+        if story_mode == "offering_proof"
+        else _BRAND_OFFER_VISUAL_PROOF_MARKERS
+    )
     proof_count = _count_matches(
         f"{hero_subject} {hero_relevance} {product_story} {scroll_stopping_hook}",
-        _VISUAL_PROOF_MARKERS,
+        proof_markers,
     )
     commercial_idea_count = _count_matches(
         f"{marketing_idea} {scroll_stopping_hook} {visual_metaphor}",
@@ -464,13 +525,28 @@ def assess_world_class_creative(
         - decorative_count * 6
     )
 
-    product_service_mechanism = _bounded(
-        24
-        + subject_overlap * 34
-        + min(40, mechanism_count * 11)
-        + min(14, proof_count * 5)
-        - lifestyle_count * 7
-    )
+    if story_mode == "offering_proof":
+        product_service_mechanism = _bounded(
+            24
+            + subject_overlap * 34
+            + min(40, mechanism_count * 11)
+            + min(14, proof_count * 5)
+            - lifestyle_count * 7
+        )
+    else:
+        # Compatibility field, different semantic meaning:
+        # strength of a grounded campaign/brand mechanism when there is no
+        # authoritative selected product/service to depict.
+        product_service_mechanism = _bounded(
+            30
+            + strategy_overlap * 30
+            + business_overlap * 22
+            + min(24, mechanism_count * 7)
+            + min(20, commercial_idea_count * 7)
+            + min(16, proof_count * 5)
+            - lifestyle_count * 7
+            - decorative_count * 6
+        )
 
     customer_causality = _bounded(
         30
@@ -552,8 +628,18 @@ def assess_world_class_creative(
     if business_specificity < 64:
         failures.append("no_business_specific_mechanism")
 
-    if product_service_mechanism < 64:
+    if (
+        story_mode == "offering_proof"
+        and product_service_mechanism < 64
+    ):
         failures.append("no_product_service_mechanism")
+
+    if (
+        story_mode == "brand_offer"
+        and product_service_mechanism < 64
+    ):
+        # Same quality bar, but do not falsely claim a missing product.
+        failures.append("weak_marketing_mechanism")
 
     if customer_causality < 58:
         failures.append("no_customer_cause_effect")
@@ -652,6 +738,74 @@ If aesthetic taste is doing the work that marketing strategy should do, it is no
 """
 
 
+WORLD_CLASS_BRAND_OFFER_DIRECTOR_CONTRACT: Final[str] = """
+WORLD-CLASS CREATIVE STANDARD — BRAND/OFFER MODE:
+
+You are not producing a decorative social-media template.
+You are creating one campaign idea that a top global creative agency could defend.
+
+No campaign-selected catalog product or service is authoritative in this mode.
+Do not invent a product, service, package, app, application, interface, UI, feature,
+integration, workflow, fulfillment process, fulfillment path, customer fact, or outcome
+merely to make the visual easier to design.
+
+Every concept must communicate, in one visual read:
+
+1. WHO the grounded campaign is for, when that is actually known.
+2. WHAT campaign promise, offer, occasion, tension, or brand idea is being expressed.
+3. HOW the visual itself makes that campaign idea understandable.
+4. WHY the intended viewer should care, using only grounded context.
+5. WHAT visual proof makes the idea specific to this campaign and business.
+
+MANDATORY:
+
+- Build an actual advertising mechanism: tension, reveal, contrast, transition,
+  consequence, occasion, transformation, or another visually executable campaign idea.
+- The visual story must stop making sense if an unrelated company replaces the brand.
+- The hero must carry commercial meaning, not merely aesthetic polish.
+- Objects and environments must be causally relevant to grounded campaign context.
+- marketing_idea must describe the advertising mechanism, not visual decoration.
+- customer_care_reason must state only a grounded viewer tension, desire, or consequence.
+- The schema field product_story must describe the grounded campaign mechanism and
+  cause -> mechanism -> outcome; it must NOT fabricate a product or service.
+- scroll_stopping_hook must be visually executable in one glance.
+- Use premium art direction only after the commercial idea is strong.
+
+AUTOMATICALLY REJECT:
+
+- invented products, services, interfaces, features, integrations, packages, or customer facts;
+- generic premium desk or workspace photography;
+- coffee cups, books, glasses, plants, stationery, laptops, or office props used only
+  to imply productivity;
+- generic lifestyle scenes that could advertise almost any company;
+- "make space", "focus on what matters", "work smarter", "peace of mind", or similar
+  generic productivity metaphors without a grounded campaign mechanism;
+- gradients, rings, circles, waves, blobs, or geometry used as the central campaign idea;
+- generic people smiling at a laptop with no grounded campaign meaning;
+- empty luxury/minimalist styling used instead of an advertising idea;
+- stock-photo compositions with brand copy placed on unused negative space;
+- a hero subject that does not visibly support the grounded campaign promise;
+- a concept that survives the swap-logo test unchanged.
+
+QUALITY BAR:
+
+If the idea would be acceptable for fifty unrelated brands, it is not acceptable here.
+If the image would still work after removing the grounded campaign story, it is not acceptable.
+If aesthetic taste is doing the work that marketing strategy should do, it is not acceptable.
+"""
+
+
+def world_class_director_contract(
+    story_mode: CreativeStoryMode,
+) -> str:
+    """Return the server-owned Creative Director contract for the active story mode."""
+    if story_mode == "offering_proof":
+        return WORLD_CLASS_DIRECTOR_CONTRACT
+    if story_mode == "brand_offer":
+        return WORLD_CLASS_BRAND_OFFER_DIRECTOR_CONTRACT
+    raise ValueError("Creative story mode is invalid")
+
+
 WORLD_CLASS_RAW_VISUAL_CONTRACT: Final[str] = """
 WORLD-CLASS RAW VISUAL STANDARD:
 
@@ -686,6 +840,53 @@ if another unrelated business could use the same scene unchanged, redesign the s
 The raw visual must make the business/category story understandable even before exact
 headline, CTA, and logo are composited.
 """
+
+
+WORLD_CLASS_BRAND_OFFER_RAW_VISUAL_CONTRACT: Final[str] = """
+WORLD-CLASS RAW VISUAL STANDARD — BRAND/OFFER MODE:
+
+Create a campaign scene, not stock decoration.
+
+No campaign-selected catalog offering is authoritative.
+Do not invent a product or service, package, app, application, fake interface, UI,
+feature, integration, workflow, fulfillment process, fulfillment path, customer fact,
+or unsupported outcome.
+
+The raw visual must instead prove the grounded campaign idea through a credible
+campaign-specific visual mechanism such as tension, contrast, reveal, transition,
+occasion, consequence, or another visually meaningful brand-owned moment supported
+by the supplied direction.
+
+Every visible object must earn its place by supporting the grounded campaign story.
+
+Do not use unrelated generic objects as shorthand for value:
+- generic premium office desks;
+- stacked books, coffee mugs, glasses, plants, pens, notebooks, laptops, or lifestyle
+  props when they are not causally relevant to the grounded campaign idea;
+- abstract gradients, rings, waves, circles, or decorative geometry as a substitute
+  for a campaign mechanism;
+- generic productivity symbolism;
+- meaningless luxury/minimal styling;
+- anonymous stock photography that could advertise an unrelated company.
+
+Apply the swap-logo test before rendering:
+if another unrelated business could use the same underlying idea substantially
+unchanged, redesign the scene.
+
+The raw visual must support the business/category/campaign story even before exact
+headline, CTA, offer copy, and logo are composited.
+"""
+
+
+def world_class_raw_visual_contract(
+    story_mode: CreativeStoryMode,
+) -> str:
+    """Return the bounded raw-renderer policy for the active story mode."""
+    if story_mode == "offering_proof":
+        return WORLD_CLASS_RAW_VISUAL_CONTRACT
+    if story_mode == "brand_offer":
+        return WORLD_CLASS_BRAND_OFFER_RAW_VISUAL_CONTRACT
+    raise ValueError("Creative story mode is invalid")
 
 
 WORLD_CLASS_VISUAL_CRITIC_CONTRACT: Final[str] = """
@@ -725,14 +926,67 @@ A technically attractive but generic image must be rejected.
 
 def world_class_regeneration_instruction(
     failures: tuple[WorldClassFailure, ...],
+    *,
+    story_mode: CreativeStoryMode = "offering_proof",
 ) -> str:
     """
     Produce server-owned correction language.
 
     Never forward private critic reasoning or arbitrary model prose.
+    Never invent an offering when the campaign has no authoritative selection.
     """
 
+    if story_mode not in {"offering_proof", "brand_offer"}:
+        raise ValueError("Creative story mode is invalid")
+
     failure_set = set(failures)
+
+    if story_mode == "brand_offer":
+        if "generic_lifestyle_stock_scene" in failure_set:
+            return (
+                "Replace the generic lifestyle or desk scene with a campaign-specific "
+                "visual mechanism tied to the grounded objective, audience, offer, "
+                "category, or brand context. Remove decorative office props. Do not "
+                "invent a product, service, package, app, interface, UI, feature, "
+                "workflow, customer fact, or outcome."
+            )
+
+        if "generic_productivity_metaphor" in failure_set:
+            return (
+                "Replace the generic productivity metaphor with a specific grounded "
+                "campaign tension, reveal, contrast, transition, occasion, or customer "
+                "consequence. Do not invent a product, service, package, app, "
+                "interface, UI, feature, workflow, integration, fulfillment process, "
+                "fulfillment path, customer fact, or outcome."
+            )
+
+        if "decorative_abstraction_as_story" in failure_set:
+            return (
+                "Remove decorative abstraction as the central idea. Build one credible "
+                "campaign-specific visual mechanism from grounded brand, objective, "
+                "audience, category, or offer context. Do not invent a product, "
+                "service, package, app, interface, UI, feature, workflow, integration, "
+                "fulfillment process, fulfillment path, customer fact, or outcome."
+            )
+
+        if "replaceable_brand_idea" in failure_set:
+            return (
+                "Redesign the hero so the campaign idea feels intentionally owned by "
+                "this business and would not work substantially unchanged for an "
+                "unrelated brand. Use only grounded campaign context and do not invent "
+                "a product, service, package, app, interface, UI, feature, workflow, "
+                "integration, fulfillment process, fulfillment path, customer fact, "
+                "or outcome."
+            )
+
+        return (
+            "Strengthen the commercial campaign idea with one grounded visual mechanism, "
+            "one viewer-relevant consequence or tension when supported, and one clear "
+            "piece of visual proof. Reject generic stock composition and decorative "
+            "filler. Do not invent a product, service, package, app, interface, UI, "
+            "feature, workflow, integration, fulfillment process, fulfillment path, "
+            "customer fact, or outcome."
+        )
 
     if "generic_lifestyle_stock_scene" in failure_set:
         return (

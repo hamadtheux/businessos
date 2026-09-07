@@ -15,6 +15,7 @@ import {
   Pause,
   Play,
   Plus,
+  RefreshCw,
   Send,
   ShieldCheck,
   Sparkles,
@@ -36,6 +37,13 @@ import {
 import {
   CmoCreativePanel,
 } from "@/features/marketing/cmo-creative-panel";
+import {
+  AIDetailsDisclosure,
+  ChannelCapabilityCard,
+  ContentLibraryCard,
+  ContentStatusBadge,
+  readableContentValue,
+} from "@/features/marketing/cmo-content-ui";
 import { CmoContentGeneratorDrawer } from "@/features/marketing/cmo-content-generator-drawer";
 import {
   channelGenerationNotice,
@@ -744,7 +752,7 @@ export function CampaignsPage() {
           </button>
         </div>
       )}
-      <Card className="intelligence-hero">
+      <Card className="intelligence-hero cmo-opportunity-plan">
         <div className="intelligence-hero-icon">
           <Target />
         </div>
@@ -1608,6 +1616,12 @@ export function SocialManagementPage() {
       ),
     enabled: Boolean(activeBusinessId && selected),
   });
+  const libraryAssets = useQuery({
+    queryKey: ["marketing", activeBusinessId, "creative-assets", "content-library"],
+    queryFn: ({ signal }) =>
+      marketingApi.creative.list(activeBusinessId, undefined, undefined, signal),
+    enabled: Boolean(activeBusinessId),
+  });
   const contentPlan = useQuery({
     queryKey: ["marketing", activeBusinessId, "automation", "content_plan"],
     queryFn: ({ signal }) =>
@@ -1620,6 +1634,9 @@ export function SocialManagementPage() {
     });
   const refreshCreatives = () => queryClient.invalidateQueries({
     queryKey: ["marketing", activeBusinessId, "creative-assets"],
+  });
+  const refreshPublishingReadiness = () => queryClient.invalidateQueries({
+    queryKey: ["integrations", activeBusinessId],
   });
   useEffect(() => {
     setCreativeActionError("");
@@ -2018,6 +2035,21 @@ export function SocialManagementPage() {
       ),
   });
   const byId = new Map(content.data?.items.map((item) => [item.id, item]));
+  const creativeByContent = new Map<string, CreativeAsset>();
+  for (const asset of libraryAssets.data ?? []) {
+    if (!asset.content_id) continue;
+    const current = creativeByContent.get(asset.content_id);
+    if (!current || new Date(asset.updated_at).getTime() > new Date(current.updated_at).getTime()) {
+      creativeByContent.set(asset.content_id, asset);
+    }
+  }
+  const scheduleByContent = new Map<string, SocialSchedule>();
+  for (const item of calendar.data ?? []) {
+    const current = scheduleByContent.get(item.content_id);
+    if (!current || new Date(item.scheduled_for).getTime() < new Date(current.scheduled_for).getTime()) {
+      scheduleByContent.set(item.content_id, item);
+    }
+  }
   const selectedConnector = integrationRegistry.data?.find(
     (item) => item.connector_type === selected?.channel,
   );
@@ -2056,6 +2088,7 @@ export function SocialManagementPage() {
     createVideoBrief.isPending ||
     regenerate.isPending ||
     move.isPending ||
+    createSchedule.isPending ||
     preparePublish.isPending;
   const startCreativeOperation = (operation: () => void) => {
     if (postWorkspaceBusy || creativeOperationLock.current) return;
@@ -2261,7 +2294,10 @@ export function SocialManagementPage() {
           <Button
             variant="primary"
             disabled={postWorkspaceBusy}
-            onClick={() => setSchedule(selected)}
+            onClick={() => {
+              setError("");
+              setSchedule(selected);
+            }}
           >
             <Calendar /> Schedule
           </Button>
@@ -2273,7 +2309,7 @@ export function SocialManagementPage() {
               disabled={postWorkspaceBusy}
               onClick={() => preparePublish.mutate(selected)}
             >
-              <Send /> Prepare publish
+              <Send /> Prepare governed publish
             </Button>
           )}
       </div>
@@ -2327,34 +2363,75 @@ export function SocialManagementPage() {
           </button>
         </div>
       )}
-      <Card className="intelligence-hero">
+      <Card className="intelligence-hero cmo-content-plan">
         <div className="intelligence-hero-icon">
-          <Wand2 />
+          {contentPlan.isLoading || contentPlan.isFetching || refreshContentPlan.isPending ? (
+            <RefreshCw className="spin" />
+          ) : contentPlan.isError ? (
+            <AlertCircle />
+          ) : (
+            <Wand2 />
+          )}
         </div>
         <div className="row-main">
           <div className="eyebrow">Weekly content plan</div>
           <h2>
-            {contentPlan.data
-              ? `${contentPlan.data.proposal_count} draft proposal${contentPlan.data.proposal_count === 1 ? "" : "s"} prepared in this window`
-              : "AI fills missing recommended slots with bounded drafts"}
+            {contentPlan.isLoading
+              ? "Loading your content plan…"
+              : contentPlan.isError
+                ? "Content plan could not load"
+                : contentPlan.data
+              ? `${contentPlan.data.proposal_count} draft proposal${contentPlan.data.proposal_count === 1 ? "" : "s"} in this content window`
+              : "Plan the next content window"}
           </h2>
           <p className="subtle">
-            {contentPlan.data
-              ? `Latest run is ${contentPlan.data.status.replaceAll("_", " ")}. Proposals are never marked published.`
-              : "No completed plan yet. If AI configuration is missing, this section reports configuration required without affecting stored content."}
+            {contentPlan.isError
+              ? humanizeApiError(
+                  contentPlan.error,
+                  "Retry the content plan. Your saved content is still available.",
+                )
+              : contentPlan.data
+              ? `Latest plan is ${contentPlan.data.status.replaceAll("_", " ")}. Every proposal stays reviewable.`
+              : "Generate grounded draft ideas without publishing or changing existing content."}
           </p>
         </div>
         <Button
-          variant="green"
-          disabled={refreshContentPlan.isPending}
-          onClick={() => refreshContentPlan.mutate()}
+          variant="secondary"
+          disabled={
+            contentPlan.isLoading ||
+            contentPlan.isFetching ||
+            refreshContentPlan.isPending
+          }
+          onClick={() => {
+            if (contentPlan.isError) {
+              void contentPlan.refetch();
+              return;
+            }
+            refreshContentPlan.mutate();
+          }}
         >
-          <Sparkles />{" "}
-          {refreshContentPlan.isPending
-            ? "Scheduling…"
-            : "Refresh content plan"}
+          {contentPlan.isError ? <RefreshCw /> : <Sparkles />} {" "}
+          {contentPlan.isLoading || contentPlan.isFetching
+            ? "Loading…"
+            : refreshContentPlan.isPending
+              ? contentPlan.data ? "Refreshing…" : "Creating…"
+              : contentPlan.isError
+                ? "Retry plan"
+                : contentPlan.data ? "Refresh plan" : "Create content plan"}
         </Button>
       </Card>
+      {(integrationRegistry.isError || integrationConnections.isError) && (
+        <div className="cmo-content-query-state is-error" role="alert" aria-live="assertive">
+          <AlertCircle />
+          <div className="row-main">
+            <strong>Publishing readiness could not be verified</strong>
+            <span>Drafting, review, and internal scheduling remain available.</span>
+          </div>
+          <Button className="btn-sm" onClick={() => void refreshPublishingReadiness()}>
+            <RefreshCw /> Retry readiness
+          </Button>
+        </div>
+      )}
       <div className="social-channel-strip">
         {["instagram", "facebook", "linkedin", "tiktok"].map((platform) => {
           const Icon =
@@ -2365,10 +2442,6 @@ export function SocialManagementPage() {
           const connection = integrationConnections.data?.find(
             (item) => item.connector_type === platform,
           );
-          const healthy =
-            connection?.status === "connected" &&
-            connection.authentication_state === "authorized" &&
-            connection.health === "healthy";
           const needsAttention = Boolean(
             connection &&
               ["degraded", "reauth_required", "revoked"].includes(
@@ -2383,28 +2456,44 @@ export function SocialManagementPage() {
             failed: integrationRegistry.isError || integrationConnections.isError,
           });
           const writeReady = capability.canPrepare;
-          const copy = capability.copy;
+          const statusLabel = needsAttention
+            ? "Needs attention"
+            : capability.state === "ready"
+              ? "Publishing ready"
+              : capability.state === "checking"
+                ? "Checking readiness"
+                : capability.state === "unverified"
+                  ? "Readiness unknown"
+                  : capability.state === "unavailable"
+                    ? "Connection required"
+                    : "Planning only";
+          const capabilityTone = writeReady
+            ? "success"
+            : needsAttention
+              ? "danger"
+              : capability.state === "unverified" || capability.state === "unavailable"
+                ? "warning"
+                : "neutral";
           return (
-            <Card key={platform} className="social-channel">
-              <Icon />
-              <div className="row-main">
-                <strong>{platform}</strong>
-                <span>{copy}</span>
-              </div>
-              <Badge tone={writeReady ? "success" : needsAttention ? "danger" : healthy ? "warning" : "neutral"}>
-                {healthy
-                  ? writeReady
-                    ? "Write ready"
-                    : "Publish disabled"
-                  : needsAttention
-                    ? "Needs attention"
-                    : definition?.setup_status.replaceAll("_", " ") || "Planning only"}
-              </Badge>
-            </Card>
+            <ChannelCapabilityCard
+              key={platform}
+              icon={<Icon />}
+              label={platform}
+              status={statusLabel}
+              capability={capability}
+              tone={capabilityTone}
+            />
           );
         })}
       </div>
-      <div className="tabs">
+      <div className="cmo-content-library-heading">
+        <div>
+          <div className="eyebrow">Content library</div>
+          <h2>Review and prepare channel content</h2>
+        </div>
+        <span>{content.data?.total ?? 0} item{content.data?.total === 1 ? "" : "s"}</span>
+      </div>
+      <div className="tabs cmo-content-filters" role="tablist" aria-label="Filter content by status">
         {[
           "",
           "draft",
@@ -2416,6 +2505,8 @@ export function SocialManagementPage() {
         ].map((item) => (
           <button
             className={`tab ${status === item ? "active" : ""}`}
+            role="tab"
+            aria-selected={status === item}
             onClick={() => {
               setStatus(item as MarketingContentStatus | "");
               setPage(1);
@@ -2426,6 +2517,28 @@ export function SocialManagementPage() {
           </button>
         ))}
       </div>
+      {libraryAssets.isError ? (
+        <div className="cmo-content-query-state is-error" role="alert" aria-live="assertive">
+          <AlertCircle />
+          <div className="row-main">
+            <strong>Creative previews could not load</strong>
+            <span>
+              {humanizeApiError(
+                libraryAssets.error,
+                "Content is still available. Retry visual previews when ready.",
+              )}
+            </span>
+          </div>
+          <Button className="btn-sm" onClick={() => void libraryAssets.refetch()}>
+            <RefreshCw /> Retry previews
+          </Button>
+        </div>
+      ) : libraryAssets.isLoading ? (
+        <div className="cmo-content-query-state" role="status" aria-live="polite">
+          <RefreshCw className="spin" />
+          <span>Loading creative previews…</span>
+        </div>
+      ) : null}
       {content.isError ? (
         <ErrorCard error={content.error} retry={() => void content.refetch()} />
       ) : (
@@ -2447,88 +2560,43 @@ export function SocialManagementPage() {
                 failed: integrationRegistry.isError || integrationConnections.isError,
               });
               return (
-                <Card className="social-post" key={post.id}>
-                  <div className="social-post-head">
-                    <span className="platform-icon">
-                      <Icon />
-                    </span>
-                    <div>
-                      <strong>{post.channel}</strong>
-                      <div className="row-copy">
-                        {post.ai_generated
-                          ? "AI recommended"
-                          : "Manual fallback"}{" "}
-                        · {post.content_type.replaceAll("_", " ")} · version{" "}
-                        {post.version}
-                      </div>
-                    </div>
-                    <Badge
-                      tone={
-                        post.status === "approved" ||
-                        post.status === "ready_to_publish"
-                          ? "success"
-                          : post.status === "review"
-                            ? "warning"
-                            : "neutral"
-                      }
-                    >
-                      {post.status.replaceAll("_", " ")}
-                    </Badge>
-                  </div>
-                  <h3>{post.title}</h3>
-                  <p className="social-copy">{post.body}</p>
-                  {post.recommended_for && (
-                    <div className="row-copy">
-                      Recommended for · {post.recommended_for}
-                    </div>
-                  )}
-                  {post.cta && (
-                    <div className="recommendation-strip">
-                      <Target />
-                      <div>
-                        <div className="eyebrow">CTA</div>
-                        <p>{post.cta}</p>
-                      </div>
-                    </div>
-                  )}
-                  <div className="toolbar">
-                    <Button
-                      variant="soft"
-                      className="btn-sm"
-                      onClick={() => setSelected(post)}
-                    >
-                      <Eye /> Review
-                    </Button>
-                    {post.status === "approved" && (
-                      <Button
-                        variant="green"
-                        className="btn-sm"
-                        onClick={() => setSchedule(post)}
-                      >
-                        <Calendar /> Schedule
-                      </Button>
-                    )}
-                    {postPublishCapability.canPrepare &&
-                      ["approved", "scheduled", "ready_to_publish"].includes(
-                        post.status,
-                      ) && (
-                        <Button
-                          variant="primary"
-                          className="btn-sm"
-                          disabled={preparePublish.isPending}
-                          onClick={() => preparePublish.mutate(post)}
-                        >
-                          <Send /> Prepare governed publish
-                        </Button>
-                      )}
-                  </div>
-                </Card>
+                <ContentLibraryCard
+                  key={post.id}
+                  content={post}
+                  icon={<Icon />}
+                  creative={creativeByContent.get(post.id)}
+                  schedule={scheduleByContent.get(post.id)}
+                  capability={postPublishCapability}
+                  busy={
+                    regenerate.isPending ||
+                    move.isPending ||
+                    createSchedule.isPending ||
+                    preparePublish.isPending
+                  }
+                  onOpen={() => {
+                    setError("");
+                    setPostWorkspaceMode("overview");
+                    setSelected(post);
+                  }}
+                  onEdit={() => {
+                    setError("");
+                    setSelected(post);
+                    setPostWorkspaceMode("edit");
+                  }}
+                  onRegenerate={() => regenerate.mutate(post)}
+                  onSchedule={() => {
+                    setError("");
+                    setSchedule(post);
+                  }}
+                  onPreparePublish={() => preparePublish.mutate(post)}
+                />
               );
             })}
             {content.isLoading && (
-              <Card>
-                <div className="empty">
-                  <p>Loading content…</p>
+              <Card className="cmo-content-loading-card">
+                <div className="empty" role="status" aria-live="polite">
+                  <RefreshCw className="spin" />
+                  <p>Loading content library…</p>
                 </div>
               </Card>
             )}
@@ -2558,12 +2626,12 @@ export function SocialManagementPage() {
           )}
         </>
       )}
-      <Card style={{ marginTop: 20 }}>
+      <Card className="cmo-calendar-management">
         <SectionTitle
           title="Upcoming internal calendar"
           action={
             <div className="toolbar">
-              <div className="tabs">
+              <div className="tabs cmo-calendar-range-tabs" role="tablist" aria-label="Calendar range">
                 {(
                   [
                     [1, "Day"],
@@ -2573,6 +2641,8 @@ export function SocialManagementPage() {
                 ).map(([days, label]) => (
                   <button
                     className={`tab ${calendarDays === days ? "active" : ""}`}
+                    role="tab"
+                    aria-selected={calendarDays === days}
                     key={days}
                     onClick={() => setCalendarDays(days)}
                   >
@@ -2584,7 +2654,7 @@ export function SocialManagementPage() {
             </div>
           }
         />
-        <div className="table-toolbar">
+        <div className="table-toolbar cmo-calendar-toolbar">
           <div className="toolbar">
             <select
               aria-label="Filter calendar by channel"
@@ -2625,7 +2695,7 @@ export function SocialManagementPage() {
           />
         ) : (
           calendar.data?.map((item) => (
-            <div className="list-row" key={item.id}>
+            <div className="list-row cmo-calendar-manage-row" key={item.id}>
               <Calendar />
               <div className="row-main">
                 <strong>
@@ -2638,6 +2708,7 @@ export function SocialManagementPage() {
                 </div>
               </div>
               <input
+                className="cmo-calendar-reschedule"
                 aria-label="Reschedule date"
                 type="datetime-local"
                 defaultValue={new Date(item.scheduled_for)
@@ -2647,18 +2718,23 @@ export function SocialManagementPage() {
                   event.target.value &&
                   reschedule.mutate({ item, value: event.target.value })
                 }
+                disabled={reschedule.isPending || unschedule.isPending}
               />
               <Button
                 className="btn-sm"
                 onClick={() => unschedule.mutate(item)}
-                disabled={unschedule.isPending}
+                disabled={reschedule.isPending || unschedule.isPending}
               >
                 Unschedule
               </Button>
             </div>
           ))
         )}
-        {calendar.isLoading && <p className="subtle">Loading calendar…</p>}
+        {calendar.isLoading && (
+          <div className="cmo-calendar-management-loading" role="status" aria-live="polite">
+            <RefreshCw className="spin" /> Loading calendar…
+          </div>
+        )}
         {calendar.data && !calendar.data.length && (
           <div className="empty">
             <Calendar />
@@ -2707,7 +2783,7 @@ export function SocialManagementPage() {
               ? "Create a new immutable version while preserving the current post in history."
               : postWorkspaceMode === "creative_brief"
                 ? "Prepare grounded visual direction for this post using the existing creative workflow."
-                : `${selected.channel.replaceAll("_", " ")} · ${selected.status.replaceAll("_", " ")} · Version ${selected.version}`
+                : `${readableContentValue(selected.channel)} · ${readableContentValue(selected.status)} · Version ${selected.version}`
         }
         onClose={closePostWorkspace}
         closeDisabled={postWorkspaceBusy}
@@ -2722,31 +2798,34 @@ export function SocialManagementPage() {
                 <div>
                   <div className="eyebrow">Post preview</div>
                   <h2 id="cmo-post-preview-heading">
-                    {selected.channel.replaceAll("_", " ")} post
+                    {readableContentValue(selected.channel)} post
                   </h2>
                 </div>
-                <Badge tone={selected.status === "approved" || selected.status === "ready_to_publish" ? "success" : selected.status === "review" ? "info" : "neutral"}>
-                  {selected.status.replaceAll("_", " ")}
-                </Badge>
+                <ContentStatusBadge status={selected.status} />
               </div>
               <article className="cmo-post-preview" data-testid="cmo-post-preview">
                 <div className="cmo-post-preview-platform">
                   <span className="platform-icon"><SelectedPlatformIcon /></span>
                   <div>
-                    <strong>{selected.channel.replaceAll("_", " ")}</strong>
+                    <strong>{readableContentValue(selected.channel)}</strong>
                     <span>{selected.ai_generated ? "AI CMO generated" : "User authored"} · Version {selected.version}</span>
                   </div>
                 </div>
                 <div className="cmo-post-copy">
                   <div className="eyebrow">Post copy</div>
                   <h3>{selected.title}</h3>
+                  <div className="cmo-post-meta" aria-label="Content information">
+                    <span>{readableContentValue(selected.content_type)}</span>
+                    <span>{selected.language.toUpperCase()}</span>
+                    <span>Updated {new Date(selected.updated_at).toLocaleDateString()}</span>
+                  </div>
                   <div className="cmo-post-caption">
                     <span>Caption</span>
                     <p>{selected.body}</p>
                   </div>
                   {selected.cta && (
                     <div className="cmo-post-cta">
-                      <span>CTA</span>
+                      <span>Call to action</span>
                       <strong>{selected.cta}</strong>
                     </div>
                   )}
@@ -2826,6 +2905,16 @@ export function SocialManagementPage() {
                   </button>
                 ))}
               </div>
+            </section>
+
+            <section className="cmo-post-workspace-section" aria-labelledby="cmo-post-ai-heading">
+              <div className="cmo-post-workspace-section-heading cmo-post-workspace-section-heading-compact">
+                <div>
+                  <div className="eyebrow">AI details</div>
+                  <h2 id="cmo-post-ai-heading">Direction and grounding</h2>
+                </div>
+              </div>
+              <AIDetailsDisclosure content={selected} />
             </section>
 
             <section className="cmo-post-workspace-section" aria-labelledby="cmo-post-governance-heading">

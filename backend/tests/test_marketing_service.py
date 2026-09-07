@@ -46,7 +46,11 @@ from app.services.marketing import (  # noqa: E402
     _allocate_budget,
     _contains_creative_instruction_copy,
     _execute_creative_strategy,
+    _creative_story_mode,
+    _creative_variation_direction,
     _normalize_generated_cta,
+    _raw_visual_regeneration_correction,
+    _supporting_copy_for_composition,
     _page,
     _term,
     analyze_competitor,
@@ -363,6 +367,132 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
             ),
             "Book Now",
         )
+
+    def test_supporting_copy_deduplication_preserves_exact_primary_values(self) -> None:
+        headline = "50% Off"
+        offer = "50% off"
+        supporting = "Enjoy your special offer: 50% off."
+        self.assertIsNone(
+            _supporting_copy_for_composition(
+                supporting,
+                headline=headline,
+                offer=offer,
+            )
+        )
+        self.assertEqual(headline, "50% Off")
+        self.assertEqual(offer, "50% off")
+        useful = "Build a calmer week while keeping every customer handoff visible."
+        self.assertEqual(
+            _supporting_copy_for_composition(
+                useful,
+                headline=headline,
+                offer=offer,
+            ),
+            useful,
+        )
+
+    def test_variation_and_retry_directions_are_mode_safe(self) -> None:
+        alternate = _creative_variation_direction(
+            {"variation_mode": "alternate_composition"},
+            story_mode="brand_offer",
+        )
+        self.assertIsNotNone(alternate)
+        self.assertIn("spatial rhythm", alternate or "")
+        self.assertIn("camera framing", alternate or "")
+        self.assertIn("hero placement", alternate or "")
+        self.assertIn("copy corridor", alternate or "")
+
+        product_led = _creative_variation_direction(
+            {"variation_mode": "product_led"},
+            story_mode="brand_offer",
+        )
+        outcome_led = _creative_variation_direction(
+            {"variation_mode": "outcome_led"},
+            story_mode="brand_offer",
+        )
+        self.assertIn("without inventing a product or service", product_led or "")
+        self.assertIn("unsupported outcome", outcome_led or "")
+        self.assertNotIn("supported product", product_led or "")
+
+        offering = _creative_variation_direction(
+            {"variation_mode": "product_led"},
+            story_mode="offering_proof",
+        )
+        self.assertIn("supported product or service", offering or "")
+
+        brand_retry = _raw_visual_regeneration_correction(
+            _visual_review(
+                approved=False,
+                repair_class="raw_visual",
+                commercially_weak=True,
+                hard_failures=("commercially_weak",),
+                repair_instructions="Provider-authored text must not leak.",
+            ),
+            story_mode="brand_offer",
+        )
+        self.assertIn("Do not invent a product", brand_retry)
+        self.assertNotIn("supported product", brand_retry.casefold())
+        self.assertNotIn("product moment", brand_retry.casefold())
+        self.assertNotIn("service moment", brand_retry.casefold())
+
+    async def test_creative_story_mode_is_tenant_campaign_and_catalog_scoped(self) -> None:
+        no_campaign = _ScalarSession([])
+        self.assertEqual(
+            await _creative_story_mode(
+                no_campaign,
+                business_id=BUSINESS_ID,
+                campaign_id=None,
+            ),
+            "brand_offer",
+        )
+        self.assertEqual(no_campaign.scalar_statements, [])
+
+        campaign_id = uuid4()
+        no_selection = _ScalarSession([None])
+        self.assertEqual(
+            await _creative_story_mode(
+                no_selection,
+                business_id=BUSINESS_ID,
+                campaign_id=campaign_id,
+            ),
+            "brand_offer",
+        )
+        statement_text = str(no_selection.scalar_statements[0]).casefold()
+        for required in (
+            "marketing_campaigns",
+            "campaign_product_selections",
+            "catalog_items",
+            "marketing_campaigns.business_id",
+            "campaign_product_selections.business_id",
+            "catalog_items.business_id",
+            "catalog_items.status !=",
+            "catalog_items.item_type in",
+        ):
+            self.assertIn(required, statement_text)
+
+        # A wrong-tenant selection or archived item produces no selected id
+        # under the scoped SQL above, and therefore cannot switch modes.
+        for label in ("wrong tenant", "archived item"):
+            with self.subTest(label=label):
+                self.assertEqual(
+                    await _creative_story_mode(
+                        _ScalarSession([None]),
+                        business_id=BUSINESS_ID,
+                        campaign_id=campaign_id,
+                    ),
+                    "brand_offer",
+                )
+
+        for item_type in ("product", "service"):
+            with self.subTest(item_type=item_type):
+                self.assertEqual(
+                    await _creative_story_mode(
+                        _ScalarSession([uuid4()]),
+                        business_id=BUSINESS_ID,
+                        campaign_id=campaign_id,
+                    ),
+                    "offering_proof",
+                )
 
     async def test_campaign_uses_trusted_business_currency(self) -> None:
         business = Business(id=BUSINESS_ID, name="Acme", slug="acme", business_type="retail", status="active", timezone="UTC", currency="PKR", locale="en", created_at=NOW, updated_at=NOW)
@@ -1382,8 +1512,11 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         request = provider.generate_draft.await_args.args[0]
         self.assertEqual(request.business_id, BUSINESS_ID)
         self.assertEqual(request.creative_asset_id, asset.id)
-        self.assertIn("Editorial product scene", request.instructions)
-        self.assertIn("Premium product-first launch", request.instructions)
+        # With no authoritative campaign/catalog selection this is brand mode:
+        # product-centric AI strategy prose is not forwarded as offering proof.
+        self.assertIn("campaign-specific category scene", request.instructions)
+        self.assertNotIn("Editorial product scene", request.instructions)
+        self.assertNotIn("Premium product-first launch", request.instructions)
 
         # Exact customer-facing typography is deliberately withheld from the
         # raw image model and will be placed by the deterministic compositor.
@@ -1508,6 +1641,245 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         to_thread.assert_awaited_once()
         self.assertIs(to_thread.await_args.args[0], compose_candidates)
         compose_candidates.assert_called_once_with(to_thread.await_args.args[1])
+
+    async def test_duplicate_supporting_copy_is_suppressed_before_composition(self) -> None:
+        strategy = _creative_strategy()
+        strategy.update(
+            {
+                "headline": "A better season starts here",
+                "supporting_message": "Enjoy your special offer: 50% off.",
+                "offer": "50% off",
+                "claim_source": "owner_provided_campaign_input",
+            }
+        )
+        asset = _creative_asset(visual_direction=json.dumps(strategy))
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        candidate = _composed_candidate("minimal_hero", color=(10, 20, 30))
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
+        )
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(candidate,),
+            ) as compose,
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None, asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                storage=_ObjectStorage(),
+            )
+
+        self.assertEqual(generated.generation_status, "ready")
+        composition_input = compose.call_args.args[0]
+        self.assertIsNone(composition_input.supporting_copy)
+        self.assertEqual(composition_input.headline, "A better season starts here")
+        self.assertEqual(composition_input.offer, "50% off")
+        self.assertEqual(image_provider.generate_draft.await_count, 1)
+
+    async def test_duplicate_only_semantic_rejection_never_buys_second_image(self) -> None:
+        asset = _creative_asset()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        candidate = _composed_candidate("minimal_hero", color=(10, 20, 30))
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
+        )
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(
+                return_value=_visual_result(
+                    _visual_review(
+                        approved=False,
+                        repair_class="layout",
+                        duplicated_message=True,
+                        hard_failures=("duplicated_message",),
+                        repair_instructions="Suppress repeated deterministic copy.",
+                    )
+                )
+            ),
+        )
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(candidate,),
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                storage=_ObjectStorage(),
+                max_image_attempts=2,
+            )
+
+        self.assertEqual(generated.generation_status, "failed")
+        self.assertEqual(image_provider.generate_draft.await_count, 1)
+        self.assertEqual(reviewer.review.await_count, 1)
+        self.assertEqual(reviewer.review.await_args.args[0].review_mode, "brand_offer")
+
+    async def test_selected_catalog_offering_reaches_visual_review_as_offering_proof(self) -> None:
+        asset = _creative_asset()
+        asset.campaign_id = uuid4()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(return_value=_visual_result(_visual_review())),
+        )
+        candidate = _composed_candidate("minimal_hero", color=(10, 20, 30))
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
+        )
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(candidate,),
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession(
+                    [asset, _business_record(), None, uuid4(), asset]
+                ),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                storage=_ObjectStorage(),
+                require_semantic_review=True,
+            )
+
+        self.assertEqual(generated.generation_status, "ready")
+        self.assertEqual(
+            reviewer.review.await_args.args[0].review_mode,
+            "offering_proof",
+        )
+
+    async def test_brand_review_mode_contradiction_fails_closed_without_raw_retry(self) -> None:
+        asset = _creative_asset()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(
+                return_value=_visual_result(
+                    _visual_review(
+                        approved=False,
+                        repair_class="raw_visual",
+                        no_product_service_story=True,
+                        hard_failures=("no_product_service_story",),
+                        repair_instructions="Invent a missing offering.",
+                    )
+                )
+            ),
+        )
+        candidate = _composed_candidate("minimal_hero", color=(10, 20, 30))
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=88,
+        )
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(candidate,),
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=approved,
+            ),
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                storage=_ObjectStorage(),
+                max_image_attempts=2,
+                require_semantic_review=True,
+            )
+
+        self.assertEqual(generated.generation_status, "failed")
+        self.assertEqual(image_provider.generate_draft.await_count, 1)
+        self.assertEqual(reviewer.review.await_count, 1)
+
+    async def test_director_output_budget_cannot_exceed_four_thousand(self) -> None:
+        asset = _creative_asset()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(),
+        )
+        with self.assertRaises(MarketingValidationError):
+            await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                storage=_ObjectStorage(),
+                director_max_output_tokens=4_001,
+            )
+        image_provider.generate_draft.assert_not_awaited()
 
     async def test_visual_layout_rejection_uses_next_local_candidate_without_new_image(self) -> None:
         asset = _creative_asset()

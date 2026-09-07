@@ -41,7 +41,10 @@ from app.services.creative_brand_identity import (
     CreativeBrandIdentity,
     build_creative_brand_identity,
 )
-from app.services.creative_world_class import WORLD_CLASS_RAW_VISUAL_CONTRACT
+from app.services.creative_world_class import (
+    CreativeStoryMode,
+    world_class_raw_visual_contract,
+)
 from app.services.creative_compositor import (
     CreativeCompositionError,
     CreativeCompositionInput,
@@ -76,6 +79,7 @@ from app.services.creative_visual_review import (
     CreativeVisualReviewResult,
     semantic_visual_quality_score,
     semantic_visual_review_meets_threshold,
+    validate_visual_review_for_mode,
 )
 from app.services.creative_video import (
     VideoGenerationProvider,
@@ -167,6 +171,27 @@ _PROMOTIONAL_CLAIM = re.compile(
     r"\b\d{1,3}(?:\.\d+)?\s*%\s*(?:off|discount)\b",
     re.IGNORECASE,
 )
+
+_COPY_SIGNAL_TOKEN = re.compile(r"[^\W_]+", re.UNICODE)
+_COPY_DUPLICATION_FILLER = frozenset(
+    {
+        "a",
+        "an",
+        "enjoy",
+        "get",
+        "our",
+        "special",
+        "the",
+        "this",
+        "today",
+        "your",
+        # These label an already-rendered promotion but add no new commercial
+        # meaning to its exact value (for example, "special offer: 50% off").
+        "deal",
+        "offer",
+        "promotion",
+    }
+)
 _CREATIVE_INSTRUCTION_AS_COPY = re.compile(
     r"^\s*(?:please\s+)?(?:create|design|generate|render|compose|place|position|use)\b"
     r".{0,180}\b(?:ad|advert|background|camera|composition|creative|graphic|image|"
@@ -241,6 +266,40 @@ _NO_CTA_CAPABILITIES = _CTACapabilities()
 def _normalized_claim(value: str | None) -> str | None:
     normalized = " ".join((value or "").split())
     return normalized or None
+
+
+def _copy_signal(value: str | None) -> tuple[str, ...]:
+    """Return conservative meaning-bearing tokens for copy deduplication."""
+    return tuple(
+        token
+        for token in _COPY_SIGNAL_TOKEN.findall((value or "").casefold())
+        if token not in _COPY_DUPLICATION_FILLER
+    )
+
+
+def _supporting_copy_for_composition(
+    supporting_copy: str,
+    *,
+    headline: str,
+    offer: str | None,
+) -> str | None:
+    """
+    Suppress model-authored supporting copy that adds no commercial meaning.
+
+    The exact owner-authorized offer and headline are never rewritten. The
+    compositor simply omits the lower-priority AI supporting line when its
+    conservative semantic signature is identical to either exact element.
+    """
+    candidate_signal = _copy_signal(supporting_copy)
+    if not candidate_signal:
+        return supporting_copy
+
+    for exact_value in (headline, offer):
+        exact_signal = _copy_signal(exact_value)
+        if exact_signal and candidate_signal == exact_signal:
+            return None
+
+    return supporting_copy
 
 
 def _campaign_offer_claim(campaign: Campaign | None) -> tuple[str | None, str]:
@@ -384,6 +443,59 @@ async def _trusted_cta_capabilities(
         # appointment type. Tenant-wide bookability must not authorize Book Now.
         can_book=False,
     )
+
+
+async def _creative_story_mode(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    campaign_id: UUID | None,
+) -> CreativeStoryMode:
+    """
+    Resolve the semantic-review standard from authoritative tenant-owned data.
+
+    AI-generated strategy prose never decides whether product/service proof is
+    required. Only a real campaign selection linked to a non-archived catalog
+    product/service enables offering_proof mode.
+    """
+    if campaign_id is None:
+        return "brand_offer"
+
+    statement = (
+        select(CatalogItem.id)
+        .select_from(Campaign)
+        .join(
+            CampaignProductSelection,
+            and_(
+                CampaignProductSelection.campaign_id == Campaign.id,
+                CampaignProductSelection.business_id == Campaign.business_id,
+            ),
+        )
+        .join(
+            CatalogItem,
+            and_(
+                CampaignProductSelection.catalog_item_id == CatalogItem.id,
+                CampaignProductSelection.business_id == CatalogItem.business_id,
+            ),
+        )
+        .where(
+            Campaign.id == campaign_id,
+            Campaign.business_id == business_id,
+            CatalogItem.business_id == business_id,
+            CampaignProductSelection.business_id == business_id,
+            CampaignProductSelection.campaign_id == campaign_id,
+            CatalogItem.item_type.in_(("product", "service")),
+            CatalogItem.status != "archived",
+        )
+        .limit(1)
+    )
+
+    try:
+        selected_offering_id = await session.scalar(statement)
+    except SQLAlchemyError:
+        raise MarketingPersistenceError from None
+
+    return "offering_proof" if selected_offering_id is not None else "brand_offer"
 
 
 def _page(page: int, page_size: int) -> tuple[int, int]:
@@ -2929,6 +3041,7 @@ def _creative_visual_generation_instructions(
     research_context: PublicCreativeResearchContext,
     aspect_ratio: str,
     brand_identity: CreativeBrandIdentity,
+    story_mode: CreativeStoryMode = "offering_proof",
     correction: str | None = None,
 ) -> str:
     """
@@ -2953,6 +3066,7 @@ def _creative_visual_generation_instructions(
         primary_color=brand_identity.primary_color,
         secondary_color=brand_identity.secondary_color,
         accent_color=brand_identity.accent_color,
+        story_mode=story_mode,
         correction=correction,
     )
 
@@ -3007,7 +3121,7 @@ def _creative_visual_generation_instructions(
     fixed_sections = tuple(
         section
         for section in (
-            WORLD_CLASS_RAW_VISUAL_CONTRACT.strip(),
+            world_class_raw_visual_contract(story_mode).strip(),
             brand_identity.provider_palette_instruction().strip(),
             correction_section,
             mandatory_renderer_safety,
@@ -3071,7 +3185,11 @@ def _creative_visual_generation_instructions(
 
     required_markers = (
         "swap-logo",
-        "actual supported product",
+        (
+            "actual supported product"
+            if story_mode == "offering_proof"
+            else "do not invent a product or service"
+        ),
         "do not imitate or reproduce",
         "no letters, words, numbers",
         "real tenant logo",
@@ -3102,6 +3220,7 @@ async def _creative_direction_with_fallback(
     context: PublicCreativeResearchContext,
     provider: AIAgentProvider | None,
     max_output_tokens: int,
+    story_mode: CreativeStoryMode = "offering_proof",
 ) -> tuple[CreativeDirectionPlan, AIAgentProviderMetadata]:
     """Use one trusted typed runtime call, then degrade to internal patterns."""
     empty_metadata = AIAgentProviderMetadata()
@@ -3116,6 +3235,7 @@ async def _creative_direction_with_fallback(
                     strategy=strategy,
                     research=research,
                     context=context,
+                    story_mode=story_mode,
                 ),
                 provider=provider,
                 source="deterministic_fallback",
@@ -3127,6 +3247,7 @@ async def _creative_direction_with_fallback(
         strategy=strategy,
         research=research,
         context=context,
+        story_mode=story_mode,
     )
     request = await _build_cmo_execution_request(session, business_id, task)
     try:
@@ -3142,6 +3263,7 @@ async def _creative_direction_with_fallback(
             strategy=strategy,
             research=research,
             context=context,
+            story_mode=story_mode,
             synthesis=execution.output,
         )
     except AIAgentError:
@@ -3159,6 +3281,7 @@ async def _creative_direction_with_fallback(
                     strategy=strategy,
                     research=research,
                     context=context,
+                    story_mode=story_mode,
                 ),
                 provider=provider,
                 source="provider_failure_fallback",
@@ -3180,6 +3303,7 @@ async def _creative_direction_with_fallback(
                     strategy=strategy,
                     research=research,
                     context=context,
+                    story_mode=story_mode,
                 ),
                 provider=provider,
                 source="low_quality_ai_fallback",
@@ -3474,7 +3598,7 @@ async def _generate_creative_asset_value(
         not 1 <= max_image_attempts <= 2
         or not 1 <= max_composition_attempts <= 5
         or not 60 <= quality_threshold <= 95
-        or not 1_000 <= director_max_output_tokens <= 6_000
+        or not 1_000 <= director_max_output_tokens <= 4_000
         or not 0 <= max_visual_review_calls <= 2
     ):
         raise MarketingValidationError
@@ -3508,6 +3632,15 @@ async def _generate_creative_asset_value(
             actor_user_id=actor_user_id,
             stage="semantic_review",
         )
+
+    campaign_context_id = value.campaign_id or (
+        content.campaign_id if content is not None else None
+    )
+    creative_story_mode = await _creative_story_mode(
+        session,
+        business_id=business_id,
+        campaign_id=campaign_context_id,
+    )
 
     channel = (
         content.channel if content is not None else strategy.recommended_channel
@@ -3558,6 +3691,7 @@ async def _generate_creative_asset_value(
         context=research_context,
         provider=director_provider,
         max_output_tokens=director_max_output_tokens,
+        story_mode=creative_story_mode,
     )
     record_audit(
         session,
@@ -3576,7 +3710,10 @@ async def _generate_creative_asset_value(
 
     final: CreativeCompositionResult | None = None
     quality: CreativeQualityAssessment | None = None
-    correction = _creative_variation_direction(value.creative_metadata)
+    correction = _creative_variation_direction(
+        value.creative_metadata,
+        story_mode=creative_story_mode,
+    )
     visual_review_calls = 0
     for image_attempt in range(1, max_image_attempts + 1):
         instructions = _creative_visual_generation_instructions(
@@ -3588,6 +3725,7 @@ async def _generate_creative_asset_value(
                 or f"{target_width}:{target_height}"
             ),
             brand_identity=brand_identity,
+            story_mode=creative_story_mode,
             correction=correction,
         )
         try:
@@ -3638,7 +3776,11 @@ async def _generate_creative_asset_value(
                 target_height=target_height,
                 asset_type=value.asset_type,
                 headline=strategy.headline,
-                supporting_copy=strategy.supporting_message,
+                supporting_copy=_supporting_copy_for_composition(
+                    strategy.supporting_message,
+                    headline=strategy.headline,
+                    offer=strategy.offer,
+                ),
                 offer=strategy.offer,
                 cta=strategy.cta,
                 business_name=brand_identity.business_name,
@@ -3724,7 +3866,9 @@ async def _generate_creative_asset_value(
                 kind == "raw_visual" for kind in candidate_failure_kinds
             )
             if all_failed_from_raw_visual and image_attempt < max_image_attempts:
-                correction = _raw_visual_regeneration_correction()
+                correction = _raw_visual_regeneration_correction(
+                    story_mode=creative_story_mode,
+                )
                 logger.info(
                     "creative_quality_retry attempt=%d reason=raw_visual "
                     "source=deterministic_quality",
@@ -3813,11 +3957,16 @@ async def _generate_creative_asset_value(
                 expected_cta=strategy.cta,
                 brand_expectations=_visual_review_brand_expectations(brand_identity),
                 quality_threshold=quality_threshold,
+                review_mode=creative_story_mode,
             )
             try:
                 review_result = await visual_review_provider.review(review_request)
                 if not isinstance(review_result, CreativeVisualReviewResult):
                     raise TypeError("Visual reviewer returned an invalid result")
+                review = validate_visual_review_for_mode(
+                    review_result.review,
+                    story_mode=creative_story_mode,
+                )
             except Exception:
                 # The semantic critic is optional. A provider, timeout, or
                 # validation failure safely falls back to the already-passed
@@ -3849,20 +3998,20 @@ async def _generate_creative_asset_value(
                 final, quality = candidate, assessment
                 break
 
-            review = review_result.review
-
             # Operational diagnosis only. These values are bounded typed
             # classifications from the visual-review schema. Never log image
             # bytes, prompts, Business Brain context, arbitrary repair text,
             # credentials, provider payloads, or tenant storage identifiers.
             logger.info(
                 "creative_visual_review_completed "
-                "repair_class=%s approved=%s score=%d hard_failures=%s",
+                "mode=%s repair_class=%s approved=%s score=%d hard_failures=%s",
+                creative_story_mode,
                 review.repair_class,
                 review.approved,
                 semantic_visual_quality_score(review),
                 ",".join(review.hard_failures) or "none",
                 extra={
+                    "review_mode": creative_story_mode,
                     "repair_class": review.repair_class,
                     "approved": review.approved,
                     "semantic_score": semantic_visual_quality_score(review),
@@ -3898,7 +4047,10 @@ async def _generate_creative_asset_value(
                 continue
             if review.repair_class == "raw_visual":
                 critic_raw_failure = True
-                correction = _raw_visual_regeneration_correction(review)
+                correction = _raw_visual_regeneration_correction(
+                    review,
+                    story_mode=creative_story_mode,
+                )
                 break
             # A layout rejection intentionally falls through to the next local
             # candidate. It never consumes another raw-image generation call.
@@ -4122,27 +4274,56 @@ def _visual_review_brand_expectations(
 
 def _raw_visual_regeneration_correction(
     review: CreativeVisualReview | None = None,
+    *,
+    story_mode: CreativeStoryMode = "offering_proof",
 ) -> str:
-    """Map semantic flags to server-owned instructions, never provider prose."""
-    if review is not None and (
-        review.accidental_generated_text or review.duplicated_message
-    ):
+    """Map typed semantic failures to server-owned retry instructions."""
+    if story_mode not in {"offering_proof", "brand_offer"}:
+        raise ValueError("Creative story mode is invalid")
+
+    if review is not None and review.accidental_generated_text:
         return (
             "Regenerate a true non-typographic hero visual with no letters, words, "
             "numbers, badges, offer copy, UI labels, watermarks, or signs. Keep all "
             "typography absent and preserve a quiet copy corridor."
         )
+
     if review is not None and review.irrelevant_visual:
+        if story_mode == "brand_offer":
+            return (
+                "Regenerate one campaign-relevant hero subject with a clear focal "
+                "point, restrained background, and quiet copy corridor. Use only "
+                "grounded campaign, category, audience, offer, and brand context. "
+                "Do not invent a product, service, package, app, application, "
+                "interface, feature, workflow, integration, fulfillment process, "
+                "fulfillment path, customer fact, or unsupported outcome. Keep "
+                "typography absent."
+            )
+
         return (
             "Regenerate one objective-relevant hero subject with a clear focal point, "
             "a restrained background, and a quiet copy corridor. Keep all typography "
             "absent."
         )
+
     if review is not None and (
         review.replaceable_brand_creative
         or review.generic_template_output
         or review.decorative_abstraction_dominates
     ):
+        if story_mode == "brand_offer":
+            return (
+                "Regenerate a campaign-specific, brand-owned commercial scene that "
+                "would stop making sense if an unrelated company replaced the brand. "
+                "Create one meaningful visual mechanism from grounded campaign, "
+                "audience, category, offer, and brand context only. Do not invent a "
+                "product, service, package, app, application, interface, feature, "
+                "workflow, integration, fulfillment process, fulfillment path, customer "
+                "fact, or unsupported outcome. Reject generic stock imagery and "
+                "decorative gradients, rings, circles, waves, or arbitrary geometry. "
+                "Keep typography absent and preserve a quiet copy corridor."
+            )
+
         return (
             "Regenerate a business-specific campaign scene that would stop making "
             "sense if an unrelated company replaced the brand. Show the supported "
@@ -4150,18 +4331,32 @@ def _raw_visual_regeneration_correction(
             "gradients, rings, circles, waves, or arbitrary geometry as the central "
             "idea. Keep all typography absent and preserve a quiet copy corridor."
         )
+
     if review is not None and (
         review.no_product_service_story
         or review.meaningless_focal_story
         or review.commercially_weak
         or review.irrelevant_decorative_art
     ):
+        if story_mode == "brand_offer":
+            return (
+                "Regenerate an art-directed campaign story with one grounded visual "
+                "mechanism and one clear campaign-relevant tension, contrast, reveal, "
+                "occasion, transition, or consequence when supported. Remove generic "
+                "stock-template cues and decorative filler. Do not invent a product, "
+                "service, package, app, application, interface, feature, workflow, "
+                "integration, fulfillment process, fulfillment path, customer fact, or "
+                "unsupported outcome. Keep typography absent and preserve a quiet "
+                "copy corridor."
+            )
+
         return (
             "Regenerate an art-directed commercial story with one credible product "
             "or service moment and a visible customer-relevant outcome. Remove "
             "decorative filler and generic stock-template cues. Keep all typography "
             "absent and preserve a quiet copy corridor."
         )
+
     return (
         "Reduce background noise and competing focal points. Keep one clear subject, "
         "a large low-detail copy zone, and keep all typography absent."
@@ -4170,8 +4365,29 @@ def _raw_visual_regeneration_correction(
 
 def _creative_variation_direction(
     metadata: dict[str, object] | None,
+    *,
+    story_mode: CreativeStoryMode = "offering_proof",
 ) -> str | None:
+    if story_mode not in {"offering_proof", "brand_offer"}:
+        raise ValueError("Creative story mode is invalid")
+
     mode = (metadata or {}).get("variation_mode")
+
+    if story_mode == "brand_offer":
+        if mode == "product_led":
+            return (
+                "Use the strongest grounded campaign or brand subject as the hero "
+                "without inventing a product or service. Build one distinctive "
+                "campaign-specific commercial idea rather than generic stock imagery."
+            )
+
+        if mode == "outcome_led":
+            return (
+                "Lead with a grounded viewer tension, contrast, reveal, occasion, or "
+                "consequence only when supported by campaign context. Do not invent "
+                "a product, service, workflow, customer fact, or unsupported outcome."
+            )
+
     return {
         "alternate_metaphor": (
             "Use a materially different business-specific marketing metaphor and "

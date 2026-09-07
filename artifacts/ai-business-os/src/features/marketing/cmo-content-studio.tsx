@@ -1,16 +1,15 @@
-import type { CSSProperties } from "react";
 import {
   AlertCircle,
   Calendar,
   Check,
   FileClock,
+  MoreHorizontal,
   Pencil,
   Plus,
   RefreshCw,
   Send,
   ShieldCheck,
   Sparkles,
-  Wand2,
   WandSparkles,
 } from "lucide-react";
 
@@ -21,10 +20,22 @@ import {
   SectionTitle,
 } from "@/components/product-ui";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   CmoCreativePanel,
   type CreativePhase,
   type CreativeVariationMode,
 } from "@/features/marketing/cmo-creative-panel";
+import {
+  AIDetailsDisclosure,
+  ContentStatusBadge,
+  creativeMediaPresentation,
+  readableContentValue,
+} from "@/features/marketing/cmo-content-ui";
 import type {
   CreativeMediaType,
   PublishingCapability,
@@ -32,7 +43,6 @@ import type {
 import type {
   CreativeAsset,
   MarketingContent,
-  MarketingContentStatus,
 } from "@/services/api-types";
 
 type ContentStudioCardProps = {
@@ -69,138 +79,6 @@ type ContentStudioCardProps = {
     mode: CreativeVariationMode,
   ) => void;
 };
-
-const studioGridStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
-  gap: 16,
-  marginTop: 14,
-  alignItems: "stretch",
-};
-
-const previewStyle: CSSProperties = {
-  display: "flex",
-  minHeight: 360,
-  flexDirection: "column",
-  overflow: "hidden",
-  border: "1px solid var(--border, #e4e7ec)",
-  borderRadius: 18,
-  background: "var(--surface, #ffffff)",
-};
-
-const previewHeaderStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 12,
-  padding: "14px 16px",
-  borderBottom: "1px solid var(--border, #e4e7ec)",
-};
-
-const previewBodyStyle: CSSProperties = {
-  display: "flex",
-  flex: 1,
-  flexDirection: "column",
-  padding: 20,
-};
-
-const previewCopyStyle: CSSProperties = {
-  margin: "14px 0 0",
-  color: "var(--text, #101828)",
-  fontSize: 15,
-  lineHeight: 1.7,
-  whiteSpace: "pre-wrap",
-  overflowWrap: "anywhere",
-};
-
-const ctaStyle: CSSProperties = {
-  alignSelf: "flex-start",
-  marginTop: 18,
-  padding: "8px 12px",
-  borderRadius: 999,
-  background: "var(--surface-subtle, #f2f4f7)",
-  color: "var(--text, #101828)",
-  fontSize: 12,
-  fontWeight: 700,
-};
-
-const detailPanelStyle: CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 14,
-  minHeight: 360,
-  padding: 18,
-  border: "1px solid var(--border, #e4e7ec)",
-  borderRadius: 18,
-  background: "var(--surface-subtle, #f8fafc)",
-};
-
-const detailBlockStyle: CSSProperties = {
-  paddingBottom: 14,
-  borderBottom: "1px solid var(--border, #e4e7ec)",
-};
-
-const detailTitleStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 7,
-  marginBottom: 6,
-  color: "var(--muted, #667085)",
-  fontSize: 11,
-  fontWeight: 800,
-  letterSpacing: ".06em",
-  textTransform: "uppercase",
-};
-
-const detailCopyStyle: CSSProperties = {
-  margin: 0,
-  color: "var(--text, #101828)",
-  fontSize: 13,
-  lineHeight: 1.6,
-  whiteSpace: "pre-wrap",
-};
-
-function readable(value: string) {
-  return value.replaceAll("_", " ");
-}
-
-function statusTone(
-  status: MarketingContentStatus,
-): "success" | "warning" | "info" | "neutral" {
-  if (
-    status === "approved" ||
-    status === "scheduled" ||
-    status === "ready_to_publish"
-  ) {
-    return "success";
-  }
-
-  if (status === "review") {
-    return "info";
-  }
-
-  if (status === "draft") {
-    return "warning";
-  }
-
-  return "neutral";
-}
-
-function evidenceSummary(content: MarketingContent) {
-  const evidence = content.source_evidence?.find(
-    (item) => item.classification === "trusted_context_assembly",
-  );
-
-  if (!evidence) {
-    return null;
-  }
-
-  const summary = evidence.summary;
-
-  return typeof summary === "string" && summary.trim()
-    ? summary.trim()
-    : null;
-}
 
 export function CmoContentStudioCard({
   content,
@@ -297,20 +175,40 @@ export function CmoContentStudioCard({
     );
   }
 
-  const groundingSummary = evidenceSummary(content);
-  const sourceCount = content.source_evidence?.length ?? 0;
+  const groundingSummary = content.source_evidence?.some(
+    (item) => item.classification === "trusted_context_assembly",
+  );
   const publishingEligible = ["approved", "scheduled", "ready_to_publish"].includes(
     content.status,
   );
   const contentActionPending = isRegenerating || isApproving || isPreparingPublish;
+  const canPreparePublishing = Boolean(
+    publishingCapability?.canPrepare && onPreparePublish,
+  );
   const publishingLive = publishingCapability?.state === "checking"
     ? "polite"
     : publishingCapability?.state === "unverified"
       ? "assertive"
       : undefined;
+  const nextStep = content.status === "draft"
+    ? "Review and approve the draft"
+    : content.status === "review"
+      ? "Make an approval decision"
+      : content.status === "approved"
+        ? canPreparePublishing
+          ? "Prepare publishing or choose a schedule"
+          : "Choose when this content should run"
+        : content.status === "scheduled"
+          ? canPreparePublishing
+            ? "Prepare the governed publishing action when ready"
+            : "The content is on your internal calendar"
+          : content.status === "ready_to_publish"
+            ? "Prepare the governed publishing action"
+            : "This content is archived";
+  const creativeState = creative ? creativeMediaPresentation(creative) : null;
 
   return (
-    <Card>
+    <Card className="cmo-studio-card">
       <SectionTitle
         title="Content Studio"
         action={
@@ -321,128 +219,52 @@ export function CmoContentStudioCard({
                 AI generated
               </Badge>
             )}
-
-            <Badge tone={statusTone(content.status)}>
-              {readable(content.status)}
-            </Badge>
+            {groundingSummary && (
+              <Badge><ShieldCheck /> Grounded</Badge>
+            )}
+            <ContentStatusBadge status={content.status} />
           </div>
         }
       />
 
-      <div style={studioGridStyle}>
-        <section style={previewStyle} aria-label="Marketing content preview">
-          <div style={previewHeaderStyle}>
-            <div>
-              <div className="eyebrow">
-                {readable(content.channel)} ·{" "}
-                {readable(content.content_type)}
-              </div>
-
-              <strong>
-                {businessName?.trim() || "Marketing preview"}
-              </strong>
-            </div>
-
-            <Badge>Version {content.version}</Badge>
-          </div>
-
-          <div style={previewBodyStyle}>
+      <section className="cmo-studio-preview" aria-label="Marketing content preview">
+        <div className="cmo-studio-preview-head">
+          <div>
             <div className="eyebrow">
-              {content.ai_generated ? "AI CMO draft" : "Manual draft"}
+              {readableContentValue(content.channel)} · {readableContentValue(content.content_type)}
             </div>
-
-            <h2
-              style={{
-                margin: "8px 0 0",
-                fontSize: 22,
-                lineHeight: 1.3,
-              }}
-            >
-              {content.title}
-            </h2>
-
-            <p style={previewCopyStyle}>{content.body}</p>
-
-            {content.cta && (
-              <div style={ctaStyle}>
-                CTA · {content.cta}
-              </div>
-            )}
+            <strong>{businessName?.trim() || "Marketing preview"}</strong>
           </div>
-        </section>
+          <Badge>Version {content.version}</Badge>
+        </div>
 
-        <aside style={detailPanelStyle} aria-label="Content grounding details">
-          <div style={detailBlockStyle}>
-            <div style={detailTitleStyle}>
-              <ShieldCheck size={15} />
-              Grounding
-            </div>
-
-            <p style={detailCopyStyle}>
-              {groundingSummary ??
-                (content.ai_generated
-                  ? "Generated through the tenant-scoped AI CMO runtime."
-                  : "This is a manually authored content version.")}
-            </p>
-
-            {sourceCount > 0 && (
-              <div
-                className="subtle"
-                style={{ marginTop: 8, fontSize: 11 }}
-              >
-                {sourceCount} provenance record
-                {sourceCount === 1 ? "" : "s"}
-              </div>
-            )}
+        <div className="cmo-studio-preview-body">
+          <div className="eyebrow">
+            {content.ai_generated ? "AI CMO draft" : "Manual draft"}
           </div>
-
-          {content.recommended_for && (
-            <div style={detailBlockStyle}>
-              <div style={detailTitleStyle}>
-                <Sparkles size={15} />
-                Recommended for
-              </div>
-
-              <p style={detailCopyStyle}>
-                {content.recommended_for}
-              </p>
+          <h2>{content.title}</h2>
+          <p>{content.body}</p>
+          {content.cta && (
+            <div className="cmo-studio-cta">
+              <span>Call to action</span>
+              <strong>{content.cta}</strong>
             </div>
           )}
+        </div>
+      </section>
 
-          {content.creative_brief && (
-            <div style={detailBlockStyle}>
-              <div style={detailTitleStyle}>
-                <Wand2 size={15} />
-                Creative direction
-              </div>
-
-              <p style={detailCopyStyle}>
-                {content.creative_brief}
-              </p>
-            </div>
-          )}
-
-          {content.generation_reasoning && (
-            <div>
-              <div style={detailTitleStyle}>
-                <ShieldCheck size={15} />
-                Why this direction
-              </div>
-
-              <p style={detailCopyStyle}>
-                {content.generation_reasoning}
-              </p>
-            </div>
-          )}
-        </aside>
-      </div>
-
-      <div style={{ marginTop: 24 }}>
+      <section className="cmo-studio-creative" aria-label="Visual creative">
         <SectionTitle
           title="Visual creative"
           action={
-            creative?.generation_status === "ready" ? (
-              <Badge tone="success">Final artwork</Badge>
+            creativeError ? (
+              <Badge tone="warning">Needs attention</Badge>
+            ) : isCreativeLoading ? (
+              <Badge tone="info">Loading creative</Badge>
+            ) : isCreativePending ? (
+              <Badge tone="info">Creating revision</Badge>
+            ) : creativeState ? (
+              <Badge tone={creativeState.tone}>{creativeState.label}</Badge>
             ) : (
               <Badge>Optional</Badge>
             )
@@ -465,96 +287,76 @@ export function CmoContentStudioCard({
           onRegenerate={onRegenerateCreative}
           onVariation={onVariationCreative}
         />
-      </div>
+      </section>
 
-      <div
-        className="toolbar"
-        style={{
-          marginTop: 16,
-          justifyContent: "space-between",
-          gap: 12,
-          flexWrap: "wrap",
-        }}
-      >
-        <div className="toolbar">
-          {onEdit && (
-            <Button
-              variant="secondary"
-              className="btn-sm"
-              disabled={contentActionPending}
-              onClick={() => onEdit(content)}
-            >
-              <Pencil />
-              Edit
-            </Button>
-          )}
+      <AIDetailsDisclosure content={content} />
 
-          <Button
-            variant="secondary"
-            className="btn-sm"
-            disabled={contentActionPending}
-            onClick={() => onRegenerate(content)}
-            data-testid="button-regenerate-content"
-          >
-            <RefreshCw className={isRegenerating ? "spin" : undefined} />
-            {isRegenerating ? "Regenerating…" : "Regenerate"}
-          </Button>
-
-          {onHistory && (
-            <Button
-              variant="secondary"
-              className="btn-sm"
-              disabled={contentActionPending}
-              onClick={() => onHistory(content)}
-            >
-              <FileClock />
-              History
-            </Button>
-          )}
+      <div className="cmo-studio-action-region">
+        <div className="cmo-studio-next-step">
+          <span>Next step</span>
+          <strong>{nextStep}</strong>
         </div>
+        <div className="cmo-studio-actions">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="secondary" className="btn-sm" disabled={contentActionPending} aria-label="More content actions">
+                <MoreHorizontal /> More
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="cmo-content-menu">
+              {onEdit && (
+                <DropdownMenuItem onSelect={() => onEdit(content)}><Pencil /> Edit content</DropdownMenuItem>
+              )}
+              <DropdownMenuItem onSelect={() => onRegenerate(content)} data-testid="button-regenerate-content">
+                <RefreshCw /> {isRegenerating ? "Regenerating…" : "Regenerate copy"}
+              </DropdownMenuItem>
+              {onHistory && (
+                <DropdownMenuItem onSelect={() => onHistory(content)}><FileClock /> Version history</DropdownMenuItem>
+              )}
+              <DropdownMenuItem onSelect={onGenerate}><Plus /> Create another</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
 
-        <div className="toolbar">
-          {["draft", "review"].includes(content.status) && (
-            <Button
-              variant="primary"
-              className="btn-sm"
-              disabled={contentActionPending}
-              onClick={() => onApprove(content)}
-              data-testid="button-approve-content"
-            >
-              <Check />
-              {isApproving ? "Approving…" : "Approve"}
-            </Button>
-          )}
+          <div className="cmo-studio-primary-actions">
+            {["draft", "review"].includes(content.status) && (
+              <Button
+                variant="primary"
+                className="btn-sm"
+                disabled={contentActionPending}
+                onClick={() => onApprove(content)}
+                data-testid="button-approve-content"
+              >
+                <Check />
+                {isApproving ? "Approving…" : content.status === "draft" ? "Review & approve" : "Approve content"}
+              </Button>
+            )}
 
-          {content.status === "approved" && (
-            <Button
-              variant="primary"
-              className="btn-sm"
-              disabled={contentActionPending}
-              onClick={() => onSchedule(content)}
-              data-testid="button-schedule-content"
-            >
-              <Calendar />
-              Schedule
-            </Button>
-          )}
-          {publishingEligible && publishingCapability?.canPrepare && onPreparePublish && (
-            <Button
-              variant="soft"
-              className="btn-sm"
-              disabled={contentActionPending}
-              onClick={() => onPreparePublish(content)}
-              data-testid="button-prepare-publish"
-            >
-              <Send /> {isPreparingPublish ? "Preparing…" : "Prepare publish"}
-            </Button>
-          )}
-          <Button variant="secondary" className="btn-sm" onClick={onGenerate} disabled={contentActionPending}>
-            <Plus /> Create another
-          </Button>
+            {content.status === "approved" && (
+              <Button
+                variant={canPreparePublishing ? "secondary" : "primary"}
+                className="btn-sm"
+                disabled={contentActionPending}
+                onClick={() => onSchedule(content)}
+                data-testid="button-schedule-content"
+              >
+                <Calendar /> Schedule
+              </Button>
+            )}
+            {publishingEligible && publishingCapability?.canPrepare && onPreparePublish && (
+              <Button
+                variant="primary"
+                className="btn-sm"
+                disabled={contentActionPending}
+                onClick={() => onPreparePublish(content)}
+                data-testid="button-prepare-publish"
+              >
+                <Send /> {isPreparingPublish ? "Preparing…" : "Prepare publish"}
+              </Button>
+            )}
+          </div>
         </div>
       </div>
+
       {publishingEligible && publishingCapability && !publishingCapability.canPrepare && (
         <div
           className="cmo-publishing-readiness"

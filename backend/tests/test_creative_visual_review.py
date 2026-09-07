@@ -15,10 +15,12 @@ os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 
 from app.services.creative_visual_review import (  # noqa: E402
     CreativeVisualReview,
+    CreativeVisualReviewProviderError,
     CreativeVisualReviewRequest,
     build_visual_review_task,
     semantic_visual_quality_score,
     semantic_visual_review_meets_threshold,
+    validate_visual_review_for_mode,
 )
 from app.services.creative_visual_review_openai import (  # noqa: E402
     OpenAICreativeVisualReviewProvider,
@@ -97,7 +99,7 @@ def _review_at_score(score: int) -> CreativeVisualReview:
     )
 
 
-def _request() -> CreativeVisualReviewRequest:
+def _request(review_mode: str = "offering_proof") -> CreativeVisualReviewRequest:
     return CreativeVisualReviewRequest(
         final_png=b"\x89PNG\r\n\x1a\ntransient-test",
         campaign_objective="promotional offer",
@@ -109,6 +111,7 @@ def _request() -> CreativeVisualReviewRequest:
         expected_cta="Claim the offer",
         brand_expectations="Visible identity with controlled #123456 palette.",
         quality_threshold=82,
+        review_mode=review_mode,  # type: ignore[arg-type]
     )
 
 
@@ -142,6 +145,53 @@ class CreativeVisualReviewSchemaTests(TestCase):
         )
         self.assertEqual(review.repair_class, "raw_visual")
         self.assertTrue(review.duplicated_message)
+
+    def test_duplicate_only_is_local_layout_repair(self) -> None:
+        review = _review(
+            approved=False,
+            repair_class="layout",
+            duplicated_message=True,
+            hard_failures=("duplicated_message",),
+            repair_instructions="Suppress the repeated deterministic supporting line.",
+        )
+        self.assertEqual(review.repair_class, "layout")
+
+    def test_accidental_raw_text_remains_raw_visual_repair(self) -> None:
+        review = _review(
+            approved=False,
+            repair_class="raw_visual",
+            accidental_generated_text=True,
+            hard_failures=("accidental_generated_text",),
+            repair_instructions="Regenerate the raw visual without generated text.",
+        )
+        self.assertEqual(review.repair_class, "raw_visual")
+
+    def test_review_mode_is_explicit_and_invalid_values_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "mode is invalid"):
+            _request("invalid")
+
+    def test_brand_offer_task_forbids_invention_without_product_only_rules(self) -> None:
+        task = build_visual_review_task(_request("brand_offer")).casefold()
+        self.assertIn("review mode: brand_offer", task)
+        self.assertIn("no_product_service_story must be false", task)
+        self.assertIn("do not require or invent product/service proof", task)
+        self.assertNotIn("without meaningful product/service storytelling", task)
+        self.assertNotIn("supplied concept/product story", task)
+
+    def test_brand_offer_rejects_mode_contradictory_typed_result(self) -> None:
+        review = _review(
+            approved=False,
+            repair_class="raw_visual",
+            no_product_service_story=True,
+            hard_failures=("no_product_service_story",),
+            repair_instructions="Invent a product story.",
+        )
+        with self.assertRaises(CreativeVisualReviewProviderError):
+            validate_visual_review_for_mode(review, story_mode="brand_offer")
+        self.assertIs(
+            validate_visual_review_for_mode(review, story_mode="offering_proof"),
+            review,
+        )
 
     def test_inconsistent_approved_decision_is_rejected(self) -> None:
         with self.assertRaises(ValidationError):
@@ -270,6 +320,32 @@ class OpenAIVisualReviewAdapterTests(IsolatedAsyncioTestCase):
         )
         self.assertNotIn(_request().final_png.decode("latin1"), str(kwargs))
 
+    async def test_incomplete_or_ambiguous_provider_output_fails_closed(self) -> None:
+        valid_message = SimpleNamespace(
+            type="message",
+            content=[
+                SimpleNamespace(type="output_text", parsed=_review().model_dump())
+            ],
+        )
+        responses = (
+            SimpleNamespace(status="incomplete", output=()),
+            SimpleNamespace(status="completed", output=()),
+            SimpleNamespace(status="completed", output=[valid_message, valid_message]),
+        )
+        for response in responses:
+            with self.subTest(response=response):
+                provider = OpenAICreativeVisualReviewProvider(
+                    client=SimpleNamespace(
+                        responses=SimpleNamespace(
+                            parse=AsyncMock(return_value=response)
+                        )
+                    ),
+                    model="gpt-test",
+                    max_output_tokens=1_600,
+                )
+                with self.assertRaises(CreativeVisualReviewProviderError):
+                    await provider.review(_request())
+
 def test_maximum_valid_visual_review_request_stays_within_task_budget() -> None:
     """
     Every individually valid request field must fit inside the fixed semantic
@@ -288,33 +364,34 @@ def test_maximum_valid_visual_review_request_stays_within_task_budget() -> None:
     buffer = BytesIO()
     image.save(buffer, format="PNG")
 
-    request = CreativeVisualReviewRequest(
-        final_png=buffer.getvalue(),
-        campaign_objective="O" * 120,
-        channel="C" * 40,
-        concept_name="N" * 100,
-        concept_expectations="E" * 600,
-        expected_headline="H" * 180,
-        expected_offer="F" * 160,
-        expected_cta="T" * 300,
-        brand_expectations="B" * 400,
-        quality_threshold=95,
-    )
+    for review_mode in ("offering_proof", "brand_offer"):
+        request = CreativeVisualReviewRequest(
+            final_png=buffer.getvalue(),
+            campaign_objective="O" * 120,
+            channel="C" * 40,
+            concept_name="N" * 100,
+            concept_expectations="E" * 600,
+            expected_headline="H" * 180,
+            expected_offer="F" * 160,
+            expected_cta="T" * 300,
+            brand_expectations="B" * 400,
+            quality_threshold=95,
+            review_mode=review_mode,
+        )
 
-    task = build_visual_review_task(request)
+        task = build_visual_review_task(request)
 
-    assert len(task) <= 9000
+        assert len(task) <= 9000
 
-    # Formatting must reach the model as actual structure rather than escaped
-    # backslash+n text.
-    assert "\\n" not in task
+        # Formatting must reach the model as actual structure rather than escaped
+        # backslash+n text.
+        assert "\\n" not in task
 
-    for marker in (
-        "CAMPAIGN EXPECTATIONS:",
-        "SCORING STANDARD:",
-        "FOUR NON-NEGOTIABLE REVIEW LAYERS:",
-        "WORLD-CLASS COMMERCIAL REVIEW:",
-        "MANDATORY FAILURE MAPPING:",
-        "APPROVAL TEST:",
-    ):
-        assert marker in task
+        for marker in (
+            "CAMPAIGN EXPECTATIONS:",
+            "SCORING STANDARD:",
+            "FOUR NON-NEGOTIABLE REVIEW LAYERS:",
+            "MANDATORY FAILURE MAPPING:",
+            "APPROVAL TEST:",
+        ):
+            assert marker in task

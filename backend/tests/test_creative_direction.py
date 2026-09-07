@@ -19,8 +19,10 @@ from app.agents.provider import AIAgentProviderMetadata  # noqa: E402
 from app.exceptions.ai_agent import AIAgentProviderError  # noqa: E402
 from app.exceptions.marketing import MarketingAIError  # noqa: E402
 from app.services.creative_direction import (  # noqa: E402
+    _brand_offer_has_unsupported_offering_story,
     _contains_any,
     _genericness_risk,
+    _ranked_patterns,
     CreativeConceptProposal,
     CreativeDirectorSynthesis,
     build_creative_director_task,
@@ -95,6 +97,42 @@ class CreativeDirectionTests(TestCase):
         values.update({"headline": "50% OFF", "offer": "50% off"})
         with self.assertRaisesRegex(ValidationError, "offer must be separate"):
             CreativeStrategyProposal.model_validate(values)
+
+    def test_story_mode_is_validated_at_every_direction_boundary(self) -> None:
+        strategy = _strategy()
+        research = self._research()
+        context = _context()
+        direction = build_creative_direction(
+            strategy=strategy,
+            research=research,
+            context=context,
+        )
+        invalid = "invalid"
+        with self.assertRaisesRegex(ValueError, "story mode"):
+            build_creative_direction(
+                strategy=strategy,
+                research=research,
+                context=context,
+                story_mode=invalid,  # type: ignore[arg-type]
+            )
+        with self.assertRaisesRegex(ValueError, "story mode"):
+            build_creative_director_task(
+                strategy=strategy,
+                research=research,
+                context=context,
+                story_mode=invalid,  # type: ignore[arg-type]
+            )
+        with self.assertRaisesRegex(ValueError, "story mode"):
+            build_visual_art_direction(
+                strategy=strategy,
+                direction=direction,
+                context=context,
+                aspect_ratio="1:1",
+                primary_color=None,
+                secondary_color=None,
+                accent_color=None,
+                story_mode=invalid,  # type: ignore[arg-type]
+            )
 
     def test_weak_intent_yields_three_scored_original_concepts_and_one_winner(self) -> None:
         context = _context()
@@ -256,6 +294,46 @@ class CreativeDirectionTests(TestCase):
             task.index("ABSTRACT RESEARCH SIGNALS ONLY:"),
         )
 
+    def test_brand_offer_director_is_bounded_and_forbids_offering_invention(self) -> None:
+        task = build_creative_director_task(
+            strategy=_strategy(),
+            research=self._research(),
+            context=_context(),
+            story_mode="brand_offer",
+        )
+        normalized = task.casefold()
+        self.assertLessEqual(len(task), 4000)
+        self.assertIn("no campaign-selected catalog offering is authoritative", normalized)
+        self.assertIn("do not invent a product, service, package, app", normalized)
+        self.assertIn("interface, ui, feature", normalized)
+        self.assertIn("workflow, integration", normalized)
+        self.assertIn("fulfillment process", normalized)
+        self.assertIn("fulfillment path", normalized)
+        self.assertIn("subject representation", normalized)
+        self.assertNotIn("premium product-first offer", normalized)
+        self.assertNotIn("supported ai business os represented", normalized)
+
+    def test_mode_specific_fallback_pattern_pool_never_leaks_offering_patterns(self) -> None:
+        context = _context()
+        offering_keys = {
+            pattern.key
+            for pattern in _ranked_patterns(context, story_mode="offering_proof")
+        }
+        brand_keys = {
+            pattern.key
+            for pattern in _ranked_patterns(context, story_mode="brand_offer")
+        }
+        self.assertTrue(
+            offering_keys.intersection(
+                {"saas_control_center", "product_spotlight", "immersive_story"}
+            )
+        )
+        self.assertTrue(
+            brand_keys.isdisjoint(
+                {"saas_control_center", "product_spotlight", "immersive_story"}
+            )
+        )
+
     def test_channel_changes_platform_specific_direction(self) -> None:
         strategy = _strategy()
         instagram_context = _context("instagram")
@@ -350,6 +428,170 @@ class CreativeDirectionTests(TestCase):
             strategy.cta,
         ):
             self.assertNotIn(exact_copy or "[missing]", prompt)
+
+    def test_brand_offer_fallback_and_raw_prompt_do_not_invent_an_offering(self) -> None:
+        strategy = _strategy()
+        context = _context()
+        plan = build_creative_direction(
+            strategy=strategy,
+            research=self._research(),
+            context=context,
+            story_mode="brand_offer",
+        )
+        self.assertTrue(creative_direction_meets_quality_floor(plan))
+        self.assertTrue(
+            all(
+                not _brand_offer_has_unsupported_offering_story(candidate)
+                for candidate in plan.candidates
+            )
+        )
+        prompt = build_visual_art_direction(
+            strategy=strategy,
+            direction=plan,
+            context=context,
+            aspect_ratio="1:1",
+            primary_color="#114CAC",
+            secondary_color=None,
+            accent_color=None,
+            story_mode="brand_offer",
+        )
+        normalized = prompt.casefold()
+        self.assertLessEqual(len(prompt), 5000)
+        self.assertIn("grounded campaign mechanism", normalized)
+        self.assertIn("do not invent a product, service, package, app", normalized)
+        self.assertIn("workflow, integration", normalized)
+        self.assertIn("fulfillment process", normalized)
+        self.assertIn("fulfillment path", normalized)
+        self.assertNotIn("product or service story:", normalized)
+        self.assertNotIn("actual supported product", normalized)
+        self.assertNotIn(strategy.visual_concept.casefold(), normalized)
+        self.assertNotIn(strategy.subject_focus.casefold(), normalized)
+
+    def test_brand_offer_caps_disobedient_invented_app_director_output(self) -> None:
+        safe = build_creative_direction(
+            strategy=_strategy(),
+            research=self._research(),
+            context=_context(),
+            story_mode="brand_offer",
+        )
+        proposals = []
+        for index, candidate in enumerate(safe.candidates, start=1):
+            values = candidate.model_dump(exclude={"scorecard"})
+            values.update(
+                {
+                    "concept_name": f"Invented interface {index}",
+                    "marketing_idea": f"Spotlight a newly invented AI app dashboard {index}.",
+                    "hero_subject": f"A fictional mobile app dashboard interface {index}.",
+                    "product_story": (
+                        f"The invented app interface coordinates a fabricated workflow {index}."
+                    ),
+                    "visual_metaphor": f"A mock UI control center variation {index}.",
+                }
+            )
+            proposals.append(CreativeConceptProposal.model_validate(values))
+        synthesis = CreativeDirectorSynthesis(candidates=tuple(proposals))
+        directed = build_creative_direction(
+            strategy=_strategy(),
+            research=self._research(),
+            context=_context(),
+            synthesis=synthesis,
+            story_mode="brand_offer",
+        )
+        self.assertFalse(creative_direction_meets_quality_floor(directed))
+        self.assertTrue(
+            all(candidate.scorecard.overall_score <= 49 for candidate in directed.candidates)
+        )
+        self.assertTrue(
+            all(candidate.scorecard.pr_safety == 0 for candidate in directed.candidates)
+        )
+
+    def test_brand_offer_gate_rejects_invented_integration_and_fulfillment_story(self) -> None:
+        plan = build_creative_direction(
+            strategy=_strategy(),
+            research=self._research(),
+            context=_context(),
+            story_mode="brand_offer",
+        )
+
+        values = plan.selected_concept.model_dump(exclude={"scorecard"})
+        values.update(
+            {
+                "marketing_idea": (
+                    "Show an invented integration hub coordinating a fictional "
+                    "fulfillment process for the customer."
+                ),
+                "hero_subject": (
+                    "A fabricated integration pipeline and fulfillment system."
+                ),
+                "product_story": (
+                    "The invented integration layer orchestrates a fulfillment path."
+                ),
+            }
+        )
+
+        proposal = CreativeConceptProposal.model_validate(values)
+
+        self.assertTrue(
+            _brand_offer_has_unsupported_offering_story(proposal)
+        )
+
+    def test_brand_offer_gate_ignores_negative_controls_and_category_wording(self) -> None:
+        context = PublicCreativeResearchContext(
+            industry="professional services",
+            channel="linkedin",
+            campaign_objective="brand awareness",
+            creative_format="landscape ad",
+            style_family="trust focused",
+        )
+        research = degraded_research_bundle(
+            build_research_request(context, max_results=12),
+            provider="internal",
+        )
+        plan = build_creative_direction(
+            strategy=_strategy(),
+            research=research,
+            context=context,
+            story_mode="brand_offer",
+        )
+        values = plan.selected_concept.model_dump(exclude={"scorecard"})
+        values["customer_care_reason"] = (
+            "Professional services founders face a crowded launch-day tension."
+        )
+        values["avoid_patterns"] = (
+            "fake app dashboard",
+            "invented service package",
+        )
+        proposal = CreativeConceptProposal.model_validate(values)
+        self.assertFalse(_brand_offer_has_unsupported_offering_story(proposal))
+
+    def test_raw_prompt_rejects_oversized_correction_before_truncation(self) -> None:
+        plan = build_creative_direction(
+            strategy=_strategy(),
+            research=self._research(),
+            context=_context(),
+        )
+        with self.assertRaisesRegex(ValueError, "correction"):
+            build_visual_art_direction(
+                strategy=_strategy(),
+                direction=plan,
+                context=_context(),
+                aspect_ratio="1:1",
+                primary_color=None,
+                secondary_color=None,
+                accent_color=None,
+                correction="x" * 601,
+            )
+        prompt = build_visual_art_direction(
+            strategy=_strategy(),
+            direction=plan,
+            context=_context(),
+            aspect_ratio="1:1",
+            primary_color=None,
+            secondary_color=None,
+            accent_color=None,
+            correction="x" * 600,
+        )
+        self.assertLessEqual(len(prompt), 5000)
 
     def test_generic_blue_circle_concepts_fail_server_owned_direction_floor(self) -> None:
         context = _context()

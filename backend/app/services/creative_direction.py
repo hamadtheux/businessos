@@ -59,7 +59,10 @@ _STOPWORDS = frozenset(
 )
 
 
-from app.services.creative_world_class import assess_world_class_creative
+from app.services.creative_world_class import (
+    CreativeStoryMode,
+    assess_world_class_creative,
+)
 
 
 class CreativeConceptScorecard(DirectionSchema):
@@ -165,6 +168,92 @@ class CreativeConceptProposal(DirectionSchema):
         ):
             raise ValueError("creative principles must be bounded, unique, and abstract")
         return normalized
+
+
+_BRAND_OFFER_CONCRETE_ARTIFACT = re.compile(
+    r"\b(?:app|application|dashboard|user interface|ui|mock screen|software screen|"
+    r"package|packaging|workflow|integration[ -](?:hub|layer|pipeline|system)|"
+    r"fulfillment[ -](?:path|process|system))\b|"
+    r"\b(?:product|service|offering)[ -](?:environment|first|led|specific)\b",
+    re.IGNORECASE,
+)
+_BRAND_OFFER_INVENTED_ARTIFACT = re.compile(
+    r"\b(?:fake|fabricated|fictional|imaginary|imagined|invented|made[ -]up|mock)\b"
+    r".{0,80}\b(?:app|application|dashboard|interface|ui|feature|product|service|"
+    r"offering|package|packaging|system|workflow|integration|fulfillment)\b",
+    re.IGNORECASE,
+)
+_BRAND_OFFER_OFFERING_DEPICTION = re.compile(
+    r"(?:\b(?:show|depict|render|spotlight|demonstrate|represent|display|feature)\b"
+    r".{0,80}\b(?:product|service|offering|package|feature|integration|"
+    r"fulfillment(?: process| path)?)\b|"
+    r"\bsupported\b.{0,80}\b(?:hub|offering|platform|product|service|system)\b|"
+    r"\b(?:product|service|offering|feature|integration|fulfillment)\b.{0,80}"
+    r"\b(?:hero|story|moment|in use|in action|doing work|delivering|automates?|"
+    r"coordinates?|orchestrates?)\b)",
+    re.IGNORECASE,
+)
+_BRAND_OFFER_FEATURE_STORY = re.compile(
+    r"\b(?:app|application|product|service|software|system)\b.{0,80}"
+    r"\b(?:feature|features|workflow|workflows)\b",
+    re.IGNORECASE,
+)
+
+
+def _brand_offer_text_has_unsupported_offering_story(value: str) -> bool:
+    """Detect positive offering/UI stories that brand mode cannot authorize."""
+    return any(
+        pattern.search(value)
+        for pattern in (
+            _BRAND_OFFER_CONCRETE_ARTIFACT,
+            _BRAND_OFFER_INVENTED_ARTIFACT,
+            _BRAND_OFFER_OFFERING_DEPICTION,
+            _BRAND_OFFER_FEATURE_STORY,
+        )
+    )
+
+
+def _brand_offer_has_unsupported_offering_story(
+    proposal: CreativeConceptProposal,
+) -> bool:
+    """
+    Fail closed on unsupported positive renderer semantics.
+
+    Negative controls live only in avoid_patterns/originality_notes and are
+    intentionally excluded. Free-form negation in a positive story field does
+    not make an otherwise forbidden depiction safe.
+    """
+    positive_values = (
+        proposal.concept_name,
+        proposal.marketing_idea,
+        proposal.customer_care_reason,
+        proposal.strategic_reason,
+        proposal.hero_subject,
+        proposal.hero_relevance,
+        proposal.product_story,
+        proposal.scroll_stopping_hook,
+        proposal.visual_metaphor,
+        proposal.layout_intent,
+        proposal.focal_area,
+        proposal.image_style,
+        proposal.depth,
+        proposal.camera_direction,
+        proposal.lighting,
+        proposal.mood,
+        proposal.visual_density,
+        proposal.background_complexity,
+        *proposal.inspiration_principles,
+    )
+    return any(
+        _brand_offer_text_has_unsupported_offering_story(value)
+        for value in positive_values
+    )
+
+
+def _brand_offer_safe_text(value: str, *, fallback: str) -> str:
+    if _brand_offer_text_has_unsupported_offering_story(value):
+        return fallback
+    return value
 
 
 class CreativeDirectorSynthesis(DirectionSchema):
@@ -405,7 +494,10 @@ def build_creative_direction(
     research: CreativeResearchBundle,
     context: PublicCreativeResearchContext,
     synthesis: CreativeDirectorSynthesis | None = None,
+    story_mode: CreativeStoryMode = "offering_proof",
 ) -> CreativeDirectionPlan:
+    if story_mode not in {"offering_proof", "brand_offer"}:
+        raise ValueError("Creative story mode is invalid")
     proposals = (
         synthesis.candidates
         if synthesis is not None
@@ -415,8 +507,9 @@ def build_creative_direction(
                 strategy=strategy,
                 research=research,
                 context=context,
+                story_mode=story_mode,
             )
-            for pattern in _ranked_patterns(context)
+            for pattern in _ranked_patterns(context, story_mode=story_mode)
         )
     )
     scorecards = _score_candidates(
@@ -424,6 +517,7 @@ def build_creative_direction(
         strategy=strategy,
         research=research,
         context=context,
+        story_mode=story_mode,
     )
     candidates = tuple(
         CreativeConceptCandidate(
@@ -453,6 +547,7 @@ def build_creative_director_task(
     strategy: CreativeStrategyProposal,
     research: CreativeResearchBundle,
     context: PublicCreativeResearchContext,
+    story_mode: CreativeStoryMode = "offering_proof",
 ) -> str:
     """
     Build one bounded Creative Director task without blind truncation.
@@ -464,12 +559,66 @@ def build_creative_director_task(
 
     max_task_length = 4000
 
+    if story_mode not in {"offering_proof", "brand_offer"}:
+        raise ValueError("Creative story mode is invalid")
+
+    if story_mode == "offering_proof":
+        representation_axis = "product/service representation"
+        task_campaign_angle = strategy.campaign_angle
+        task_visual_concept = strategy.visual_concept
+        task_subject_focus = strategy.subject_focus
+        story_prefix = (
+            "Every concept must show a specific cause -> mechanism -> customer outcome. "
+            "The selected campaign has an authoritative product/service offering, so "
+            "the concept must visibly demonstrate that supported offering. "
+        )
+        story_output_rules = (
+            "- product_story must show cause -> mechanism -> outcome.\n"
+            "- The hero must visually prove the supported offering rather than merely "
+            "provide attractive atmosphere.\n"
+        )
+    else:
+        representation_axis = "subject representation"
+        task_campaign_angle = _brand_offer_safe_text(
+            strategy.campaign_angle,
+            fallback=f"The grounded {context.campaign_objective} campaign.",
+        )
+        task_visual_concept = _brand_offer_safe_text(
+            strategy.visual_concept,
+            fallback=(
+                "Use only grounded campaign, category, audience, and brand context; "
+                "do not assume a concrete offering."
+            ),
+        )
+        task_subject_focus = _brand_offer_safe_text(
+            strategy.subject_focus,
+            fallback=(
+                "A grounded campaign tension, contrast, reveal, occasion, or "
+                "brand-owned category moment."
+            ),
+        )
+        story_prefix = (
+            "Every concept must show a specific cause -> mechanism -> viewer consequence "
+            "using only grounded campaign, audience, category, offer, and brand context. "
+            "No campaign-selected catalog offering is authoritative: do not invent a "
+            "product, service, package, app, application, interface, UI, feature, "
+            "workflow, integration, fulfillment process, fulfillment path, customer "
+            "fact, or unsupported outcome. "
+        )
+        story_output_rules = (
+            "- product_story is a schema compatibility field: in this mode it must "
+            "describe the grounded campaign mechanism and cause -> mechanism -> outcome "
+            "without inventing a product or service.\n"
+            "- The hero must visually prove the grounded campaign/brand idea rather "
+            "than merely provide attractive atmosphere.\n"
+        )
+
     pattern_lines = "\n".join(
         (
             f"- {pattern.name}: {pattern.visual_metaphor}; "
             f"{pattern.layout_intent}; {pattern.image_style}."
         )
-        for pattern in _ranked_patterns(context)
+        for pattern in _ranked_patterns(context, story_mode=story_mode)
     )
 
     research_principles = "; ".join(
@@ -492,9 +641,10 @@ def build_creative_director_task(
     mandatory_prefix = (
         "Act as a senior advertising Creative Director. Produce exactly three "
         "materially different executable concepts. They must differ in hero idea, "
-        "metaphor, image-making approach, product representation, camera direction, "
-        "and spatial rhythm—not merely color or crop. Every concept must show a "
-        "specific cause -> mechanism -> customer outcome. Reject generic premium "
+        f"metaphor, image-making approach, {representation_axis}, camera direction, "
+        "and spatial rhythm—not merely color or crop. "
+        f"{story_prefix}"
+        "Reject generic premium "
         "desk/workspace photography, decorative abstraction, generic productivity "
         "metaphors, generic person-at-laptop scenes, replaceable-brand concepts, and "
         "generic AI/SaaS fantasy imagery unless it visibly demonstrates the supported "
@@ -504,12 +654,12 @@ def build_creative_director_task(
         f"- Goal: {strategy.marketing_goal}\n"
         f"- Audience: {strategy.target_audience}\n"
         f"- Audience insight: {strategy.audience_insight}\n"
-        f"- Campaign angle: {strategy.campaign_angle}\n"
+        f"- Campaign angle: {task_campaign_angle}\n"
         f"- Intended headline: {strategy.headline}\n"
         f"- Intended offer: {strategy.offer or 'none'}\n"
         f"- Intended CTA: {strategy.cta or 'none'}\n"
-        f"- Supported visual concept: {strategy.visual_concept}\n"
-        f"- Supported hero subject: {strategy.subject_focus}\n"
+        f"- Strategy visual context: {task_visual_concept}\n"
+        f"- Strategy subject context: {task_subject_focus}\n"
         f"- Brand treatment: {strategy.brand_treatment}\n\n"
 
         "PUBLIC-SAFE CAMPAIGN DIMENSIONS:\n"
@@ -526,9 +676,7 @@ def build_creative_director_task(
         "- Ground every subject and factual implication in the trusted strategy.\n"
         "- marketing_idea must state the advertising mechanism.\n"
         "- customer_care_reason must explain the customer tension or consequence.\n"
-        "- product_story must show cause -> mechanism -> outcome.\n"
-        "- The hero must visually prove the supported offering rather than merely "
-        "provide attractive atmosphere.\n"
+        f"{story_output_rules}"
         "- Reject generic stock/lifestyle scenes even when visually premium.\n"
         "- Reject swap-logo concepts an unrelated business could use unchanged.\n"
         "- Reject decoration-only gradients, rings, circles, waves, blobs, or "
@@ -645,12 +793,12 @@ def build_creative_director_task(
         strategy.marketing_goal,
         strategy.target_audience,
         strategy.audience_insight,
-        strategy.campaign_angle,
+        task_campaign_angle,
         strategy.headline,
         strategy.offer,
         strategy.cta,
-        strategy.visual_concept,
-        strategy.subject_focus,
+        task_visual_concept,
+        task_subject_focus,
         strategy.brand_treatment,
     )
 
@@ -671,24 +819,86 @@ def build_visual_art_direction(
     primary_color: str | None,
     secondary_color: str | None,
     accent_color: str | None,
+    story_mode: CreativeStoryMode = "offering_proof",
     correction: str | None = None,
 ) -> str:
+    if story_mode not in {"offering_proof", "brand_offer"}:
+        raise ValueError("Creative story mode is invalid")
+    if correction is not None and (
+        not isinstance(correction, str)
+        or not correction.strip()
+        or len(correction) > 600
+    ):
+        raise ValueError("Creative correction is invalid")
     concept = direction.selected_concept
+    if (
+        story_mode == "brand_offer"
+        and _brand_offer_has_unsupported_offering_story(concept)
+    ):
+        raise ValueError("Brand-offer direction contains an unsupported offering story")
+
+    if story_mode == "offering_proof":
+        campaign_fallback = "A value-led campaign grounded in the supported offering."
+        hero_fallback = "The supported business offering as the single hero subject."
+        reason_fallback = "A grounded commercial premise led by the supported offering."
+        metaphor_fallback = "A clear visual metaphor grounded in the supported offering."
+        relevance_fallback = (
+            "The hero directly represents the supported offering and campaign objective."
+        )
+        story_fallback = (
+            "Show the supported offering creating a clear, credible business moment."
+        )
+        story_label = "Product or service story"
+        mode_safety = ""
+    else:
+        campaign_fallback = "A campaign-led premise grounded in the supplied brand context."
+        hero_fallback = "One grounded campaign-relevant hero subject."
+        reason_fallback = "A grounded commercial premise led by the campaign idea."
+        metaphor_fallback = "A clear visual metaphor grounded in the campaign idea."
+        relevance_fallback = (
+            "The hero directly supports the grounded campaign objective and brand idea."
+        )
+        story_fallback = (
+            "Show one grounded campaign mechanism with a clear visual consequence."
+        )
+        story_label = "Grounded campaign mechanism"
+        mode_safety = (
+            "Do not invent a product, service, package, app, application, interface, "
+            "UI, feature, workflow, integration, fulfillment process, fulfillment path, "
+            "customer fact, or unsupported outcome. "
+        )
+
     campaign_angle = _without_deterministic_copy(
         strategy.campaign_angle,
         strategy,
-        fallback="A value-led campaign grounded in the supported offering.",
+        fallback=campaign_fallback,
     )
+    if story_mode == "brand_offer":
+        campaign_angle = _brand_offer_safe_text(
+            campaign_angle,
+            fallback=campaign_fallback,
+        )
     hero_subject = _without_deterministic_copy(
         concept.hero_subject,
         strategy,
-        fallback="The supported business offering as the single hero subject.",
+        fallback=hero_fallback,
     )
     visual_concept = _without_deterministic_copy(
         strategy.visual_concept,
         strategy,
-        fallback="A premium commercial environment with one clear hero subject.",
+        fallback=(
+            "A campaign-specific category scene with one grounded visual mechanism."
+            if story_mode == "brand_offer"
+            else "A premium commercial environment with one clear hero subject."
+        ),
     )
+    if story_mode == "brand_offer":
+        visual_concept = _brand_offer_safe_text(
+            visual_concept,
+            fallback=(
+                "A campaign-specific category scene with one grounded visual mechanism."
+            ),
+        )
     colors = ", ".join(
         color
         for color in (primary_color, secondary_color, accent_color)
@@ -697,22 +907,22 @@ def build_visual_art_direction(
     strategic_reason = _without_deterministic_copy(
         concept.strategic_reason,
         strategy,
-        fallback="A grounded commercial premise led by the supported offering.",
+        fallback=reason_fallback,
     )
     visual_metaphor = _without_deterministic_copy(
         concept.visual_metaphor,
         strategy,
-        fallback="A clear visual metaphor grounded in the supported offering.",
+        fallback=metaphor_fallback,
     )
     hero_relevance = _without_deterministic_copy(
         concept.hero_relevance,
         strategy,
-        fallback="The hero directly represents the supported offering and campaign objective.",
+        fallback=relevance_fallback,
     )
     product_story = _without_deterministic_copy(
         concept.product_story,
         strategy,
-        fallback="Show the supported offering creating a clear, credible business moment.",
+        fallback=story_fallback,
     )
     scroll_hook = _without_deterministic_copy(
         concept.scroll_stopping_hook,
@@ -772,7 +982,7 @@ def build_visual_art_direction(
         f"Strategic visual premise: {strategic_reason}\n"
         f"Hero subject: {hero_subject}\n"
         f"Why the hero is campaign-relevant: {hero_relevance}\n"
-        f"Product or service story: {product_story}\n"
+        f"{story_label}: {product_story}\n"
         f"Immediate visual hook: {scroll_hook}\n"
         f"Environment and visual concept: {visual_concept}\n"
         f"Visual metaphor: {visual_metaphor}\n"
@@ -795,11 +1005,15 @@ def build_visual_art_direction(
     critical_constraints = (
         correction_text
         +
+        f"{mode_safety}"
         "DO NOT GENERATE words, letters, numbers, typography, logos, fake brand marks, watermarks, interface text, offer copy, CTA text, fake product labels, invented packaging, duplicate discount symbols, or visual clutter inside the reserved overlay zone.\n"
         "Do not turn an offer or discount into a literal numeric graphic. The application adds all exact marketing text and the real logo afterward."
     )
     maximum_body = 5000 - len(critical_constraints) - 1
-    return f"{body[:maximum_body].rstrip()}\n{critical_constraints}"
+    task = f"{body[:maximum_body].rstrip()}\n{critical_constraints}"
+    if len(task) > 5000:
+        raise ValueError("Raw creative direction exceeds the safe prompt budget")
+    return task
 
 
 def _build_pattern_proposal(
@@ -808,33 +1022,89 @@ def _build_pattern_proposal(
     strategy: CreativeStrategyProposal,
     research: CreativeResearchBundle,
     context: PublicCreativeResearchContext,
+    story_mode: CreativeStoryMode = "offering_proof",
 ) -> CreativeConceptProposal:
+    if story_mode not in {"offering_proof", "brand_offer"}:
+        raise ValueError("Creative story mode is invalid")
+
     principles = _selected_principles(research, pattern)
-    return CreativeConceptProposal(
-        concept_name=pattern.name,
-        marketing_idea=(
+
+    if story_mode == "offering_proof":
+        marketing_idea = (
             f"Make {strategy.subject_focus[:170].rstrip('.')} visibly demonstrate "
             f"the {context.campaign_objective} promise through {pattern.visual_metaphor.lower()}."
-        )[:300],
-        customer_care_reason=(
-            f"The audience can immediately connect the supported offering to "
-            f"{strategy.audience_insight[:210].rstrip('.')} instead of decoding decoration."
-        )[:300],
-        strategic_reason=(
-            f"Translate a {context.industry} {context.campaign_objective} into a "
-            f"{context.style_family} "
-            "commercial idea led by the supported offering rather than literal promotional typography."
-        ),
-        hero_subject=strategy.subject_focus,
-        hero_relevance=(
+        )
+        hero_subject = strategy.subject_focus
+        hero_relevance = (
             f"This hero directly represents {strategy.subject_focus[:150].rstrip('.')} "
             "and makes it visible evidence of "
             f"the {context.campaign_objective} objective for this {context.industry} campaign."
-        )[:300],
-        product_story=(
+        )
+        care_reason = (
+            f"The audience can immediately connect the supported offering to "
+            f"{strategy.audience_insight[:210].rstrip('.')} instead of decoding decoration."
+        )
+        strategic_reason = (
+            f"Translate a {context.industry} {context.campaign_objective} into a "
+            f"{context.style_family} commercial idea led by the supported offering "
+            "rather than literal promotional typography."
+        )
+        product_story = (
             f"Represent the supported offering in use or through a credible operational "
             f"transformation; connect it directly to {strategy.campaign_angle[:220].rstrip('.')}."
-        )[:400],
+        )
+    else:
+        safe_insight = _brand_offer_safe_text(
+            strategy.audience_insight,
+            fallback=f"the grounded needs of {strategy.target_audience[:160].rstrip('.')}",
+        )
+        safe_angle = _brand_offer_safe_text(
+            strategy.campaign_angle,
+            fallback=f"the grounded {context.campaign_objective} campaign",
+        )
+        hero_subject = (
+            f"A campaign-specific {context.industry} tension-and-reveal moment for "
+            f"{strategy.target_audience[:180].rstrip('.')}"
+        )
+        marketing_idea = (
+            f"Turn the grounded {context.campaign_objective} audience tension into "
+            f"a distinctive contrast and reveal through {pattern.visual_metaphor.lower()}."
+        )
+        hero_relevance = (
+            f"The tension and reveal connect {strategy.target_audience[:150].rstrip('.')} "
+            f"to the {context.campaign_objective} objective using grounded "
+            f"{context.industry} category context."
+        )
+        care_reason = (
+            f"The audience can immediately connect the grounded campaign idea to "
+            f"{safe_insight[:210].rstrip('.')} instead of decoding decoration."
+        )
+        strategic_reason = (
+            f"Translate a {context.industry} {context.campaign_objective} into a "
+            f"{context.style_family} campaign-specific commercial idea using only "
+            "grounded campaign, audience, category, offer, and brand context."
+        )
+        product_story = (
+            "Create a credible tension-to-reveal-to-consequence visual tied directly "
+            f"to {safe_angle[:240].rstrip('.')}."
+        )
+        safe_principles = tuple(
+            value
+            for value in principles
+            if not _brand_offer_text_has_unsupported_offering_story(value)
+        )
+        principles = safe_principles or (
+            "campaign-specific hierarchy and contrast",
+            "one grounded focal reveal with protected negative space",
+        )
+    return CreativeConceptProposal(
+        concept_name=pattern.name,
+        marketing_idea=marketing_idea[:300],
+        customer_care_reason=care_reason[:300],
+        strategic_reason=strategic_reason[:300],
+        hero_subject=hero_subject[:500],
+        hero_relevance=hero_relevance[:300],
+        product_story=product_story[:400],
         scroll_stopping_hook=(
             f"Create one unmistakable {pattern.focal_area} with controlled contrast, "
             "depth, and a category-relevant moment instead of decorative abstraction."
@@ -884,6 +1154,7 @@ def _world_class_concept_assessment(
     proposal: CreativeConceptProposal,
     strategy: CreativeStrategyProposal,
     context: PublicCreativeResearchContext,
+    story_mode: CreativeStoryMode = "offering_proof",
 ):
     """
     Evaluate one renderer-bound concept against the centralized commercial policy.
@@ -900,6 +1171,16 @@ def _world_class_concept_assessment(
             strategy.brand_treatment,
             strategy.audience_insight,
         )
+        if story_mode == "offering_proof"
+        else (
+            context.industry,
+            strategy.brand_treatment,
+            strategy.target_audience,
+            _brand_offer_safe_text(
+                strategy.audience_insight,
+                fallback=context.campaign_objective,
+            ),
+        )
     )
 
     return assess_world_class_creative(
@@ -915,6 +1196,7 @@ def _world_class_concept_assessment(
         product_story=proposal.product_story,
         visual_metaphor=proposal.visual_metaphor,
         scroll_stopping_hook=proposal.scroll_stopping_hook,
+        story_mode=story_mode,
     )
 
 
@@ -930,7 +1212,12 @@ def _world_class_policy_blocks_render(assessment) -> bool:
     blocking_failures = {
         "generic_lifestyle_stock_scene",
         "decorative_abstraction_as_story",
+        "no_business_specific_mechanism",
+        "no_product_service_mechanism",
+        "no_customer_cause_effect",
         "replaceable_brand_idea",
+        "weak_marketing_mechanism",
+        "weak_visual_proof",
         "generic_productivity_metaphor",
     }
 
@@ -956,6 +1243,7 @@ def _score_candidates(
     strategy: CreativeStrategyProposal,
     research: CreativeResearchBundle,
     context: PublicCreativeResearchContext,
+    story_mode: CreativeStoryMode = "offering_proof",
 ) -> tuple[CreativeConceptScorecard, ...]:
     signatures = tuple(_concept_signature(proposal) for proposal in proposals)
     research_tokens = _tokens(
@@ -967,18 +1255,33 @@ def _score_candidates(
             )
         )
     )
-    strategy_tokens = _tokens(
-        " ".join(
-            (
+    strategy_scoring_values = (
+        (
+            strategy.campaign_angle,
+            strategy.visual_concept,
+            strategy.subject_focus,
+            strategy.brand_treatment,
+            strategy.target_audience,
+            strategy.audience_insight,
+        )
+        if story_mode == "offering_proof"
+        else (
+            context.industry,
+            context.campaign_objective,
+            strategy.marketing_goal,
+            _brand_offer_safe_text(
                 strategy.campaign_angle,
-                strategy.visual_concept,
-                strategy.subject_focus,
-                strategy.brand_treatment,
-                strategy.target_audience,
+                fallback=context.campaign_objective,
+            ),
+            strategy.brand_treatment,
+            strategy.target_audience,
+            _brand_offer_safe_text(
                 strategy.audience_insight,
-            )
+                fallback=context.campaign_objective,
+            ),
         )
     )
+    strategy_tokens = _tokens(" ".join(strategy_scoring_values))
     results: list[CreativeConceptScorecard] = []
     for index, proposal in enumerate(proposals):
         proposal_text = " ".join(
@@ -1058,15 +1361,20 @@ def _score_candidates(
             f"{proposal.customer_care_reason} {proposal.visual_metaphor}"
         )
         story_tokens = _tokens(product_story_text)
+        unsupported_brand_story = (
+            story_mode == "brand_offer"
+            and _brand_offer_has_unsupported_offering_story(proposal)
+        )
 
         world_class = _world_class_concept_assessment(
             proposal=proposal,
             strategy=strategy,
             context=context,
+            story_mode=story_mode,
         )
 
         genericness_risk = max(
-            _genericness_risk(product_story_text),
+            _genericness_risk(product_story_text, story_mode=story_mode),
             world_class.stock_lifestyle_risk,
             world_class.decorative_abstraction_risk,
         )
@@ -1076,12 +1384,12 @@ def _score_candidates(
                 story_tokens=story_tokens,
                 strategy_tokens=strategy_tokens,
                 proposal=proposal,
+                story_mode=story_mode,
             ),
             world_class.replaceable_brand_risk,
         )
-        story_mechanism = _contains_any(
-            product_story_text,
-            (
+        if story_mode == "offering_proof":
+            story_markers = (
                 "before and after",
                 "connect",
                 "coordinate",
@@ -1092,11 +1400,8 @@ def _score_candidates(
                 "solve",
                 "transform",
                 "workflow",
-            ),
-        )
-        commercial_language = _contains_any(
-            proposal_text,
-            (
+            )
+            commercial_markers = (
                 "commercial",
                 "editorial",
                 "environment",
@@ -1104,7 +1409,39 @@ def _score_candidates(
                 "product",
                 "credible",
                 "tactile",
-            ),
+            )
+        else:
+            story_markers = (
+                "before and after",
+                "campaign mechanism",
+                "consequence",
+                "contrast",
+                "customer tension",
+                "occasion",
+                "reveal",
+                "transition",
+                "transform",
+                "unexpected",
+                "visual tension",
+            )
+            commercial_markers = (
+                "brand",
+                "campaign",
+                "commercial",
+                "contrast",
+                "credible",
+                "editorial",
+                "occasion",
+                "reveal",
+                "tension",
+            )
+        story_mechanism = _contains_any(
+            product_story_text,
+            story_markers,
+        )
+        commercial_language = _contains_any(
+            proposal_text,
+            commercial_markers,
         )
 
         dimensions = {
@@ -1184,6 +1521,19 @@ def _score_candidates(
             "genericness_risk": genericness_risk,
             "replaceable_brand_risk": replaceable_brand_risk,
         }
+        if unsupported_brand_story:
+            # A disobedient Director cannot earn its way past a server-owned
+            # no-invention contract with otherwise polished score dimensions.
+            dimensions.update(
+                {
+                    "business_specific_relevance": 0,
+                    "product_relevance": 0,
+                    "visual_storytelling": 0,
+                    "pr_safety": 0,
+                    "genericness_risk": max(genericness_risk, 90),
+                    "replaceable_brand_risk": max(replaceable_brand_risk, 90),
+                }
+            )
         positive_dimensions = {
             key: value
             for key, value in dimensions.items()
@@ -1207,7 +1557,9 @@ def _score_candidates(
             - genericness_risk * 0.16
             - replaceable_brand_risk * 0.18
         )
-        if _world_class_policy_blocks_render(world_class):
+        if unsupported_brand_story:
+            overall = min(overall, 49)
+        elif _world_class_policy_blocks_render(world_class):
             # A beautiful-but-generic concept must never win server selection.
             overall = min(overall, 49)
         elif genericness_risk >= 65 or replaceable_brand_risk >= 72:
@@ -1246,15 +1598,44 @@ def _pattern_fit(
     )
 
 
+_BRAND_OFFER_UNSAFE_PATTERN_KEYS = frozenset(
+    {
+        "saas_control_center",
+        "product_spotlight",
+        "immersive_story",
+    }
+)
+
+
 def _ranked_patterns(
     context: PublicCreativeResearchContext,
+    *,
+    story_mode: CreativeStoryMode = "offering_proof",
 ) -> tuple[_DesignPattern, ...]:
-    return tuple(
+    if story_mode not in {"offering_proof", "brand_offer"}:
+        raise ValueError("Creative story mode is invalid")
+
+    eligible_patterns = (
+        _PATTERNS
+        if story_mode == "offering_proof"
+        else tuple(
+            pattern
+            for pattern in _PATTERNS
+            if pattern.key not in _BRAND_OFFER_UNSAFE_PATTERN_KEYS
+        )
+    )
+
+    ranked = tuple(
         sorted(
-            _PATTERNS,
+            eligible_patterns,
             key=lambda pattern: (-_pattern_fit(pattern, context), pattern.key),
         )[:3]
     )
+
+    if len(ranked) != 3:
+        raise ValueError("Creative story mode has insufficient safe design patterns")
+
+    return ranked
 
 
 def _concept_signature(
@@ -1331,7 +1712,13 @@ def _bounded_score(value: float) -> int:
     return max(0, min(100, round(value)))
 
 
-def _genericness_risk(value: str) -> int:
+def _genericness_risk(
+    value: str,
+    *,
+    story_mode: CreativeStoryMode = "offering_proof",
+) -> int:
+    if story_mode not in {"offering_proof", "brand_offer"}:
+        raise ValueError("Creative story mode is invalid")
     decorative_markers = (
         "abstract",
         "circle",
@@ -1354,28 +1741,43 @@ def _genericness_risk(value: str) -> int:
         "waves",
     )
     meaningful_markers = (
-        "customer",
-        "customers",
-        "demonstrate",
-        "demonstrates",
-        "human",
-        "humans",
-        "in use",
-        "operation",
-        "operational",
-        "operations",
-        "outcome",
-        "outcomes",
-        "offering",
-        "offerings",
-        "product",
-        "products",
-        "service",
-        "services",
-        "transform",
-        "transformation",
-        "workflow",
-        "workflows",
+        (
+            "customer",
+            "customers",
+            "demonstrate",
+            "demonstrates",
+            "human",
+            "humans",
+            "in use",
+            "operation",
+            "operational",
+            "operations",
+            "outcome",
+            "outcomes",
+            "offering",
+            "offerings",
+            "product",
+            "products",
+            "service",
+            "services",
+            "transform",
+            "transformation",
+            "workflow",
+            "workflows",
+        )
+        if story_mode == "offering_proof"
+        else (
+            "audience tension",
+            "brand",
+            "campaign",
+            "consequence",
+            "contrast",
+            "occasion",
+            "reveal",
+            "transition",
+            "transformation",
+            "unexpected",
+        )
     )
     decorative_count = sum(
         _contains_any(value, (marker,)) for marker in decorative_markers
@@ -1391,10 +1793,12 @@ def _replaceable_brand_risk(
     story_tokens: frozenset[str],
     strategy_tokens: frozenset[str],
     proposal: CreativeConceptProposal,
+    story_mode: CreativeStoryMode = "offering_proof",
 ) -> int:
+    if story_mode not in {"offering_proof", "brand_offer"}:
+        raise ValueError("Creative story mode is invalid")
     overlap = _overlap_ratio(story_tokens, strategy_tokens)
-    explicit_story = _contains_any(
-        f"{proposal.marketing_idea} {proposal.product_story} {proposal.hero_relevance}",
+    explicit_story_markers = (
         (
             "demonstrate",
             "demonstrates",
@@ -1410,7 +1814,24 @@ def _replaceable_brand_risk(
             "transformation",
             "workflow",
             "workflows",
-        ),
+        )
+        if story_mode == "offering_proof"
+        else (
+            "audience tension",
+            "campaign mechanism",
+            "consequence",
+            "contrast",
+            "occasion",
+            "reveal",
+            "transition",
+            "transformation",
+            "unexpected",
+            "visual tension",
+        )
+    )
+    explicit_story = _contains_any(
+        f"{proposal.marketing_idea} {proposal.product_story} {proposal.hero_relevance}",
+        explicit_story_markers,
     )
     return _bounded_score(
         82 - overlap * 58 - (14 if explicit_story else 0)

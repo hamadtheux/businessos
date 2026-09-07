@@ -484,6 +484,97 @@ test("AI CMO content details use a governed right-side post workspace", async ()
   assert.match(styles, /@media \(max-width: 680px\)[\s\S]*\.workspace-drawer-panel \.field input,[\s\S]*font-size: 16px/);
 });
 
+test("AI CMO content library keeps previews compact and actions capability-driven", async () => {
+  const [social, contentUi, styles] = await Promise.all([
+    readFile(new URL("../features/marketing/marketing-pages.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../features/marketing/cmo-content-ui.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../index.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(social, /<ContentLibraryCard/);
+  assert.match(social, /marketingApi\.creative\.list\(activeBusinessId, undefined, undefined, signal\)/);
+  assert.match(contentUi, /safeCreativeMediaUrl\(creative\?\.storage_reference\)/);
+  assert.match(contentUi, /creativeMediaPresentation\(creative\)/);
+  assert.match(contentUi, /data-state=\{previewMissing \? "preview_unavailable" : creative\.generation_status\}/);
+  assert.match(contentUi, /onError=\{\(\) => setFailedPreviewKey\(previewKey\)\}/);
+  assert.match(contentUi, /role=\{presentation\.active \? "status" : undefined\}/);
+  assert.doesNotMatch(contentUi, /readableContentValue\(creative\.generation_status\)/);
+  assert.match(contentUi, /className="cmo-content-card-open"/);
+  assert.match(contentUi, /aria-label=\{`Open \$\{content\.title\}`\}/);
+  assert.match(contentUi, /content\.status === "approved" && capability\.canPrepare/);
+  assert.match(contentUi, /content\.status === "approved"[\s\S]*onSchedule/);
+  assert.match(contentUi, /<details className="cmo-ai-disclosure">/);
+  assert.match(styles, /\.cmo-content-card \.social-copy \{[\s\S]*-webkit-line-clamp: 3/);
+  assert.match(styles, /\.cmo-content-card-title \{[\s\S]*-webkit-line-clamp: 2/);
+  assert.match(styles, /\.cmo-content-card-media-state \{[\s\S]*text-align: center/);
+  assert.match(styles, /@media \(max-width: 470px\)[\s\S]*\.cmo-content-card-main\.has-media \{[\s\S]*grid-template-columns: 1fr/);
+});
+
+test("content creation surfaces keep capability, loading, and calendar states truthful", async () => {
+  const [page, social, styles] = await Promise.all([
+    readFile(new URL("../features/marketing/cmo-page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../features/marketing/marketing-pages.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../index.css", import.meta.url), "utf8"),
+  ]);
+
+  const plan = social.slice(
+    social.indexOf('<Card className="intelligence-hero cmo-content-plan">'),
+    social.indexOf('<div className="social-channel-strip">'),
+  );
+  assert.match(plan, /contentPlan\.isLoading/);
+  assert.match(plan, /contentPlan\.isError/);
+  assert.match(plan, /humanizeApiError\(\s*contentPlan\.error/);
+  assert.match(plan, /void contentPlan\.refetch\(\)/);
+  assert.match(plan, /"Retry plan"/);
+  assert.doesNotMatch(plan, /"Scheduling…"/);
+
+  const capabilityStrip = social.slice(
+    social.indexOf('<div className="social-channel-strip">'),
+    social.indexOf('<div className="cmo-content-library-heading">'),
+  );
+  for (const label of [
+    "Publishing ready",
+    "Checking readiness",
+    "Readiness unknown",
+    "Connection required",
+    "Planning only",
+  ]) {
+    assert.equal(capabilityStrip.includes(label), true, label);
+  }
+  assert.match(capabilityStrip, /capability\.state === "checking"/);
+  assert.match(capabilityStrip, /capability\.state === "unverified"/);
+  assert.doesNotMatch(capabilityStrip, /setup_status\.replaceAll/);
+  assert.match(social, /Publishing readiness could not be verified/);
+  assert.match(social, /void refreshPublishingReadiness\(\)/);
+
+  assert.match(social, /libraryAssets\.isError/);
+  assert.match(social, /Creative previews could not load/);
+  assert.match(social, /void libraryAssets\.refetch\(\)/);
+  assert.match(social, /Loading creative previews…/);
+  assert.match(social, /className="cmo-content-loading-card"/);
+  assert.match(social, /Loading content library…/);
+
+  const calendar = social.slice(
+    social.indexOf('<Card className="cmo-calendar-management">'),
+    social.indexOf("<CmoContentGeneratorDrawer", social.indexOf('<Card className="cmo-calendar-management">')),
+  );
+  assert.match(calendar, /role="tablist" aria-label="Calendar range"/);
+  assert.match(calendar, /aria-selected=\{calendarDays === days\}/);
+  assert.match(calendar, /className="cmo-calendar-reschedule"/);
+  assert.match(calendar, /disabled=\{reschedule\.isPending \|\| unschedule\.isPending\}/);
+  assert.match(calendar, /className="cmo-calendar-management-loading" role="status" aria-live="polite"/);
+
+  assert.match(page, /queryKey: \["integrations", activeBusinessId\]/);
+  assert.match(page, /onClick=\{\(\) => void refreshWorkspace\(\)\}/);
+  assert.match(page, /analytics\.isLoading \? <Card>/);
+  assert.match(page, /Loading recorded performance…/);
+
+  assert.match(styles, /\.cmo-content-query-state \{[\s\S]*min-height: 52px/);
+  assert.match(styles, /\.cmo-calendar-reschedule \{[\s\S]*width: 190px/);
+  assert.match(styles, /@media \(max-width: 1100px\) \{[\s\S]*\.cmo-studio-calendar-grid \{[\s\S]*grid-template-columns: 1fr/);
+  assert.match(styles, /@media \(max-width: 680px\) \{[\s\S]*\.cmo-calendar-manage-row \{[\s\S]*grid-template-columns: 24px minmax\(0, 1fr\)/);
+});
+
 test("AI CMO creation flows use the accessible responsive workspace drawer", async () => {
   const [page, studio, social, contentDrawer, productUi, sheet, styles] = await Promise.all([
     readFile(new URL("../features/marketing/cmo-page.tsx", import.meta.url), "utf8"),

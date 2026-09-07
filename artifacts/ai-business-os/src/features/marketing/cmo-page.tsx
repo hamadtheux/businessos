@@ -5,6 +5,7 @@ import { useLocation } from "wouter";
 import { useBusiness } from "@/business-context";
 import { Badge, Button, Card, Modal, PageHeader, SectionTitle, WorkspaceDrawer } from "@/components/product-ui";
 import { CmoContentGeneratorDrawer } from "@/features/marketing/cmo-content-generator-drawer";
+import { CmoCalendarCompanion } from "@/features/marketing/cmo-content-ui";
 import { CmoContentStudioCard } from "@/features/marketing/cmo-content-studio";
 import { CmoDepartmentNav } from "@/features/marketing/marketing-pages";
 import {
@@ -119,6 +120,10 @@ export function CmoPage() {
   });
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["marketing", activeBusinessId] });
+  const refreshWorkspace = () => Promise.all([
+    queryClient.invalidateQueries({ queryKey: ["marketing", activeBusinessId] }),
+    queryClient.invalidateQueries({ queryKey: ["integrations", activeBusinessId] }),
+  ]);
   const refreshCreatives = () => queryClient.invalidateQueries({
     queryKey: ["marketing", activeBusinessId, "creative-assets"],
   });
@@ -424,7 +429,8 @@ export function CmoPage() {
     plans.isLoading && content.isLoading && analytics.isLoading;
   const hasPartialFailure =
     plans.isError || content.isError || analytics.isError ||
-    calendar.isError || campaigns.isError || creativeAssets.isError;
+    calendar.isError || campaigns.isError || creativeAssets.isError ||
+    integrationRegistry.isError || integrationConnections.isError;
   const openStrategyDrawer = () => {
     setError("");
     setShowPlanGenerator(true);
@@ -474,11 +480,11 @@ export function CmoPage() {
     <CmoDepartmentNav active={activeTab} />
     {notice && <div className="ai-banner" role="status" aria-live="polite"><Check /> {notice}<button className="close-btn" onClick={() => setNotice("")}><X /></button></div>}
     {error && <div className="ai-banner" role="alert" aria-live="assertive"><AlertCircle /> {error}<button className="close-btn" onClick={() => setError("")}><X /></button></div>}
-    {hasPartialFailure && <div className="ai-banner"><AlertCircle />Some marketing sections could not refresh. Available internal planning data remains usable.<Button className="btn-sm" onClick={() => void refresh()}>Retry failed sections</Button></div>}
+    {hasPartialFailure && <div className="ai-banner" role="status" aria-live="polite"><AlertCircle />Some marketing sections could not refresh. Available internal planning data remains usable.<Button className="btn-sm" onClick={() => void refreshWorkspace()}>Retry failed sections</Button></div>}
     {initialLoading ? <Card><div className="empty"><RefreshCw className="spin" /><p>Assembling the marketing workspace…</p></div></Card> : <>
-      {analytics.isError ? <Card><div className="empty"><BarChart3 /><h3>Recorded performance could not load</h3><p>{humanizeApiError(analytics.error, "Retry the performance section. Internal plans and content are still available.")}</p><Button onClick={() => void analytics.refetch()}>Retry performance</Button></div></Card> : <div className="grid kpi-grid"><Kpi title="Reach" value={(metrics?.reach ?? 0).toLocaleString()} foot="Recorded in selected period" icon={<Globe2 />} tone="green" /><Kpi title="Click-through rate" value={`${Number(metrics?.ctr ?? 0).toFixed(2)}%`} foot={`${metrics?.clicks ?? 0} recorded clicks`} icon={<TrendingUp />} tone="orange" /><Kpi title="Leads" value={String(metrics?.leads ?? 0)} foot="Attributed records only" icon={<Target />} tone="brown" /><Kpi title="Revenue / ROAS" value={`${money(metrics?.revenue ?? "0")} · ${Number(metrics?.roas ?? 0).toFixed(2)}x`} foot={`${money(metrics?.spend ?? "0")} recorded spend`} icon={<BarChart3 />} tone="rose" /></div>}
+      {analytics.isError ? <Card><div className="empty"><BarChart3 /><h3>Recorded performance could not load</h3><p>{humanizeApiError(analytics.error, "Retry the performance section. Internal plans and content are still available.")}</p><Button onClick={() => void analytics.refetch()}>Retry performance</Button></div></Card> : analytics.isLoading ? <Card><div className="empty" role="status" aria-live="polite"><RefreshCw className="spin" /><p>Loading recorded performance…</p></div></Card> : <div className="grid kpi-grid"><Kpi title="Reach" value={(metrics?.reach ?? 0).toLocaleString()} foot="Recorded in selected period" icon={<Globe2 />} tone="green" /><Kpi title="Click-through rate" value={`${Number(metrics?.ctr ?? 0).toFixed(2)}%`} foot={`${metrics?.clicks ?? 0} recorded clicks`} icon={<TrendingUp />} tone="orange" /><Kpi title="Leads" value={String(metrics?.leads ?? 0)} foot="Attributed records only" icon={<Target />} tone="brown" /><Kpi title="Revenue / ROAS" value={`${money(metrics?.revenue ?? "0")} · ${Number(metrics?.roas ?? 0).toFixed(2)}x`} foot={`${money(metrics?.spend ?? "0")} recorded spend`} icon={<BarChart3 />} tone="rose" /></div>}
       <div className="grid split-grid"><Card><SectionTitle title="Current strategy" action={<Badge tone={plans.data?.items[0]?.status === "active" ? "success" : "warning"}>{plans.data?.items[0]?.status || "No plan"}</Badge>} />{plans.isError ? <div className="empty"><AlertCircle /><h3>Strategy could not load</h3><p>{humanizeApiError(plans.error, "Retry this section.")}</p><Button onClick={() => void plans.refetch()}>Retry strategy</Button></div> : plans.isLoading ? <div className="empty"><RefreshCw className="spin" /><p>Loading strategy…</p></div> : plans.data?.items[0] ? <><div className="eyebrow">{plans.data.items[0].generated_by === "ai" ? "AI CMO conclusion" : "User strategy"}</div><h2>{plans.data.items[0].title}</h2><p className="detail-copy">{plans.data.items[0].positioning}</p><div className="recommendation-strip"><Sparkles /><div><div className="eyebrow">Key message</div><p>{plans.data.items[0].key_message}</p></div></div><div className="chip-list">{plans.data.items[0].channels.map((channel) => <Badge tone="info" key={channel}>{channel}</Badge>)}</div><div className="toolbar" style={{ marginTop: 14 }}><Button className="btn-sm" onClick={() => setEditingPlan(true)}>Review & edit</Button>{plans.data.items[0].status === "ready" && <Button variant="green" className="btn-sm" disabled={movePlan.isPending} onClick={() => movePlan.mutate("active")}>Activate strategy</Button>}{plans.data.items[0].status === "active" && <Button variant="green" className="btn-sm" disabled={movePlan.isPending} onClick={() => movePlan.mutate("completed")}>Complete strategy</Button>}{plans.data.items[0].status === "completed" && <Button className="btn-sm" disabled={movePlan.isPending} onClick={() => movePlan.mutate("archived")}>Archive</Button>}</div></> : <div className="empty"><Target /><h3>Your AI marketing workspace is ready</h3><p>Generate a strategy from the trusted Business Brain. Channel connections are optional until execution.</p><Button variant="primary" className="cmo-card-cta" onClick={openStrategyDrawer}>Generate marketing plan</Button></div>}</Card><Card><SectionTitle title="Campaign operating system" action={<Badge>{campaigns.data?.total ?? 0} campaigns</Badge>} />{campaigns.isError ? <div className="empty"><AlertCircle /><h3>Campaign drafts could not load</h3><p>{humanizeApiError(campaigns.error, "Retry campaign planning.")}</p><Button onClick={() => void campaigns.refetch()}>Retry campaigns</Button></div> : campaigns.isLoading ? <div className="empty"><RefreshCw className="spin" /><p>Loading campaigns…</p></div> : <>{campaigns.data?.items.slice(0, 5).map((campaign) => <div className="list-row" key={campaign.id}><Target /><div className="row-main"><strong>{campaign.name}</strong><div className="row-copy">{campaign.objective}</div></div><Badge tone={campaign.status === "active" ? "success" : campaign.status === "awaiting_approval" ? "warning" : "neutral"}>{campaign.status.replaceAll("_", " ")}</Badge></div>)}{!campaigns.data?.items.length && <div className="empty"><Target /><h3>No campaign drafts</h3><p>Campaign planning works before Meta or Google is connected.</p><LinkButton href="/campaigns?new=1">Prepare campaign</LinkButton></div>}</>}<div className="ai-banner"><AlertCircle />Connect Meta or Google Ads only when you are ready for governed external execution.</div></Card></div>
-      <div className="grid split-grid">
+      <div className="grid split-grid cmo-studio-calendar-grid">
         <CmoContentStudioCard
           content={primary}
           businessName={activeBusiness?.name}
@@ -503,7 +509,10 @@ export function CmoPage() {
           onGenerate={openContentDrawer}
           onRegenerate={(item) => regenerate.mutate(item)}
           onApprove={(item) => approve.mutate(item)}
-          onSchedule={(item) => setSchedule(item)}
+          onSchedule={(item) => {
+            setError("");
+            setSchedule(item);
+          }}
           publishingCapability={primaryPublishingCapability}
           isPreparingPublish={preparePublish.isPending}
           onPreparePublish={(item) => preparePublish.mutate(item)}
@@ -528,7 +537,18 @@ export function CmoPage() {
           onRegenerateCreative={(asset) => regenerateCreative.mutate({ asset })}
           onVariationCreative={(asset) => regenerateCreative.mutate({ asset, mode: "alternate_metaphor" })}
         />
-        <Card><SectionTitle title="Content calendar" action={<Badge>{calendar.data?.length ?? 0} upcoming</Badge>} />{calendar.isError ? <div className="empty"><AlertCircle /><h3>Calendar could not load</h3><p>{humanizeApiError(calendar.error, "Retry the internal calendar.")}</p><Button onClick={() => void calendar.refetch()}>Retry calendar</Button></div> : calendar.isLoading ? <div className="empty"><RefreshCw className="spin" /><p>Loading calendar…</p></div> : <>{calendar.data?.slice(0, 8).map((item) => { const contentItem = content.data?.items.find((value) => value.id === item.content_id); return <div className="list-row" key={item.id}><div style={{ width: 86, color: "#938c83", fontSize: 10 }}>{new Date(item.scheduled_for).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}</div><div className="row-main"><div className="row-title">{contentItem?.title || `${item.channel} content`}</div><div className="row-copy">{new Date(item.scheduled_for).toLocaleTimeString()} · {item.timezone}</div></div><Badge tone="success">{item.status.replaceAll("_", " ")}</Badge></div>; })}{!calendar.data?.length && <div className="empty"><Calendar /><h3>No content scheduled</h3><p>Approved content can be added to the internal calendar without a publishing provider.</p></div>}</>}</Card></div>
+        <CmoCalendarCompanion
+          items={calendar.data}
+          content={content.data?.items}
+          isLoading={calendar.isLoading}
+          error={calendar.isError ? humanizeApiError(calendar.error, "Retry the internal calendar.") : null}
+          onRetry={() => void calendar.refetch()}
+          onSchedule={(item) => {
+            setError("");
+            setSchedule(item);
+          }}
+        />
+      </div>
     </>}
     <CmoContentGeneratorDrawer
       open={showContentGenerator}

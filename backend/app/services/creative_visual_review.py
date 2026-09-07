@@ -7,7 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.agents.provider import AIAgentProviderMetadata
 
-from app.services.creative_world_class import WORLD_CLASS_VISUAL_CRITIC_CONTRACT
+from app.services.creative_world_class import (
+    CreativeStoryMode,
+    WORLD_CLASS_VISUAL_CRITIC_CONTRACT,
+)
 
 
 VisualRepairClass = Literal["none", "layout", "raw_visual"]
@@ -106,7 +109,6 @@ class CreativeVisualReview(BaseModel):
     def validate_decision(self) -> CreativeVisualReview:
         raw_failure = (
             self.accidental_generated_text
-            or self.duplicated_message
             or self.irrelevant_visual
             or self.irrelevant_decorative_art
             or self.meaningless_focal_story
@@ -117,7 +119,8 @@ class CreativeVisualReview(BaseModel):
             or self.generic_template_output
         )
         layout_failure = (
-            self.excessive_whitespace
+            self.duplicated_message
+            or self.excessive_whitespace
             or self.overcrowding
             or self.unnatural_headline_wrapping
             or self.weak_brand_cta
@@ -236,6 +239,7 @@ class CreativeVisualReviewRequest:
     expected_cta: str | None
     brand_expectations: str
     quality_threshold: int
+    review_mode: CreativeStoryMode
 
     def __post_init__(self) -> None:
         if (
@@ -256,6 +260,8 @@ class CreativeVisualReviewRequest:
             _bounded(self.expected_offer, "expected offer", 160)
         if self.expected_cta is not None:
             _bounded(self.expected_cta, "expected CTA", 300)
+        if self.review_mode not in {"offering_proof", "brand_offer"}:
+            raise ValueError("Visual review mode is invalid")
         if not 60 <= self.quality_threshold <= 95:
             raise ValueError("Visual review quality threshold is invalid")
 
@@ -281,6 +287,21 @@ class CreativeVisualReviewProviderError(RuntimeError):
     """Safe visual-review failure that never contains provider payloads."""
 
 
+def validate_visual_review_for_mode(
+    review: CreativeVisualReview,
+    *,
+    story_mode: CreativeStoryMode,
+) -> CreativeVisualReview:
+    """Reject a typed critic result that contradicts its server-owned mode."""
+    if story_mode not in {"offering_proof", "brand_offer"}:
+        raise ValueError("Creative story mode is invalid")
+    if story_mode == "brand_offer" and review.no_product_service_story:
+        raise CreativeVisualReviewProviderError(
+            "Visual reviewer contradicted the active story mode"
+        )
+    return review
+
+
 def build_visual_review_task(
     request: CreativeVisualReviewRequest,
 ) -> str:
@@ -292,6 +313,39 @@ def build_visual_review_task(
     records, private Business Brain documents, research URLs, credentials, source
     images, storage identifiers, or provider internals.
     """
+    mode_contract = (
+        (
+            "REVIEW MODE: offering_proof. A tenant-scoped campaign selection proves "
+            "a real catalog product/service is in scope. Require credible visible "
+            "offering/category/use-case proof. "
+        )
+        if request.review_mode == "offering_proof"
+        else (
+            "REVIEW MODE: brand_offer. No campaign-selected catalog offering is "
+            "authoritative. Do not require or invent product/service proof; "
+            "no_product_service_story must be false. Score product_relevance as "
+            "relevance to the grounded campaign, offer, category context, and brand. "
+        )
+    )
+
+    world_class_contract = (
+        WORLD_CLASS_VISUAL_CRITIC_CONTRACT.strip()
+        if request.review_mode == "offering_proof"
+        else (
+            "WORLD-CLASS BRAND/OFFER REVIEW:\n\n"
+            "Do not approve an image merely because it is clean, premium, realistic, "
+            "or technically well generated. Reject generic stock/lifestyle scenes, "
+            "swap-logo creative, generic productivity imagery, meaningless decorative "
+            "abstraction, weak focal storytelling, disconnected brand treatment, or "
+            "an image whose only campaign meaning comes from the overlaid copy. "
+            "A world-class approval requires a distinctive campaign idea, intentional "
+            "brand ownership, meaningful offer/campaign/category relevance, strong art "
+            "direction, scroll-stopping visual logic, and commercial specificity. "
+            "Do not require, imply, or invent a product/service mechanism when the "
+            "campaign has no authoritative selected catalog offering."
+        )
+    )
+
     task = (
         "Review the attached final marketing creative as an exceptionally strict "
         "global-agency Creative Director and visual quality critic. Judge only what "
@@ -308,7 +362,8 @@ def build_visual_review_task(
         f"- Exact offer: {request.expected_offer or '[none]'}\n"
         f"- Exact CTA: {request.expected_cta or '[none]'}\n"
         f"- Brand expectations: {request.brand_expectations}\n"
-        f"- Runtime approval target: {request.quality_threshold}/100.\n\n"
+        f"- Runtime approval target: {request.quality_threshold}/100.\n"
+        f"- {mode_contract}\n\n"
 
         "SCORING STANDARD:\n"
         "Score every typed semantic dimension independently. The existing server "
@@ -320,25 +375,27 @@ def build_visual_review_task(
         "FOUR NON-NEGOTIABLE REVIEW LAYERS:\n"
         "1. COMMERCIAL IDEA — Is there an actual advertising idea, mechanism, "
         "tension, demonstration, transformation, or customer consequence?\n"
-        "2. BUSINESS PROOF — Does the visual itself communicate the supported "
-        "product/service, workflow, use case, customer moment, or outcome?\n"
+        "2. BUSINESS PROOF — Does the visual support the active review mode: "
+        "offering proof when an offering is selected, otherwise the grounded "
+        "campaign/offer/category/brand intent?\n"
         "3. BRAND OWNERSHIP — Does this feel intentionally created for this business, "
         "rather than unrelated stock art with a logo and palette pasted on top?\n"
         "4. EXECUTION — Is hierarchy, typography, composition, identity, readability, "
         "spacing, focal control, sophistication, polish and channel fit genuinely "
         "professional?\n\n"
 
-        f"{WORLD_CLASS_VISUAL_CRITIC_CONTRACT.strip()}\n\n"
+        f"{world_class_contract}\n\n"
 
         "MANDATORY FAILURE MAPPING:\n"
 
         "- GENERIC STOCK/LIFESTYLE SCENE: A premium desk, coffee mug, stacked books, "
         "glasses, plant, notebook, laptop, generic office, generic person-at-laptop, "
         "or aspirational lifestyle scene is NOT a business story merely because it "
-        "looks polished. When those objects do not visibly demonstrate the supported "
-        "offering, set generic_template_output=true, replaceable_brand_creative=true, "
-        "commercially_weak=true, and no_product_service_story=true as applicable. "
-        "This is a raw_visual failure.\n"
+        "looks polished. When those objects do not serve the active review mode, set "
+        "generic_template_output=true, replaceable_brand_creative=true, and "
+        "commercially_weak=true. Set no_product_service_story only in offering_proof "
+        "mode when supported offering proof is actually missing. This is a raw_visual "
+        "failure.\n"
 
         "- SWAP-LOGO FAILURE: Mentally replace the displayed identity with an "
         "unrelated bank, furniture company, productivity app, consultancy, or SaaS "
@@ -352,29 +409,31 @@ def build_visual_review_task(
         "business_specific_relevance below the passing floor and classify the "
         "appropriate raw_visual failures.\n"
 
-        "- COPY-CARRIES-THE-STORY FAILURE: If the headline/supporting copy explains "
-        "the value proposition but the image itself provides no visual evidence of "
-        "the product/service mechanism or customer outcome, set "
-        "no_product_service_story=true and commercially_weak=true. The visual must "
-        "earn its role even before marketing copy is read.\n"
+        "- COPY-CARRIES-THE-STORY FAILURE: If the copy explains the value but the "
+        "image itself provides no visual support for the active review mode, set "
+        "commercially_weak=true. In offering_proof mode also set "
+        "no_product_service_story=true when offering proof is absent. In brand_offer "
+        "mode judge campaign/offer/category/brand support without inventing a product.\n"
 
         "- DECORATIVE-ABSTRACTION FAILURE: Gradients, waves, rings, concentric "
         "circles, glowing orbs, blobs, generic neural motifs, floating geometry, or "
         "decorative technology effects cannot substitute for an advertising idea. "
-        "When they dominate without meaningful product/service storytelling, set "
+        "When they dominate without meaningful storytelling for the active review "
+        "mode, set "
         "decorative_abstraction_dominates=true and commercially_weak=true.\n"
 
         "- GENERIC AI/SAAS FANTASY FAILURE: Do not automatically reward floating "
         "dashboards, holographic interfaces, glowing data panels, robots, brains, "
         "neural networks, or generic futuristic AI imagery. If those elements do "
-        "not credibly demonstrate the supplied concept/product story, treat them as "
+        "not credibly demonstrate the supplied concept and active-mode story, treat "
+        "them as "
         "generic template output or irrelevant visual storytelling.\n"
 
-        "- VISUAL-PROOF FAILURE: If the supported product/service supposedly causes "
-        "an outcome but the visual does not make that cause-and-effect understandable, "
-        "score product_relevance, business_specific_relevance, visual_storytelling, "
-        "commercial_sophistication and campaign_alignment accordingly. Do not allow "
-        "beautiful execution to compensate for missing proof.\n"
+        "- VISUAL-PROOF FAILURE: In offering_proof mode, require understandable "
+        "product/service cause-and-effect. In brand_offer mode, require a meaningful "
+        "campaign/offer/category/brand visual idea without fabricating an offering. "
+        "Score relevance, storytelling, commercial sophistication and alignment "
+        "accordingly; beautiful execution cannot compensate for missing meaning.\n"
 
         "- BRAND COLOR FAILURE: Correct palette usage must feel integrated with the "
         "scene and composition. Simply tinting unrelated stock imagery with the "
@@ -382,13 +441,13 @@ def build_visual_review_task(
 
         "- CTA/LOGO/LAYOUT FAILURE: If the underlying commercial artwork is strong "
         "and only deterministic hierarchy, typography, spacing, CTA treatment, logo "
-        "placement, or composition needs repair, classify as layout rather than "
-        "raw_visual.\n"
+        "placement, composition, or duplicated deterministic messaging needs repair, "
+        "classify as layout rather than raw_visual.\n"
 
-        "- RAW-VISUAL FAILURE: Generic concept, irrelevant hero, missing product "
-        "story, replaceable-brand creative, meaningless focal story, commercial "
-        "weakness, or dominant decorative abstraction requires raw_visual repair. "
-        "Do not misclassify those problems as layout.\n\n"
+        "- RAW-VISUAL FAILURE: Generic concept, irrelevant hero, replaceable-brand "
+        "creative, meaningless focal story, commercial weakness, dominant decorative "
+        "abstraction, or—only in offering_proof mode—missing offering proof requires "
+        "raw_visual repair. Do not misclassify those problems as layout.\n\n"
 
         "APPROVAL TEST:\n"
         "Approve only if the final creative could credibly appear in the portfolio "

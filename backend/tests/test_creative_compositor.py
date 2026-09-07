@@ -143,6 +143,26 @@ class CreativeCompositorTests(TestCase):
             self.assertEqual(image.format, "PNG")
             self.assertEqual(image.size, (640, 640))
 
+    def test_optional_supporting_copy_is_omitted_while_exact_offer_is_preserved(self) -> None:
+        result = CreativeCompositor().compose(
+            _input(
+                headline="50% Off",
+                supporting_copy=None,
+                offer="50% off",
+            )
+        )
+
+        self.assertNotIn("supporting_copy", result.quality.rendered_text)
+        self.assertNotIn("supporting_copy", result.quality.text_bounds)
+        self.assertEqual(
+            _normalize(result.quality.rendered_text["headline"]),
+            "50% Off",
+        )
+        self.assertEqual(
+            _normalize(result.quality.rendered_text["offer"]),
+            "50% off",
+        )
+
     def test_story_uses_vertical_safe_layout(self) -> None:
         result = CreativeCompositor().compose(
             _input(

@@ -94,6 +94,10 @@ export function CmoContentGeneratorDrawer({
     const selected = form.getAll("platforms").map(String) as MarketingChannel[];
     const additional = String(form.get("additional_channel") || "") as MarketingChannel;
     if (additional) selected.push(additional);
+    if (!selected.length) {
+      setValidationError("Choose at least one platform.");
+      return;
+    }
     const offer = String(form.get("offer") || "").trim();
     const offerAuthorized = form.get("offer_authorized") === "on";
     if (offer && !canAuthorizeOffer) {

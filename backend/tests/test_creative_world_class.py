@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from app.services.creative_visual_review import build_visual_review_task
 from app.services.creative_world_class import (
     assess_world_class_creative,
+    world_class_director_contract,
+    world_class_raw_visual_contract,
     world_class_regeneration_instruction,
 )
 
@@ -195,6 +197,7 @@ def test_visual_review_task_uses_real_newlines_not_literal_escape_text() -> None
             expected_cta="Learn more",
             brand_expectations="Use the controlled tenant identity.",
             quality_threshold=82,
+            review_mode="offering_proof",
         )
     )
 
@@ -318,3 +321,158 @@ def test_server_owned_regeneration_instruction_targets_generic_stock_failure() -
     assert "chain-of-thought" not in normalized
     assert "http://" not in normalized
     assert "https://" not in normalized
+
+
+def _brand_offer_concept(**overrides: str):
+    values = {
+        "business_context": (
+            "9D Brain is a technology brand for small business owners managing "
+            "marketing, sales, support, and daily operations."
+        ),
+        "campaign_goal": "Build awareness through a distinctive launch-day campaign.",
+        "audience": "Small business owners facing a crowded launch day.",
+        "subject_focus": "A grounded launch-day audience tension and reveal.",
+        "campaign_angle": "Turn launch-day noise into one confident decision moment.",
+        "marketing_idea": (
+            "A campaign-specific before-and-after contrast turns launch-day tension "
+            "into one unmistakable branded reveal."
+        ),
+        "customer_care_reason": (
+            "Owners care because launch-day noise creates hesitation; the reveal "
+            "turns that tension into a clear next decision."
+        ),
+        "hero_subject": (
+            "A small-business launch moment split between crowded signals and one "
+            "confident brand-owned decision."
+        ),
+        "hero_relevance": (
+            "The visual contrast and reveal are specific to the grounded launch "
+            "campaign and its small-business audience."
+        ),
+        "product_story": (
+            "The compatibility field describes audience tension, visual transition, "
+            "reveal, and consequence without asserting an offering."
+        ),
+        "visual_metaphor": (
+            "A launch-day transition from crowded choices to a single confident path."
+        ),
+        "scroll_stopping_hook": (
+            "An unexpected visual reveal resolves the campaign tension in one glance."
+        ),
+        "story_mode": "brand_offer",
+    }
+    values.update(overrides)
+    return assess_world_class_creative(**values)
+
+
+def test_story_mode_entry_points_reject_invalid_values() -> None:
+    invalid = "unsupported_mode"
+    kwargs = {
+        "business_context": "Grounded business context",
+        "campaign_goal": "Grounded campaign goal",
+        "audience": "Grounded audience",
+        "subject_focus": "Grounded subject",
+        "campaign_angle": "Grounded angle",
+        "marketing_idea": "Grounded idea",
+        "customer_care_reason": "Grounded reason",
+        "hero_subject": "Grounded hero",
+        "hero_relevance": "Grounded relevance",
+        "product_story": "Grounded story",
+        "visual_metaphor": "Grounded metaphor",
+        "scroll_stopping_hook": "Grounded hook",
+        "story_mode": invalid,
+    }
+    import pytest
+
+    with pytest.raises(ValueError, match="story mode"):
+        assess_world_class_creative(**kwargs)  # type: ignore[arg-type]
+    for selector in (world_class_director_contract, world_class_raw_visual_contract):
+        with pytest.raises(ValueError, match="story mode"):
+            selector(invalid)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="story mode"):
+        world_class_regeneration_instruction((), story_mode=invalid)  # type: ignore[arg-type]
+
+
+def test_offering_proof_keeps_the_existing_product_mechanism_contract() -> None:
+    implicit = _strong_9d_brain_concept()
+    explicit = _strong_9d_brain_concept(story_mode="offering_proof")
+    assert explicit == implicit
+    assert "actual supported product" in world_class_raw_visual_contract(
+        "offering_proof"
+    ).casefold()
+    assert "supported product or service" in world_class_regeneration_instruction(
+        ("weak_visual_proof",),
+        story_mode="offering_proof",
+    ).casefold()
+
+
+def test_brand_offer_accepts_a_grounded_campaign_mechanism_without_product_proof() -> None:
+    result = _brand_offer_concept()
+    assert "no_product_service_mechanism" not in result.hard_failures
+    assert result.product_service_mechanism >= 64
+    assert result.approved is True
+
+
+def test_brand_offer_cannot_launder_generic_props_through_generated_subject_focus() -> None:
+    result = _brand_offer_concept(
+        subject_focus="Premium desk, coffee mug, plant, notebook, and laptop.",
+        marketing_idea="A premium desk scene creates a calm productivity mood.",
+        customer_care_reason="Owners want more focus and peace of mind.",
+        hero_subject="A desk with coffee mug, plant, notebook, and laptop.",
+        hero_relevance="The desk suggests productivity.",
+        product_story="The quiet workspace suggests working smarter.",
+        visual_metaphor="Make space for what matters.",
+        scroll_stopping_hook="A polished stock workspace with negative space.",
+    )
+    assert result.approved is False
+    assert "generic_lifestyle_stock_scene" in result.hard_failures
+    assert "replaceable_brand_idea" in result.hard_failures
+
+
+def test_brand_offer_rejects_decorative_or_weak_replaceable_mechanisms() -> None:
+    cases = (
+        {
+            "marketing_idea": "Abstract gradients and circles imply momentum.",
+            "hero_subject": "Floating blue rings, waves, circles, and glowing orbs.",
+            "hero_relevance": "The decorative geometry feels modern.",
+            "product_story": "Abstract shapes create a premium mood.",
+            "visual_metaphor": "A generic blue gradient wave.",
+            "scroll_stopping_hook": "A glowing orb on a dark background.",
+        },
+        {
+            "marketing_idea": "A clean premium campaign for modern companies.",
+            "hero_subject": "An anonymous polished lifestyle scene.",
+            "hero_relevance": "It looks professional.",
+            "product_story": "The scene communicates quality.",
+            "visual_metaphor": "Quiet confidence.",
+            "scroll_stopping_hook": "Large empty luxury space.",
+        },
+    )
+    for values in cases:
+        result = _brand_offer_concept(**values)
+        assert result.approved is False
+        assert set(result.hard_failures).intersection(
+            {
+                "decorative_abstraction_as_story",
+                "replaceable_brand_idea",
+                "weak_marketing_mechanism",
+                "weak_visual_proof",
+            }
+        )
+
+
+def test_brand_offer_contracts_forbid_invention_without_requiring_an_offering() -> None:
+    director = world_class_director_contract("brand_offer").casefold()
+    raw = world_class_raw_visual_contract("brand_offer").casefold()
+    retry = world_class_regeneration_instruction(
+        ("weak_visual_proof",),
+        story_mode="brand_offer",
+    ).casefold()
+    for contract in (director, raw, retry):
+        for forbidden in ("product", "service", "package", "app", "interface", "ui", "feature", "workflow"):
+            assert forbidden in contract
+        assert "do not invent" in contract
+    assert "actual supported product" not in raw
+    assert "supported product" not in retry
+    assert "product moment" not in retry
+    assert "service moment" not in retry
