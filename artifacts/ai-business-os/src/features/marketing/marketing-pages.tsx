@@ -48,10 +48,12 @@ import { CmoContentGeneratorDrawer } from "@/features/marketing/cmo-content-gene
 import {
   channelGenerationNotice,
   createCreativeWithRecovery,
+  CREATIVE_GENERATION_POLL_MS,
   creativeFormatForContent,
   creativePhaseForDisplay,
   creativeResultNotice,
   generateCampaignChannelDrafts,
+  isCreativeGenerationActive,
   publishingCapability,
   runCreativeOperationWithRecovery,
   videoFormatForContent,
@@ -1513,6 +1515,11 @@ export function SocialManagementPage() {
   const [creativeBriefMedia, setCreativeBriefMedia] =
     useState<CreativeMediaType>("image");
   const [creativeProgress, setCreativeProgress] = useState<CreativeProgress>(null);
+  const [activeCreativeGeneration, setActiveCreativeGeneration] = useState<{
+    businessId: string;
+    assetId: string;
+    contentId?: string;
+  } | null>(null);
   const [creativeActionError, setCreativeActionError] = useState("");
   const [advancedRequestHandled, setAdvancedRequestHandled] = useState(false);
   const creativeOperationLock = useRef(false);
@@ -1616,6 +1623,27 @@ export function SocialManagementPage() {
       ),
     enabled: Boolean(activeBusinessId && selected),
   });
+  const activeCreativeAsset = useQuery({
+    queryKey: [
+      "marketing",
+      activeBusinessId,
+      "creative-asset",
+      activeCreativeGeneration?.assetId,
+    ],
+    queryFn: ({ signal }) => marketingApi.creative.get(
+      activeCreativeGeneration!.businessId,
+      activeCreativeGeneration!.assetId,
+      signal,
+    ),
+    enabled: Boolean(
+      activeCreativeGeneration &&
+      activeCreativeGeneration.businessId === activeBusinessId,
+    ),
+    refetchInterval: (query) =>
+      !query.state.data || isCreativeGenerationActive(query.state.data)
+        ? CREATIVE_GENERATION_POLL_MS
+        : false,
+  });
   const libraryAssets = useQuery({
     queryKey: ["marketing", activeBusinessId, "creative-assets", "content-library"],
     queryFn: ({ signal }) =>
@@ -1638,6 +1666,46 @@ export function SocialManagementPage() {
   const refreshPublishingReadiness = () => queryClient.invalidateQueries({
     queryKey: ["integrations", activeBusinessId],
   });
+  const observeCreativeGeneration = (asset: CreativeAsset) => {
+    if (!isCreativeGenerationActive(asset)) return;
+    setActiveCreativeGeneration({
+      businessId: activeBusinessId,
+      assetId: asset.id,
+      contentId: asset.content_id || undefined,
+    });
+    setCreativeProgress({
+      phase: asset.media_type === "video" ? "video_generation" : "visual",
+      contentId: asset.content_id || undefined,
+      assetId: asset.id,
+    });
+  };
+  useEffect(() => {
+    setActiveCreativeGeneration((current) =>
+      current?.businessId === activeBusinessId ? current : null,
+    );
+  }, [activeBusinessId]);
+  useEffect(() => {
+    if (activeCreativeGeneration) return;
+    const active = [...(assets.data || []), ...(libraryAssets.data || [])].find(
+      isCreativeGenerationActive,
+    );
+    if (active) observeCreativeGeneration(active);
+  }, [activeCreativeGeneration, assets.data, libraryAssets.data]);
+  useEffect(() => {
+    const asset = activeCreativeAsset.data;
+    if (!activeCreativeGeneration || !asset || isCreativeGenerationActive(asset)) {
+      return;
+    }
+    setActiveCreativeGeneration(null);
+    setCreativeProgress(null);
+    setNotice(creativeResultNotice(asset));
+    setCreativeActionError(
+      asset.generation_status === "failed"
+        ? "The creative could not be completed. Its grounded strategy remains ready to retry."
+        : "",
+    );
+    void refreshCreatives();
+  }, [activeCreativeAsset.data, activeCreativeGeneration]);
   useEffect(() => {
     setCreativeActionError("");
     if (
@@ -1875,6 +1943,7 @@ export function SocialManagementPage() {
       onProgress: setCreativeProgress,
     }),
     onSuccess: (asset) => {
+      observeCreativeGeneration(asset);
       setNotice(creativeResultNotice(asset));
       setCreativeActionError("");
       setError("");
@@ -1909,6 +1978,7 @@ export function SocialManagementPage() {
       }
     },
     onSuccess: (asset) => {
+      observeCreativeGeneration(asset);
       setNotice(creativeResultNotice(asset));
       setCreativeActionError("");
       setError("");
@@ -1925,6 +1995,7 @@ export function SocialManagementPage() {
       onProgress: setCreativeProgress,
     }),
     onSuccess: (asset) => {
+      observeCreativeGeneration(asset);
       setNotice(creativeResultNotice(asset));
       setCreativeActionError("");
       setError("");
@@ -1949,6 +2020,7 @@ export function SocialManagementPage() {
       onProgress: setCreativeProgress,
     }),
     onSuccess: (asset) => {
+      observeCreativeGeneration(asset);
       setNotice(
         asset.generation_status === "ready"
           ? "A new final creative is ready. Previous artwork remains in history."
@@ -2080,7 +2152,8 @@ export function SocialManagementPage() {
     createCreative.isPending ||
     createVideo.isPending ||
     generateVisual.isPending ||
-    regenerateVisual.isPending;
+    regenerateVisual.isPending ||
+    Boolean(activeCreativeGeneration);
   const postWorkspaceBusy =
     creativeOperationPending ||
     edit.isPending ||

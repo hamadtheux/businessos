@@ -23,6 +23,7 @@ from app.agents.runtime import (
     execute_ai_agent_typed_with_metadata,
 )
 from app.domain.marketing import CAMPAIGN_TRANSITIONS, CONTENT_TRANSITIONS, MARKETING_PLAN_TRANSITIONS, TREND_TRANSITIONS
+from app.domain.background_jobs import creative_asset_generation_job_key
 from app.domain.business_industries import get_business_industry, is_healthcare_business_type
 from app.domain.audience_safety import contains_sensitive_targeting
 from app.exceptions.ai_agent import (
@@ -31,9 +32,14 @@ from app.exceptions.ai_agent import (
     AIAgentResponseError,
 )
 from app.exceptions.marketing import MarketingAIError, MarketingNotFoundError, MarketingPersistenceError, MarketingStateError, MarketingValidationError
+from app.exceptions.background_jobs import (
+    BackgroundJobPersistenceError,
+    BackgroundJobValidationError,
+)
 from app.services.creative_provider import (
     CreativeGenerationProvider,
     CreativeGenerationRequest,
+    CreativeGenerationResult,
     CreativeProviderError,
     CreativeProviderNotConfiguredError,
 )
@@ -153,9 +159,10 @@ from app.schemas.marketing import (
 from app.schemas.operations import OpportunityCreate
 from app.services.operations import create_opportunity, record_audit
 from app.services.automation_events import record_automation_event
+from app.services.background_jobs import enqueue_job
 from app.services.logo_image import MAX_LOGO_UPLOAD_BYTES, sanitize_logo_bytes
 from app.exceptions.logo import LogoError
-from app.storage.base import ObjectStorage, StorageError
+from app.storage.base import ObjectNotFoundError, ObjectStorage, StorageError
 
 
 ZERO = Decimal("0")
@@ -250,6 +257,8 @@ _VIDEO_IDEMPOTENCY_NAMESPACE = UUID("d3c22980-4a70-4b73-975b-b8ac1fc57d96")
 _VIDEO_PIPELINE = "provider_neutral_video_v1"
 _VIDEO_STRATEGY_SCHEMA_VERSION = 1
 _CREATIVE_METADATA_MAX_BYTES = 16_384
+_CREATIVE_RAW_CHECKPOINT_MAX_BYTES = 30 * 1024 * 1024
+_MAX_CREATIVE_GENERATION_EPOCH = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -3367,6 +3376,212 @@ def _provider_usage_audit_value(
     return ";".join(fields) or None
 
 
+_ACTIVE_IMAGE_GENERATION_STATUSES = frozenset({
+    "queued",
+    "generating",
+    "reviewing",
+    "repairing",
+})
+
+
+async def queue_creative_asset_generation(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    creative_asset_id: UUID,
+    actor_user_id: UUID,
+) -> CreativeAsset:
+    """Queue one logical image generation and return its truthful asset state."""
+    value = await _lock_creative_asset(
+        session,
+        business_id=business_id,
+        creative_asset_id=creative_asset_id,
+    )
+    return await _queue_creative_asset_value(
+        session,
+        business_id=business_id,
+        value=value,
+        actor_user_id=actor_user_id,
+    )
+
+
+async def queue_creative_asset_regeneration(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    creative_asset_id: UUID,
+    actor_user_id: UUID,
+    variation_mode: CreativeVariationMode | None = None,
+) -> CreativeAsset:
+    """Create an immutable creative revision and queue its first generation."""
+    source = await _lock_creative_asset(
+        session,
+        business_id=business_id,
+        creative_asset_id=creative_asset_id,
+    )
+    if (
+        source.media_type != "image"
+        or source.generation_status != "ready"
+        or source.source_type != "future_provider"
+    ):
+        raise MarketingStateError
+    if not source.visual_direction:
+        raise MarketingValidationError
+
+    source_metadata = dict(source.creative_metadata or {})
+    raw_revision_version = source_metadata.get("creative_revision_sequence")
+    revision_version = (
+        raw_revision_version + 1
+        if isinstance(raw_revision_version, int)
+        and not isinstance(raw_revision_version, bool)
+        and 0 <= raw_revision_version < _MAX_CREATIVE_GENERATION_EPOCH
+        else 1
+    )
+    source_metadata["creative_revision_sequence"] = revision_version
+    source.creative_metadata = source_metadata
+
+    variation_identity = variation_mode or "regenerate"
+    revision = CreativeAsset(
+        id=uuid4(),
+        business_id=business_id,
+        campaign_id=source.campaign_id,
+        content_id=source.content_id,
+        asset_type=source.asset_type,
+        media_type="image",
+        source_type="ai_brief",
+        instructions=source.instructions,
+        visual_direction=source.visual_direction,
+        generation_status="brief_ready",
+        storage_reference=None,
+        width=source.width,
+        height=source.height,
+        aspect_ratio=source.aspect_ratio,
+        alt_text=source.alt_text,
+        creative_metadata={
+            "revision_of": str(source.id),
+            "revision_version": revision_version,
+            "variation_mode": variation_identity,
+        },
+    )
+    session.add(revision)
+    await _flush(session)
+    record_audit(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        event_type="marketing.creative_revision_created",
+        entity_type="marketing_creative_asset",
+        entity_id=revision.id,
+        summary=(
+            "Created a new creative revision from an existing grounded strategy; "
+            "the previous final artwork remains unchanged."
+        ),
+    )
+    return await _queue_creative_asset_value(
+        session,
+        business_id=business_id,
+        value=revision,
+        actor_user_id=actor_user_id,
+    )
+
+
+async def _queue_creative_asset_value(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    value: CreativeAsset,
+    actor_user_id: UUID,
+) -> CreativeAsset:
+    if value.business_id != business_id:
+        raise MarketingNotFoundError
+    if value.media_type != "image" or value.source_type not in {
+        "ai_brief",
+        "future_provider",
+    }:
+        raise MarketingStateError
+    if not value.visual_direction:
+        raise MarketingValidationError
+
+    metadata = dict(value.creative_metadata or {})
+    already_active = value.generation_status in _ACTIVE_IMAGE_GENERATION_STATUSES
+    if already_active:
+        generation_epoch = _image_generation_epoch(value)
+        if generation_epoch is None:
+            raise MarketingStateError
+    else:
+        if value.generation_status not in {
+            "brief_ready",
+            "provider_required",
+            "failed",
+        }:
+            raise MarketingStateError
+        generation_epoch = _next_image_generation_epoch(value)
+        metadata = dict(value.creative_metadata or {})
+        metadata["image_generation_version"] = generation_epoch
+        metadata["image_generation_started_attempt"] = 0
+        metadata.pop("image_generation_failure_stage", None)
+
+    variation_identity = metadata.get("variation_mode", "initial")
+    if not isinstance(variation_identity, str) or not variation_identity:
+        variation_identity = "initial"
+    generation_version = metadata.get("image_generation_version")
+    if (
+        not isinstance(generation_version, int)
+        or isinstance(generation_version, bool)
+        or generation_version != generation_epoch
+    ):
+        generation_version = generation_epoch
+
+    metadata.update({
+        "image_generation_epoch": generation_epoch,
+        "image_generation_version": generation_version,
+        "image_generation_variation": variation_identity,
+    })
+    if not already_active or not isinstance(
+        metadata.get("generation_requested_by_user_id"),
+        str,
+    ):
+        metadata["generation_requested_by_user_id"] = str(actor_user_id)
+    value.creative_metadata = metadata
+    value.source_type = "ai_brief"
+    if not already_active:
+        value.generation_status = "queued"
+    value.storage_reference = None
+    await _flush(session)
+
+    try:
+        await enqueue_job(
+            session,
+            business_id=business_id,
+            job_type="generate_creative_asset",
+            idempotency_key=creative_asset_generation_job_key(
+                value.id,
+                generation_epoch,
+                generation_version,
+                variation_identity,
+            ),
+            creative_asset_id=value.id,
+        )
+    except BackgroundJobValidationError:
+        raise MarketingStateError from None
+    except BackgroundJobPersistenceError:
+        raise MarketingPersistenceError from None
+
+    record_audit(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        event_type="marketing.creative_generation_queued",
+        entity_type="marketing_creative_asset",
+        entity_id=value.id,
+        summary=(
+            "Queued one durable creative generation from the saved grounded "
+            "strategy; nothing was published."
+        ),
+    )
+    return value
+
+
 async def generate_creative_asset(
     session: AsyncSession,
     *,
@@ -3384,6 +3599,8 @@ async def generate_creative_asset(
     max_composition_attempts: int = 5,
     quality_threshold: int = 82,
     require_semantic_review: bool = False,
+    generation_epoch: int | None = None,
+    persist_progress: bool = False,
 ) -> CreativeAsset:
     """
     Turn grounded Creative Intelligence into a final branded PNG.
@@ -3418,6 +3635,8 @@ async def generate_creative_asset(
         max_composition_attempts=max_composition_attempts,
         quality_threshold=quality_threshold,
         require_semantic_review=require_semantic_review,
+        generation_epoch=generation_epoch,
+        persist_progress=persist_progress,
     )
 
 
@@ -3514,6 +3733,77 @@ async def regenerate_creative_asset(
     )
 
 
+async def run_queued_creative_asset_generation(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    creative_asset_id: UUID,
+    provider: CreativeGenerationProvider,
+    storage: ObjectStorage,
+    research_engine: CreativeResearchEngine | None = None,
+    director_provider: AIAgentProvider | None = None,
+    director_max_output_tokens: int = 4_000,
+    visual_review_provider: CreativeVisualReviewProvider | None = None,
+    max_visual_review_calls: int = 2,
+    max_image_attempts: int = 2,
+    max_composition_attempts: int = 5,
+    quality_threshold: int = 82,
+    require_semantic_review: bool = True,
+) -> CreativeAsset:
+    """Run one persisted creative job without changing its logical epoch."""
+    value = await _lock_creative_asset(
+        session,
+        business_id=business_id,
+        creative_asset_id=creative_asset_id,
+    )
+    if value.generation_status == "ready":
+        if value.source_type == "future_provider" and value.storage_reference:
+            return value
+        raise MarketingStateError
+    if value.generation_status not in _ACTIVE_IMAGE_GENERATION_STATUSES | {"failed"}:
+        raise MarketingStateError
+
+    generation_epoch = _image_generation_epoch(value)
+    if generation_epoch is None:
+        raise MarketingValidationError
+    metadata = dict(value.creative_metadata or {})
+    requested_by = metadata.get("generation_requested_by_user_id")
+    try:
+        actor_user_id = UUID(requested_by) if isinstance(requested_by, str) else None
+    except ValueError:
+        actor_user_id = None
+    if actor_user_id is None:
+        raise MarketingValidationError
+
+    metadata.pop("image_generation_failure_stage", None)
+    value.creative_metadata = metadata
+    await _persist_creative_generation_progress(
+        session,
+        value,
+        status="generating",
+        commit=True,
+    )
+    return await _generate_creative_asset_value(
+        session,
+        business_id=business_id,
+        value=value,
+        actor_user_id=actor_user_id,
+        provider=provider,
+        storage=storage,
+        research_engine=research_engine,
+        director_provider=director_provider,
+        director_max_output_tokens=director_max_output_tokens,
+        visual_review_provider=visual_review_provider,
+        max_visual_review_calls=max_visual_review_calls,
+        max_image_attempts=max_image_attempts,
+        max_composition_attempts=max_composition_attempts,
+        quality_threshold=quality_threshold,
+        require_semantic_review=require_semantic_review,
+        generation_epoch=generation_epoch,
+        persist_progress=True,
+    )
+
+
 async def _generate_creative_asset_value(
     session: AsyncSession,
     *,
@@ -3531,6 +3821,8 @@ async def _generate_creative_asset_value(
     max_composition_attempts: int,
     quality_threshold: int,
     require_semantic_review: bool,
+    generation_epoch: int | None = None,
+    persist_progress: bool = False,
 ) -> CreativeAsset:
     if value.business_id != business_id:
         raise MarketingNotFoundError
@@ -3543,7 +3835,7 @@ async def _generate_creative_asset_value(
         "brief_ready",
         "provider_required",
         "failed",
-    }:
+    } | _ACTIVE_IMAGE_GENERATION_STATUSES:
         raise MarketingStateError
 
     if value.source_type not in {"ai_brief", "future_provider"}:
@@ -3633,6 +3925,11 @@ async def _generate_creative_asset_value(
             stage="semantic_review",
         )
 
+    if generation_epoch is None:
+        generation_epoch = _next_image_generation_epoch(value)
+    elif _image_generation_epoch(value) != generation_epoch:
+        raise MarketingStateError
+
     campaign_context_id = value.campaign_id or (
         content.campaign_id if content is not None else None
     )
@@ -3716,6 +4013,13 @@ async def _generate_creative_asset_value(
     )
     visual_review_calls = 0
     for image_attempt in range(1, max_image_attempts + 1):
+        if image_attempt > 1:
+            await _persist_creative_generation_progress(
+                session,
+                value,
+                status="repairing",
+                commit=persist_progress,
+            )
         instructions = _creative_visual_generation_instructions(
             strategy,
             direction,
@@ -3728,46 +4032,142 @@ async def _generate_creative_asset_value(
             story_mode=creative_story_mode,
             correction=correction,
         )
-        try:
-            result = await provider.generate_draft(
-                CreativeGenerationRequest(
+        result: CreativeGenerationResult | None = None
+        checkpoint_key: str | None = None
+
+        # Production storage implementations inherit ObjectStorage. Existing
+        # lightweight unit-test doubles intentionally continue through the
+        # established provider path; dedicated storage tests cover checkpoint IO.
+        if isinstance(storage, ObjectStorage):
+            checkpoint_key = _creative_raw_checkpoint_key(
+                business_id=business_id,
+                creative_asset_id=value.id,
+                generation_epoch=generation_epoch,
+                image_attempt=image_attempt,
+            )
+            try:
+                checkpoint_content = await _load_creative_raw_checkpoint(
+                    storage,
+                    checkpoint_key,
+                )
+            except StorageError:
+                # Never spend another provider call when durable checkpoint
+                # storage itself cannot be read reliably.
+                await _record_creative_generation_dependency_failure(
+                    session,
                     business_id=business_id,
-                    creative_asset_id=value.id,
-                    instructions=instructions,
+                    value=value,
+                    actor_user_id=actor_user_id,
+                    stage="checkpoint_read",
+                    commit=persist_progress,
+                )
+                raise MarketingPersistenceError from None
+
+            if checkpoint_content is not None:
+                result = CreativeGenerationResult(
+                    content=checkpoint_content,
                     width=target_width,
                     height=target_height,
-                    aspect_ratio=value.aspect_ratio,
+                    provider_request_id=None,
                 )
-            )
-        except CreativeProviderNotConfiguredError:
-            await _set_creative_generation_state(
-                session,
+                logger.info(
+                    "creative_image_checkpoint_reused attempt=%d",
+                    image_attempt,
+                    extra={
+                        "attempt_number": image_attempt,
+                        "source": "durable_checkpoint",
+                    },
+                )
+
+        if result is None:
+            started_attempt = _image_generation_started_attempt(
                 value,
-                status="provider_required",
+                generation_epoch=generation_epoch,
             )
-            record_audit(
-                session,
-                business_id=business_id,
-                actor_user_id=actor_user_id,
-                event_type="marketing.creative_generation_provider_required",
-                entity_type="marketing_creative_asset",
-                entity_id=value.id,
-                summary=(
-                    "Creative visual generation requires a configured image provider; "
-                    "no image was created and nothing was published."
-                ),
-            )
-            return value
-        except ValueError:
-            raise MarketingValidationError from None
-        except CreativeProviderError:
-            return await _fail_creative_generation(
-                session,
-                business_id=business_id,
-                value=value,
-                actor_user_id=actor_user_id,
-                stage="provider",
-            )
+            if started_attempt >= image_attempt:
+                return await _fail_creative_generation(
+                    session,
+                    business_id=business_id,
+                    value=value,
+                    actor_user_id=actor_user_id,
+                    stage="provider_outcome_uncertain",
+                )
+            metadata = dict(value.creative_metadata or {})
+            metadata["image_generation_started_attempt"] = image_attempt
+            value.creative_metadata = metadata
+            if persist_progress:
+                await _flush(session)
+                try:
+                    await session.commit()
+                except SQLAlchemyError:
+                    raise MarketingPersistenceError from None
+            try:
+                result = await provider.generate_draft(
+                    CreativeGenerationRequest(
+                        business_id=business_id,
+                        creative_asset_id=value.id,
+                        instructions=instructions,
+                        width=target_width,
+                        height=target_height,
+                        aspect_ratio=value.aspect_ratio,
+                    )
+                )
+            except CreativeProviderNotConfiguredError:
+                await _set_creative_generation_state(
+                    session,
+                    value,
+                    status="provider_required",
+                )
+                record_audit(
+                    session,
+                    business_id=business_id,
+                    actor_user_id=actor_user_id,
+                    event_type="marketing.creative_generation_provider_required",
+                    entity_type="marketing_creative_asset",
+                    entity_id=value.id,
+                    summary=(
+                        "Creative visual generation requires a configured image provider; "
+                        "no image was created and nothing was published."
+                    ),
+                )
+                return value
+            except ValueError:
+                raise MarketingValidationError from None
+            except CreativeProviderError:
+                return await _fail_creative_generation(
+                    session,
+                    business_id=business_id,
+                    value=value,
+                    actor_user_id=actor_user_id,
+                    stage="provider",
+                )
+
+            # This is deliberately the first operation after a successful paid
+            # provider result. Composition and semantic review happen only after
+            # the raw visual has a durable recovery copy.
+            if checkpoint_key is not None:
+                try:
+                    await _store_creative_raw_checkpoint(
+                        storage,
+                        checkpoint_key,
+                        result.content,
+                    )
+                except StorageError:
+                    return await _fail_creative_generation(
+                        session,
+                        business_id=business_id,
+                        value=value,
+                        actor_user_id=actor_user_id,
+                        stage="checkpoint_storage",
+                    )
+                logger.info(
+                    "creative_image_checkpoint_stored attempt=%d",
+                    image_attempt,
+                    extra={
+                        "attempt_number": image_attempt,
+                        "source": "provider_result",
+                    },
+                )
 
         try:
             composition_input = CreativeCompositionInput(
@@ -3907,6 +4307,13 @@ async def _generate_creative_asset_value(
                 )
 
             break
+
+        await _persist_creative_generation_progress(
+            session,
+            value,
+            status="reviewing",
+            commit=persist_progress,
+        )
 
         critic_raw_failure = False
         for candidate, assessment in approved_candidates:
@@ -4099,7 +4506,7 @@ async def _generate_creative_asset_value(
         "brief_ready",
         "provider_required",
         "failed",
-    }:
+    } | _ACTIVE_IMAGE_GENERATION_STATUSES:
         raise MarketingStateError
     if value.source_type not in {"ai_brief", "future_provider"}:
         raise MarketingStateError
@@ -4107,6 +4514,7 @@ async def _generate_creative_asset_value(
     object_key = _final_creative_storage_key(
         business_id=business_id,
         creative_asset_id=value.id,
+        generation_epoch=generation_epoch,
     )
     put_attempted = False
     try:
@@ -4495,6 +4903,97 @@ async def _creative_logo_content(
         return None
 
 
+def _image_generation_epoch(value: CreativeAsset) -> int | None:
+    metadata = value.creative_metadata or {}
+    raw_epoch = metadata.get("image_generation_epoch")
+    return (
+        raw_epoch
+        if isinstance(raw_epoch, int)
+        and not isinstance(raw_epoch, bool)
+        and 1 <= raw_epoch <= _MAX_CREATIVE_GENERATION_EPOCH
+        else None
+    )
+
+
+def _next_image_generation_epoch(value: CreativeAsset) -> int:
+    metadata = dict(value.creative_metadata or {})
+    current = _image_generation_epoch(value) or 0
+    if current >= _MAX_CREATIVE_GENERATION_EPOCH:
+        raise MarketingStateError
+    epoch = current + 1
+    metadata["image_generation_epoch"] = epoch
+    value.creative_metadata = metadata
+    return epoch
+
+
+def _image_generation_started_attempt(
+    value: CreativeAsset,
+    *,
+    generation_epoch: int,
+) -> int:
+    if _image_generation_epoch(value) != generation_epoch:
+        raise MarketingStateError
+    raw_attempt = (value.creative_metadata or {}).get(
+        "image_generation_started_attempt"
+    )
+    return (
+        raw_attempt
+        if isinstance(raw_attempt, int)
+        and not isinstance(raw_attempt, bool)
+        and 0 <= raw_attempt <= 2
+        else 0
+    )
+
+
+def _creative_raw_checkpoint_key(
+    *,
+    business_id: UUID,
+    creative_asset_id: UUID,
+    generation_epoch: int,
+    image_attempt: int,
+) -> str:
+    if not 1 <= generation_epoch <= _MAX_CREATIVE_GENERATION_EPOCH:
+        raise ValueError("Creative generation epoch is invalid")
+    if not 1 <= image_attempt <= 2:
+        raise ValueError("Creative image attempt is invalid")
+    return (
+        f"businesses/{business_id}/marketing/creatives/"
+        f"{creative_asset_id}/raw/"
+        f"generation-{generation_epoch}/attempt-{image_attempt}.png"
+    )
+
+
+async def _load_creative_raw_checkpoint(
+    storage: ObjectStorage,
+    object_key: str,
+) -> bytes | None:
+    try:
+        content = await storage.get(
+            object_key,
+            max_bytes=_CREATIVE_RAW_CHECKPOINT_MAX_BYTES,
+        )
+    except ObjectNotFoundError:
+        return None
+
+    if not isinstance(content, bytes) or not content:
+        raise StorageError("Stored creative checkpoint is invalid")
+    return content
+
+
+async def _store_creative_raw_checkpoint(
+    storage: ObjectStorage,
+    object_key: str,
+    content: bytes,
+) -> None:
+    if (
+        not isinstance(content, bytes)
+        or not content
+        or len(content) > _CREATIVE_RAW_CHECKPOINT_MAX_BYTES
+    ):
+        raise StorageError("Creative checkpoint exceeds the safe storage boundary")
+    await storage.put(object_key, content, "image/png")
+
+
 async def _set_creative_generation_state(
     session: AsyncSession,
     value: CreativeAsset,
@@ -4507,6 +5006,53 @@ async def _set_creative_generation_state(
     await _flush(session)
 
 
+async def _persist_creative_generation_progress(
+    session: AsyncSession,
+    value: CreativeAsset,
+    *,
+    status: str,
+    commit: bool,
+) -> None:
+    await _set_creative_generation_state(session, value, status=status)
+    if commit:
+        try:
+            await session.commit()
+        except SQLAlchemyError:
+            raise MarketingPersistenceError from None
+
+
+async def _record_creative_generation_dependency_failure(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    value: CreativeAsset,
+    actor_user_id: UUID,
+    stage: str,
+    commit: bool,
+) -> None:
+    metadata = dict(value.creative_metadata or {})
+    metadata["image_generation_failure_stage"] = stage
+    value.creative_metadata = metadata
+    record_audit(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        event_type="marketing.creative_generation_deferred",
+        entity_type="marketing_creative_asset",
+        entity_id=value.id,
+        summary=(
+            f"Creative generation was deferred safely during {stage}; no "
+            "additional image provider call was made."
+        ),
+    )
+    await _flush(session)
+    if commit:
+        try:
+            await session.commit()
+        except SQLAlchemyError:
+            raise MarketingPersistenceError from None
+
+
 async def _fail_creative_generation(
     session: AsyncSession,
     *,
@@ -4515,6 +5061,9 @@ async def _fail_creative_generation(
     actor_user_id: UUID,
     stage: str,
 ) -> CreativeAsset:
+    metadata = dict(value.creative_metadata or {})
+    metadata["image_generation_failure_stage"] = stage
+    value.creative_metadata = metadata
     await _set_creative_generation_state(session, value, status="failed")
     record_audit(
         session,
@@ -4596,10 +5145,13 @@ def _final_creative_storage_key(
     *,
     business_id: UUID,
     creative_asset_id: UUID,
+    generation_epoch: int,
 ) -> str:
+    if not 1 <= generation_epoch <= _MAX_CREATIVE_GENERATION_EPOCH:
+        raise ValueError("Creative generation epoch is invalid")
     return (
         f"businesses/{business_id}/marketing/creatives/"
-        f"{creative_asset_id}/final/{uuid4().hex}.png"
+        f"{creative_asset_id}/final/generation-{generation_epoch}.png"
     )
 
 
@@ -4613,6 +5165,20 @@ async def list_creative_assets(session: AsyncSession, *, business_id: UUID, camp
         return list((await session.scalars(statement.order_by(CreativeAsset.created_at.desc(), CreativeAsset.id.desc()).limit(100))).all())
     except SQLAlchemyError:
         raise MarketingPersistenceError from None
+
+
+async def get_creative_asset(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    creative_asset_id: UUID,
+) -> CreativeAsset:
+    return await _get(
+        session,
+        CreativeAsset,
+        business_id,
+        creative_asset_id,
+    )
 
 
 async def list_schedules(session: AsyncSession, *, business_id: UUID, start_at: datetime | None, end_at: datetime | None, channel: str | None, campaign_id: UUID | None):

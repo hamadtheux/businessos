@@ -13,6 +13,7 @@ import type {
 } from "../services/integrations.ts";
 import {
   AUDIENCE_GUIDANCE_MAX,
+  CREATIVE_GENERATION_POLL_MS,
   CONTENT_PROMPT_MAX,
   OWNER_GOAL_MAX,
   SHARED_DIRECTION_MAX,
@@ -22,6 +23,7 @@ import {
   creativePhaseForDisplay,
   creativeResultNotice,
   generateCampaignChannelDrafts,
+  isCreativeGenerationActive,
   publishingCapability,
   recommendedCreativeMediaForContent,
   runCreativeOperationWithRecovery,
@@ -38,6 +40,27 @@ const privateCreativeAssetKeysStayServerSide: PrivateCreativeAssetKeys extends n
   ? true
   : never = true;
 void privateCreativeAssetKeysStayServerSide;
+
+test("creative polling is bounded to active generation states", () => {
+  assert.equal(CREATIVE_GENERATION_POLL_MS, 3_000);
+  for (const generation_status of [
+    "queued",
+    "generating",
+    "reviewing",
+    "repairing",
+  ] as const) {
+    assert.equal(isCreativeGenerationActive({ generation_status }), true);
+  }
+  for (const generation_status of [
+    "brief_ready",
+    "provider_required",
+    "ready",
+    "failed",
+    "archived",
+  ] as const) {
+    assert.equal(isCreativeGenerationActive({ generation_status }), false);
+  }
+});
 
 const publicCreativeAsset: CreativeAsset = {
   id: "creative-one",

@@ -15,6 +15,7 @@ from app.models.action_execution_attempt import ActionExecutionAttempt  # noqa: 
 from app.models.automation import AutomationNodeRun, AutomationWorkflow  # noqa: E402
 from app.models.background_job import BackgroundJob  # noqa: E402
 from app.exceptions.ai_agent import AIAgentProviderError  # noqa: E402
+from app.exceptions.marketing import MarketingPersistenceError  # noqa: E402
 from app.exceptions.ai_workforce import (  # noqa: E402
     AIWorkforceConflictError,
     AIWorkforceNotFoundError,
@@ -26,6 +27,7 @@ from app.services.job_handlers import (  # noqa: E402
     JOB_HANDLERS,
     handle_analyze_business_opportunity,
     handle_dispatch_conversation_message,
+    handle_generate_creative_asset,
     handle_process_automation_event,
     handle_process_integration_event,
     handle_process_scheduled_workflow,
@@ -52,6 +54,7 @@ class JobHandlerTests(unittest.IsolatedAsyncioTestCase):
             "commerce_initial_sync", "commerce_incremental_sync", "commerce_webhook_reconcile",
             "google_merchant_status_sync", "meta_catalog_status_sync",
             "google_ads_performance_sync", "meta_ads_performance_sync",
+            "generate_creative_asset",
         })
         with self.assertRaises(TypeError):
             JOB_HANDLERS["dynamic"] = AsyncMock()  # type: ignore[index]
@@ -68,6 +71,78 @@ class JobHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(outcome.succeeded)
         self.assertEqual(outcome.failure_code, "invalid_job_state")
         self.assertFalse(outcome.retryable)
+
+    async def test_creative_handler_uses_server_factories_and_typed_asset_reference(self) -> None:
+        creative_asset_id = uuid4()
+        runtime = SimpleNamespace(
+            provider=object(),
+            storage=object(),
+            research_engine=object(),
+            director_provider=object(),
+            visual_review_provider=object(),
+        )
+        run = AsyncMock(return_value=SimpleNamespace(generation_status="ready"))
+        with patch(
+            "app.services.job_handlers.build_creative_generation_runtime",
+            return_value=runtime,
+        ) as build_runtime, patch(
+            "app.services.job_handlers.run_queued_creative_asset_generation",
+            new=run,
+        ):
+            outcome = await handle_generate_creative_asset(
+                _Session(),  # type: ignore[arg-type]
+                _job(
+                    job_type="generate_creative_asset",
+                    creative_asset_id=creative_asset_id,
+                ),
+            )
+
+        self.assertTrue(outcome.succeeded)
+        build_runtime.assert_called_once_with()
+        self.assertEqual(run.await_args.kwargs["business_id"], BUSINESS_ID)
+        self.assertEqual(
+            run.await_args.kwargs["creative_asset_id"], creative_asset_id,
+        )
+        self.assertIs(run.await_args.kwargs["provider"], runtime.provider)
+        self.assertIs(run.await_args.kwargs["storage"], runtime.storage)
+        self.assertTrue(run.await_args.kwargs["require_semantic_review"])
+
+    async def test_creative_handler_classifies_provider_and_storage_failures(self) -> None:
+        job = _job(
+            job_type="generate_creative_asset",
+            creative_asset_id=uuid4(),
+        )
+        runtime = SimpleNamespace(
+            provider=object(), storage=object(), research_engine=object(),
+            director_provider=None, visual_review_provider=None,
+        )
+        with patch(
+            "app.services.job_handlers.build_creative_generation_runtime",
+            return_value=runtime,
+        ), patch(
+            "app.services.job_handlers.run_queued_creative_asset_generation",
+            new=AsyncMock(return_value=SimpleNamespace(
+                generation_status="provider_required",
+            )),
+        ):
+            provider_outcome = await handle_generate_creative_asset(
+                _Session(), job,  # type: ignore[arg-type]
+            )
+        self.assertEqual(provider_outcome.failure_code, "provider_unavailable")
+        self.assertFalse(provider_outcome.retryable)
+
+        with patch(
+            "app.services.job_handlers.build_creative_generation_runtime",
+            return_value=runtime,
+        ), patch(
+            "app.services.job_handlers.run_queued_creative_asset_generation",
+            new=AsyncMock(side_effect=MarketingPersistenceError()),
+        ):
+            storage_outcome = await handle_generate_creative_asset(
+                _Session(), job,  # type: ignore[arg-type]
+            )
+        self.assertEqual(storage_outcome.failure_code, "dependency_unavailable")
+        self.assertTrue(storage_outcome.retryable)
 
     async def test_opportunity_analysis_resolves_server_provider_and_delegates(self) -> None:
         opportunity_id = uuid4()
@@ -355,6 +430,7 @@ def _job(
     integration_event_id=None,
     action_execution_attempt_id=None,
     opportunity_id=None,
+    creative_asset_id=None,
     scheduled_occurrence_at=None,
 ) -> BackgroundJob:
     return BackgroundJob(
@@ -367,6 +443,7 @@ def _job(
         integration_event_id=integration_event_id,
         action_execution_attempt_id=action_execution_attempt_id,
         opportunity_id=opportunity_id,
+        creative_asset_id=creative_asset_id,
         social_schedule_id=None, scheduled_occurrence_at=scheduled_occurrence_at,
         created_at=NOW, updated_at=NOW,
     )

@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from app.storage.base import (
     InvalidStorageKeyError,
+    ObjectNotFoundError,
     ObjectStorage,
     StorageOperationError,
     validate_storage_key,
@@ -58,6 +59,8 @@ class LocalObjectStorage(ObjectStorage):
             try:
                 with path.open("rb") as file_handle:
                     content = file_handle.read(max_bytes + 1)
+            except FileNotFoundError:
+                raise ObjectNotFoundError("Stored object was not found") from None
             except OSError:
                 raise StorageOperationError("Unable to read object") from None
 

@@ -37,6 +37,7 @@ class BackgroundJobResponse(BaseModel):
     competitor_discovery_run_id: UUID | None = None
     marketing_automation_run_id: UUID | None = None
     opportunity_id: UUID | None = None
+    creative_asset_id: UUID | None = None
     scheduled_occurrence_at: datetime | None
     created_at: datetime
     updated_at: datetime

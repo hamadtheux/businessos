@@ -134,6 +134,7 @@ test("creative briefing, generation, and regeneration use tenant-scoped POST end
     height: 1080,
     alt_text: "Campaign visual",
   });
+  await api.creative.get(businessA, "creative-one");
   await api.creative.generate(businessA, "creative-one");
   await api.creative.regenerate(businessA, "creative-one");
   await api.creative.videoStrategy(businessA, {
@@ -149,6 +150,10 @@ test("creative briefing, generation, and regeneration use tenant-scoped POST end
     {
       path: `/api/v1/businesses/${businessA}/marketing/creative-assets/brief`,
       method: "POST",
+    },
+    {
+      path: `/api/v1/businesses/${businessA}/marketing/creative-assets/creative-one`,
+      method: "GET",
     },
     {
       path: `/api/v1/businesses/${businessA}/marketing/creative-assets/creative-one/generate`,
@@ -201,6 +206,7 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
   ]);
 
   assert.match(panel, /creative-\$\{mediaType\}-empty-state/);
+  assert.match(panel, /creative-generation-progress/);
   for (const state of [
     "creative-provider-required",
     "creative-failed-state",
@@ -208,6 +214,12 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
   ]) {
     assert.match(panel, new RegExp(state));
   }
+  assert.match(page, /CREATIVE_GENERATION_POLL_MS/);
+  assert.match(social, /CREATIVE_GENERATION_POLL_MS/);
+  assert.match(page, /marketingApi\.creative\.get/);
+  assert.match(social, /marketingApi\.creative\.get/);
+  assert.match(page, /activeCreativeGeneration\.businessId === activeBusinessId/);
+  assert.match(social, /activeCreativeGeneration\.businessId === activeBusinessId/);
   assert.match(panel, /creative-loading-\$\{phase\}/);
   assert.match(panel, /Preparing creative direction/);
   assert.match(panel, /Generating branded image/);

@@ -66,7 +66,10 @@ from app.services.marketing import (  # noqa: E402
     generate_campaign,
     generate_content,
     generate_creative_asset,
+    queue_creative_asset_generation,
+    queue_creative_asset_regeneration,
     regenerate_creative_asset,
+    run_queued_creative_asset_generation,
     list_creative_assets,
     generate_plan,
     learn_from_performance,
@@ -77,7 +80,7 @@ from app.services.marketing import (  # noqa: E402
     update_campaign,
     _run_cmo,
 )
-from app.storage.base import StorageOperationError  # noqa: E402
+from app.storage.base import ObjectNotFoundError, ObjectStorage, StorageOperationError  # noqa: E402
 
 
 BUSINESS_ID = uuid4()
@@ -130,6 +133,32 @@ class _ObjectStorage:
     def public_url(self, object_key: str) -> str:
         if self.public_url_error is not None:
             raise self.public_url_error
+        return f"https://media.example.com/{object_key}"
+
+
+class _DurableCheckpointStorage(ObjectStorage):
+    def __init__(self, *, read_error: bool = False) -> None:
+        self.objects: dict[str, bytes] = {}
+        self.read_error = read_error
+
+    async def put(self, object_key: str, content: bytes, content_type: str) -> None:
+        self.objects[object_key] = content
+
+    async def get(self, object_key: str, *, max_bytes: int) -> bytes:
+        if self.read_error:
+            raise StorageOperationError("storage unavailable")
+        try:
+            content = self.objects[object_key]
+        except KeyError:
+            raise ObjectNotFoundError("not found") from None
+        if len(content) > max_bytes:
+            raise StorageOperationError("too large")
+        return content
+
+    async def delete(self, object_key: str) -> None:
+        self.objects.pop(object_key, None)
+
+    def public_url(self, object_key: str) -> str:
         return f"https://media.example.com/{object_key}"
 
 
@@ -3309,6 +3338,244 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(revision.creative_metadata["revision_of"], str(original.id))
         self.assertNotIn("variation_mode", revision.creative_metadata)
 
+    async def test_creative_generation_enqueue_is_fast_durable_and_idempotent(self) -> None:
+        asset = _creative_asset()
+        enqueue = AsyncMock(return_value=SimpleNamespace(id=uuid4()))
+        with patch("app.services.marketing.enqueue_job", new=enqueue):
+            first = await queue_creative_asset_generation(
+                _ScalarSession([asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+            )
+            first_key = enqueue.await_args.kwargs["idempotency_key"]
+            second = await queue_creative_asset_generation(
+                _ScalarSession([asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+            )
+            second_key = enqueue.await_args.kwargs["idempotency_key"]
+
+        self.assertIs(first, asset)
+        self.assertIs(second, asset)
+        self.assertEqual(asset.generation_status, "queued")
+        self.assertEqual(asset.creative_metadata["image_generation_epoch"], 1)
+        self.assertEqual(
+            asset.creative_metadata["generation_requested_by_user_id"],
+            str(USER_ID),
+        )
+        self.assertEqual(first_key, second_key)
+        self.assertIn(f"creative-generation:{asset.id}:epoch:1", first_key)
+        self.assertEqual(enqueue.await_args.kwargs["creative_asset_id"], asset.id)
+
+    async def test_queued_regeneration_is_immutable_and_variation_scoped(self) -> None:
+        original = _creative_asset(status="ready", source_type="future_provider")
+        original_reference = original.storage_reference
+        session = _ScalarSession([original])
+        enqueue = AsyncMock(return_value=SimpleNamespace(id=uuid4()))
+        with patch("app.services.marketing.enqueue_job", new=enqueue):
+            revision = await queue_creative_asset_regeneration(
+                session,
+                business_id=BUSINESS_ID,
+                creative_asset_id=original.id,
+                actor_user_id=USER_ID,
+                variation_mode="alternate_metaphor",
+            )
+
+        self.assertNotEqual(revision.id, original.id)
+        self.assertEqual(revision.generation_status, "queued")
+        self.assertEqual(revision.creative_metadata["revision_of"], str(original.id))
+        self.assertEqual(
+            revision.creative_metadata["variation_mode"],
+            "alternate_metaphor",
+        )
+        self.assertIn(
+            "variation:alternate_metaphor",
+            enqueue.await_args.kwargs["idempotency_key"],
+        )
+        self.assertEqual(original.generation_status, "ready")
+        self.assertEqual(original.storage_reference, original_reference)
+
+    async def test_checkpoint_recovery_reuses_paid_raw_image_after_crash(self) -> None:
+        asset = _creative_asset(status="generating")
+        asset.creative_metadata = {
+            "image_generation_epoch": 1,
+            "image_generation_version": 1,
+            "image_generation_started_attempt": 0,
+            "generation_requested_by_user_id": str(USER_ID),
+        }
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(return_value=CreativeGenerationResult(
+                content=_png_bytes(), width=1024, height=1024,
+            )),
+        )
+        storage = _DurableCheckpointStorage()
+        with patch(
+            "app.services.marketing.CreativeCompositor.compose_candidates",
+            side_effect=RuntimeError("simulated worker crash"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "simulated worker crash"):
+                await generate_creative_asset(
+                    _ScalarSession([asset, _business_record(), None]),
+                    business_id=BUSINESS_ID,
+                    creative_asset_id=asset.id,
+                    actor_user_id=USER_ID,
+                    provider=provider,
+                    storage=storage,
+                    generation_epoch=1,
+                )
+
+        checkpoint_keys = [key for key in storage.objects if "/raw/" in key]
+        self.assertEqual(len(checkpoint_keys), 1)
+
+        composed = _composed_candidate("minimal_hero", color=(100, 120, 140))
+        approved = SimpleNamespace(
+            approved_for_delivery=True,
+            failure_kind=None,
+            overall_score=90,
+        )
+        with patch(
+            "app.services.marketing.CreativeCompositor.compose_candidates",
+            return_value=(composed,),
+        ), patch(
+            "app.services.marketing.assess_creative_quality",
+            return_value=approved,
+        ):
+            recovered = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None, asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=provider,
+                storage=storage,
+                generation_epoch=1,
+            )
+
+        self.assertEqual(provider.generate_draft.await_count, 1)
+        self.assertEqual(recovered.generation_status, "ready")
+        self.assertIsNotNone(recovered.storage_reference)
+        self.assertNotIn("/raw/", recovered.storage_reference or "")
+
+    async def test_worker_commits_attempt_marker_before_paid_provider_call(self) -> None:
+        asset = _creative_asset(status="queued")
+        asset.creative_metadata = {
+            "image_generation_epoch": 1,
+            "image_generation_version": 1,
+            "image_generation_started_attempt": 0,
+            "generation_requested_by_user_id": str(USER_ID),
+        }
+        session = _ScalarSession([asset, _business_record(), None, asset])
+
+        async def generate_after_commit(_request):
+            self.assertGreaterEqual(session.commit_calls, 2)
+            self.assertEqual(
+                asset.creative_metadata["image_generation_started_attempt"],
+                1,
+            )
+            return CreativeGenerationResult(
+                content=_png_bytes(),
+                width=1024,
+                height=1024,
+            )
+
+        provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(side_effect=generate_after_commit),
+        )
+        generated = await run_queued_creative_asset_generation(
+            session,  # type: ignore[arg-type]
+            business_id=BUSINESS_ID,
+            creative_asset_id=asset.id,
+            provider=provider,
+            storage=_DurableCheckpointStorage(),
+            require_semantic_review=False,
+        )
+
+        self.assertEqual(generated.generation_status, "ready")
+        provider.generate_draft.assert_awaited_once()
+
+    async def test_attempt_marker_database_failure_prevents_provider_call(self) -> None:
+        asset = _creative_asset(status="queued")
+        asset.creative_metadata = {
+            "image_generation_epoch": 1,
+            "image_generation_version": 1,
+            "image_generation_started_attempt": 0,
+            "generation_requested_by_user_id": str(USER_ID),
+        }
+        session = _FailingCommitSession(
+            [asset, _business_record(), None],
+            fail_on_commit=2,
+        )
+        provider = SimpleNamespace(provider_name="test", generate_draft=AsyncMock())
+
+        with self.assertRaises(MarketingPersistenceError):
+            await run_queued_creative_asset_generation(
+                session,  # type: ignore[arg-type]
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                provider=provider,
+                storage=_DurableCheckpointStorage(),
+                require_semantic_review=False,
+            )
+
+        provider.generate_draft.assert_not_awaited()
+
+    async def test_checkpoint_read_failure_never_calls_image_provider(self) -> None:
+        asset = _creative_asset(status="generating")
+        asset.creative_metadata = {
+            "image_generation_epoch": 1,
+            "image_generation_version": 1,
+            "image_generation_started_attempt": 0,
+            "generation_requested_by_user_id": str(USER_ID),
+        }
+        provider = SimpleNamespace(provider_name="test", generate_draft=AsyncMock())
+
+        with self.assertRaises(MarketingPersistenceError):
+            await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=provider,
+                storage=_DurableCheckpointStorage(read_error=True),
+                generation_epoch=1,
+            )
+
+        provider.generate_draft.assert_not_awaited()
+        self.assertEqual(
+            asset.creative_metadata["image_generation_failure_stage"],
+            "checkpoint_read",
+        )
+
+    async def test_ambiguous_started_provider_attempt_is_never_repurchased(self) -> None:
+        asset = _creative_asset(status="generating")
+        asset.creative_metadata = {
+            "image_generation_epoch": 1,
+            "image_generation_version": 1,
+            "image_generation_started_attempt": 1,
+            "generation_requested_by_user_id": str(USER_ID),
+        }
+        provider = SimpleNamespace(provider_name="test", generate_draft=AsyncMock())
+
+        recovered = await generate_creative_asset(
+            _ScalarSession([asset, _business_record(), None]),
+            business_id=BUSINESS_ID,
+            creative_asset_id=asset.id,
+            actor_user_id=USER_ID,
+            provider=provider,
+            storage=_DurableCheckpointStorage(),
+            generation_epoch=1,
+        )
+
+        provider.generate_draft.assert_not_awaited()
+        self.assertEqual(recovered.generation_status, "failed")
+        self.assertEqual(
+            recovered.creative_metadata["image_generation_failure_stage"],
+            "provider_outcome_uncertain",
+        )
+
     async def test_final_storage_is_compensated_when_database_flush_fails(self) -> None:
         asset = _creative_asset()
         storage = _ObjectStorage()
@@ -4098,6 +4365,7 @@ class _ScalarSession:
         self.rows = list(rows or [])
         self.added = []
         self.flush_calls = 0
+        self.commit_calls = 0
         self.scalar_statements = []
         self.scalars_statements = []
 
@@ -4115,11 +4383,25 @@ class _ScalarSession:
     async def flush(self):
         self.flush_calls += 1
 
+    async def commit(self):
+        self.commit_calls += 1
+
 
 class _FailingFlushSession(_ScalarSession):
     async def flush(self):
         self.flush_calls += 1
         raise SQLAlchemyError("database unavailable")
+
+
+class _FailingCommitSession(_ScalarSession):
+    def __init__(self, values, *, fail_on_commit: int):
+        super().__init__(values)
+        self.fail_on_commit = fail_on_commit
+
+    async def commit(self):
+        self.commit_calls += 1
+        if self.commit_calls == self.fail_on_commit:
+            raise SQLAlchemyError("database unavailable")
 
 
 class _RegenerationSession(_ScalarSession):

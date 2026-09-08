@@ -67,6 +67,12 @@ class BackgroundJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="fk_jobs_conversation_message_business",
             ondelete="CASCADE",
         ),
+        ForeignKeyConstraint(
+            ["creative_asset_id", "business_id"],
+            ["marketing_creative_assets.id", "marketing_creative_assets.business_id"],
+            name="fk_jobs_creative_asset_business",
+            ondelete="CASCADE",
+        ),
         UniqueConstraint("idempotency_key", name="uq_background_jobs_idempotency_key"),
         CheckConstraint(
             "job_type IN ('process_automation_event','resume_workflow_run',"
@@ -78,7 +84,8 @@ class BackgroundJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "'analyze_business_opportunity',"
             "'commerce_initial_sync','commerce_incremental_sync','commerce_webhook_reconcile',"
             "'google_merchant_status_sync','meta_catalog_status_sync',"
-            "'google_ads_performance_sync','meta_ads_performance_sync')",
+            "'google_ads_performance_sync','meta_ads_performance_sync',"
+            "'generate_creative_asset')",
             name="valid_job_type",
         ),
         CheckConstraint(
@@ -132,6 +139,11 @@ class BackgroundJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "(job_type = 'dispatch_conversation_message' AND conversation_message_id IS NOT NULL) OR "
             "(job_type <> 'dispatch_conversation_message' AND conversation_message_id IS NULL)",
             name="consistent_conversation_message_reference",
+        ),
+        CheckConstraint(
+            "(job_type = 'generate_creative_asset' AND creative_asset_id IS NOT NULL) OR "
+            "(job_type <> 'generate_creative_asset' AND creative_asset_id IS NULL)",
+            name="consistent_creative_asset_reference",
         ),
         Index(
             "ix_background_jobs_claim",
@@ -201,6 +213,7 @@ class BackgroundJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     commerce_feed_destination_id: Mapped[UUID | None] = mapped_column(nullable=True)
     marketing_campaign_id: Mapped[UUID | None] = mapped_column(nullable=True)
     opportunity_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    creative_asset_id: Mapped[UUID | None] = mapped_column(nullable=True)
     scheduled_occurrence_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )

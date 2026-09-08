@@ -373,6 +373,14 @@ export function createMarketingApi(client: ApiClient) {
         ),
     },
     creative: {
+      get: (id: string, creativeAssetId: string, signal?: AbortSignal) =>
+        client.request<CreativeAsset>(
+          marketingPath(
+            id,
+            `/creative-assets/${encodeURIComponent(creativeAssetId)}`,
+          ),
+          { signal },
+        ),
       list: (
         id: string,
         campaignId?: string,

@@ -10,14 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies.ai_agent import AIAgentProviderDependency
 from app.api.dependencies.creative import (
-    CreativeDirectorProviderDependency,
-    CreativeGenerationProviderDependency,
-    CreativeResearchEngineDependency,
-    CreativeVisualReviewProviderDependency,
     VideoGenerationProviderDependency,
 )
-from app.core.config import settings
-from app.storage.factory import ObjectStorageDependency
 from app.api.dependencies.business import BusinessAccessDependency, require_business_role
 from app.api.response_materialization import materialize_response_before_commit
 from app.db.session import get_db_session
@@ -363,6 +357,26 @@ async def read_creative_assets(access: BusinessAccessDependency, response: Respo
     return await _read(response, service.list_creative_assets(session, business_id=access.business.id, campaign_id=campaign_id, content_id=content_id))
 
 
+@router.get(
+    "/creative-assets/{creative_asset_id}",
+    response_model=CreativeAssetResponse,
+)
+async def read_creative_asset(
+    creative_asset_id: UUID,
+    access: BusinessAccessDependency,
+    response: Response,
+    session: SessionDependency,
+):
+    return await _read(
+        response,
+        service.get_creative_asset(
+            session,
+            business_id=access.business.id,
+            creative_asset_id=creative_asset_id,
+        ),
+    )
+
+
 @router.post("/creative-assets/brief", response_model=CreativeAssetResponse, status_code=status.HTTP_201_CREATED)
 async def create_creative_brief(data: CreativeBriefCreate, access: BusinessAccessDependency, response: Response, session: SessionDependency, provider: AIAgentProviderDependency):
     await _guard(session, access.business.id, "marketing_cmo", ai=True)
@@ -423,17 +437,13 @@ async def start_video_generation(
 @router.post(
     "/creative-assets/{creative_asset_id}/generate",
     response_model=CreativeAssetResponse,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def generate_creative_asset(
     creative_asset_id: UUID,
     access: BusinessAccessDependency,
     response: Response,
     session: SessionDependency,
-    provider: CreativeGenerationProviderDependency,
-    director_provider: CreativeDirectorProviderDependency,
-    visual_review_provider: CreativeVisualReviewProviderDependency,
-    research_engine: CreativeResearchEngineDependency,
-    storage: ObjectStorageDependency,
 ):
     await _guard(
         session,
@@ -444,22 +454,11 @@ async def generate_creative_asset(
     return await _mutate(
         response,
         session,
-        service.generate_creative_asset(
+        service.queue_creative_asset_generation(
             session,
             business_id=access.business.id,
             creative_asset_id=creative_asset_id,
             actor_user_id=access.user.id,
-            provider=provider,
-            director_provider=director_provider,
-            director_max_output_tokens=settings.creative_director_max_output_tokens,
-            visual_review_provider=visual_review_provider,
-            max_visual_review_calls=settings.creative_max_visual_review_calls,
-            research_engine=research_engine,
-            storage=storage,
-            max_image_attempts=settings.creative_max_image_attempts,
-            max_composition_attempts=settings.creative_max_composition_attempts,
-            quality_threshold=settings.creative_quality_threshold,
-            require_semantic_review=True,
         ),
     )
 
@@ -467,18 +466,13 @@ async def generate_creative_asset(
 @router.post(
     "/creative-assets/{creative_asset_id}/regenerate",
     response_model=CreativeAssetResponse,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def regenerate_creative_asset(
     creative_asset_id: UUID,
     access: BusinessAccessDependency,
     response: Response,
     session: SessionDependency,
-    provider: CreativeGenerationProviderDependency,
-    director_provider: CreativeDirectorProviderDependency,
-    visual_review_provider: CreativeVisualReviewProviderDependency,
-    research_engine: CreativeResearchEngineDependency,
-    storage: ObjectStorageDependency,
     data: CreativeVariationRequest | None = None,
 ):
     await _guard(
@@ -490,23 +484,12 @@ async def regenerate_creative_asset(
     return await _mutate(
         response,
         session,
-        service.regenerate_creative_asset(
+        service.queue_creative_asset_regeneration(
             session,
             business_id=access.business.id,
             creative_asset_id=creative_asset_id,
             actor_user_id=access.user.id,
-            provider=provider,
-            director_provider=director_provider,
-            director_max_output_tokens=settings.creative_director_max_output_tokens,
-            visual_review_provider=visual_review_provider,
-            max_visual_review_calls=settings.creative_max_visual_review_calls,
-            research_engine=research_engine,
-            storage=storage,
-            max_image_attempts=settings.creative_max_image_attempts,
-            max_composition_attempts=settings.creative_max_composition_attempts,
-            quality_threshold=settings.creative_quality_threshold,
             variation_mode=(data.variation_mode if data is not None else None),
-            require_semantic_review=True,
         ),
     )
 

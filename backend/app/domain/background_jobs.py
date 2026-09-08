@@ -28,6 +28,7 @@ JobType = Literal[
     "meta_catalog_status_sync",
     "google_ads_performance_sync",
     "meta_ads_performance_sync",
+    "generate_creative_asset",
 ]
 
 JOB_STATUSES: Final = frozenset({
@@ -158,6 +159,12 @@ _POLICIES = {
     "meta_ads_performance_sync": JobPolicy(
         "meta_ads_performance_sync", "marketing_campaign_id", 45, 5, True, True, True,
     ),
+    # Image generation is replay-safe only through the asset's durable raw
+    # checkpoint. Queue retries reuse the committed generation epoch; a user
+    # retry creates a new epoch and therefore a new idempotency identity.
+    "generate_creative_asset": JobPolicy(
+        "generate_creative_asset", "creative_asset_id", 60, 3, True, False, True,
+    ),
 }
 
 JOB_POLICIES: Final = MappingProxyType(_POLICIES)
@@ -179,6 +186,7 @@ JOB_REFERENCE_FIELDS: Final = (
     "commerce_feed_destination_id",
     "marketing_campaign_id",
     "opportunity_id",
+    "creative_asset_id",
 )
 
 
@@ -197,3 +205,24 @@ def initial_opportunity_analysis_job_key(opportunity_id: UUID) -> str:
 def initial_opportunity_analysis_request_key(opportunity_id: UUID) -> str:
     """Return the stable service idempotency identity used across job retries."""
     return f"business-growth:{opportunity_id}:initial"
+
+
+def creative_asset_generation_job_key(
+    creative_asset_id: UUID,
+    generation_epoch: int,
+    generation_version: int,
+    variation_identity: str,
+) -> str:
+    """Return one durable queue identity per committed creative generation."""
+    if (
+        not 1 <= generation_epoch <= 1_000_000
+        or not 1 <= generation_version <= 1_000_000
+        or not variation_identity
+        or len(variation_identity) > 32
+        or not all(character.isalnum() or character in {"_", "-"} for character in variation_identity)
+    ):
+        raise ValueError("generation_epoch_invalid")
+    return (
+        f"creative-generation:{creative_asset_id}:epoch:{generation_epoch}:"
+        f"version:{generation_version}:variation:{variation_identity}"
+    )

@@ -373,7 +373,7 @@ class CreativeAsset(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint("media_type <> 'image' OR (provider_key IS NULL AND provider_job_reference IS NULL)", name="consistent_image_provider_identity"),
         CheckConstraint("generation_status <> 'provider_required' OR (provider_key IS NULL AND provider_job_reference IS NULL AND storage_reference IS NULL)", name="consistent_provider_required_state"),
         CheckConstraint("generation_status <> 'strategy_ready' OR (media_type = 'video' AND provider_key IS NULL AND provider_job_reference IS NULL AND storage_reference IS NULL)", name="consistent_video_strategy_state"),
-        CheckConstraint("generation_status NOT IN ('queued','generating','reviewing','repairing') OR (media_type = 'video' AND provider_key IS NOT NULL AND provider_job_reference IS NOT NULL AND storage_reference IS NULL)", name="consistent_video_async_state"),
+        CheckConstraint("NOT (media_type = 'video' AND generation_status IN ('queued','generating','reviewing','repairing')) OR (provider_key IS NOT NULL AND provider_job_reference IS NOT NULL AND storage_reference IS NULL)", name="consistent_video_async_state"),
         CheckConstraint("NOT (media_type = 'video' AND generation_status = 'ready') OR (provider_key IS NOT NULL AND provider_job_reference IS NOT NULL AND storage_reference IS NOT NULL)", name="consistent_ready_video_state"),
         UniqueConstraint("id", "business_id", name="uq_marketing_creative_assets_id_business"),
         Index("ix_marketing_creative_assets_business_campaign", "business_id", "campaign_id", "id"),

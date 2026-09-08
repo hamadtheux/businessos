@@ -17,6 +17,7 @@ os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 from app.domain.background_jobs import (  # noqa: E402
     JOB_POLICIES,
     JOB_TYPES,
+    creative_asset_generation_job_key,
     initial_opportunity_analysis_job_key,
     initial_opportunity_analysis_request_key,
     require_job_policy,
@@ -36,6 +37,7 @@ from app.services.background_jobs import (  # noqa: E402
     enqueue_job,
     record_job_failure,
     record_job_success,
+    renew_job_lease,
     retry_job,
     _synchronize_linked_run,
 )
@@ -59,6 +61,7 @@ class BackgroundJobModelAndRegistryTests(unittest.TestCase):
         self.assertNotIn("handler", BackgroundJob.__table__.columns)
         self.assertIn("opportunity_id", BackgroundJob.__table__.columns)
         self.assertIn("conversation_message_id", BackgroundJob.__table__.columns)
+        self.assertIn("creative_asset_id", BackgroundJob.__table__.columns)
         self.assertFalse(any(
             token in column.name
             for column in BackgroundJob.__table__.columns
@@ -77,6 +80,7 @@ class BackgroundJobModelAndRegistryTests(unittest.TestCase):
             "ck_background_jobs_valid_attempt_count",
             "ck_background_jobs_consistent_opportunity_reference",
             "ck_background_jobs_consistent_conversation_message_reference",
+            "ck_background_jobs_consistent_creative_asset_reference",
         ):
             self.assertIn(expected, names)
 
@@ -134,6 +138,48 @@ class BackgroundJobModelAndRegistryTests(unittest.TestCase):
         )
         self.assertEqual(constraint.ondelete, "CASCADE")
 
+    def test_creative_asset_reference_uses_composite_tenant_foreign_key(self) -> None:
+        foreign_keys = [
+            value for value in BackgroundJob.__table__.constraints
+            if isinstance(value, ForeignKeyConstraint)
+        ]
+        constraint = next(
+            value for value in foreign_keys
+            if value.name == "fk_jobs_creative_asset_business"
+        )
+        self.assertEqual(
+            [column.name for column in constraint.columns],
+            ["creative_asset_id", "business_id"],
+        )
+        self.assertEqual(
+            [element.target_fullname for element in constraint.elements],
+            [
+                "marketing_creative_assets.id",
+                "marketing_creative_assets.business_id",
+            ],
+        )
+        self.assertEqual(constraint.ondelete, "CASCADE")
+
+    def test_creative_generation_policy_and_identity_are_bounded(self) -> None:
+        asset_id = uuid4()
+        policy = require_job_policy("generate_creative_asset")
+        self.assertEqual(policy.reference_field, "creative_asset_id")
+        self.assertEqual(policy.max_attempts, 3)
+        self.assertTrue(policy.retryable)
+        self.assertFalse(policy.manually_retryable)
+        self.assertTrue(policy.lease_recoverable)
+        key = creative_asset_generation_job_key(
+            asset_id,
+            2,
+            2,
+            "alternate_metaphor",
+        )
+        self.assertIn(str(asset_id), key)
+        self.assertIn("epoch:2", key)
+        self.assertIn("version:2", key)
+        self.assertIn("variation:alternate_metaphor", key)
+        self.assertLessEqual(len(key), 200)
+
     def test_manual_message_dispatch_policy_is_bounded_and_crash_recoverable(self) -> None:
         policy = require_job_policy("dispatch_conversation_message")
         self.assertEqual(policy.reference_field, "conversation_message_id")
@@ -188,6 +234,18 @@ class BackgroundJobModelAndRegistryTests(unittest.TestCase):
         self.assertIn('["opportunity_id", "business_id"]', source)
         self.assertIn('["id", "business_id"]', source)
         self.assertNotIn("ondelete=\"SET NULL\"", source)
+
+    def test_creative_job_migration_preserves_types_and_is_reversible(self) -> None:
+        source = (
+            Path(__file__).parents[1]
+            / "alembic/versions/a6e4c8d2f913_add_creative_generation_jobs.py"
+        ).read_text()
+        self.assertIn('down_revision: str | Sequence[str] | None = "9d7a2c4e6f81"', source)
+        self.assertIn('"generate_creative_asset"', source)
+        self.assertIn('"fk_jobs_creative_asset_business"', source)
+        self.assertIn('["creative_asset_id", "business_id"]', source)
+        self.assertIn('["id", "business_id"]', source)
+        self.assertIn("def downgrade()", source)
 
     def test_worker_id_is_bounded_and_contains_no_secret(self) -> None:
         value = build_instance_id("worker")
@@ -262,6 +320,48 @@ class BackgroundJobServiceTests(unittest.IsolatedAsyncioTestCase):
             session,
             field="opportunity_id",
             reference_id=opportunity_id,
+            business_id=BUSINESS_ID,
+        )
+
+    async def test_creative_enqueue_is_tenant_checked_and_idempotent(self) -> None:
+        creative_asset_id = uuid4()
+        key = creative_asset_generation_job_key(
+            creative_asset_id,
+            1,
+            1,
+            "initial",
+        )
+        existing = BackgroundJob(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            job_type="generate_creative_asset",
+            status="queued",
+            priority=60,
+            idempotency_key=key,
+            attempt_count=0,
+            max_attempts=3,
+            available_at=NOW,
+            creative_asset_id=creative_asset_id,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        session = _Session(scalar_values=[None, existing])
+        with patch(
+            "app.services.background_jobs._require_tenant_reference",
+            new=AsyncMock(),
+        ) as require_reference:
+            result = await enqueue_job(
+                session,  # type: ignore[arg-type]
+                business_id=BUSINESS_ID,
+                job_type="generate_creative_asset",
+                idempotency_key=key,
+                creative_asset_id=creative_asset_id,
+            )
+        self.assertIs(result, existing)
+        require_reference.assert_awaited_once_with(
+            session,
+            field="creative_asset_id",
+            reference_id=creative_asset_id,
             business_id=BUSINESS_ID,
         )
 
@@ -367,6 +467,17 @@ class BackgroundJobServiceTests(unittest.IsolatedAsyncioTestCase):
         result = await claim_jobs(session, worker_id="worker-b", batch_size=1, lease_seconds=30, now=NOW)  # type: ignore[arg-type]
         self.assertEqual(result[0].worker_id, "worker-b")
         self.assertEqual(result[0].attempt_count, 2)
+
+    async def test_owned_long_running_job_lease_can_be_renewed(self) -> None:
+        job = _processing_job()
+        renewed = await renew_job_lease(
+            _Session(scalar_values=[job]),  # type: ignore[arg-type]
+            job_id=job.id,
+            worker_id="worker-a",
+            lease_seconds=300,
+            now=NOW,
+        )
+        self.assertEqual(renewed.lease_expires_at, NOW + timedelta(seconds=300))
 
     async def test_success_is_terminal_and_owned_by_claiming_worker(self) -> None:
         job = _processing_job()
@@ -474,6 +585,46 @@ class BackgroundJobServiceTests(unittest.IsolatedAsyncioTestCase):
                     session.added[0].category,
                     "processing_failure",
                 )
+
+    async def test_creative_retry_exhaustion_cannot_leave_asset_processing(self) -> None:
+        creative_asset_id = uuid4()
+        job = BackgroundJob(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            job_type="generate_creative_asset",
+            status="processing",
+            priority=60,
+            idempotency_key=f"creative-generation:{creative_asset_id}:epoch:1",
+            attempt_count=3,
+            max_attempts=3,
+            available_at=NOW - timedelta(seconds=1),
+            claimed_at=NOW - timedelta(seconds=10),
+            lease_expires_at=NOW + timedelta(seconds=50),
+            worker_id="worker-a",
+            creative_asset_id=creative_asset_id,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        asset = SimpleNamespace(
+            id=creative_asset_id,
+            business_id=BUSINESS_ID,
+            generation_status="reviewing",
+            source_type="ai_brief",
+            storage_reference=None,
+        )
+        session = _Session(scalar_values=[job, asset])
+
+        result = await record_job_failure(
+            session,  # type: ignore[arg-type]
+            job_id=job.id,
+            worker_id="worker-a",
+            failure_code="dependency_unavailable",
+            retryable=True,
+        )
+
+        self.assertEqual(result.status, "dead_letter")
+        self.assertEqual(asset.generation_status, "failed")
+        self.assertIsNone(asset.storage_reference)
 
     async def test_exhausted_manual_message_lease_cannot_leave_message_stuck(self) -> None:
         for initial, expected in (

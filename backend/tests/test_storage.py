@@ -4,11 +4,12 @@ from io import BytesIO
 import unittest
 from pathlib import Path
 
+from botocore.exceptions import ClientError
 
 os.environ["AIBOS_DATABASE_URL"] = "postgresql+asyncpg://database.invalid/test"
 os.environ["AIBOS_AUTH_SECRET_KEY"] = "x" * 32
 
-from app.storage.base import InvalidStorageKeyError  # noqa: E402
+from app.storage.base import InvalidStorageKeyError, ObjectNotFoundError  # noqa: E402
 from app.storage.local import LocalObjectStorage  # noqa: E402
 from app.storage.s3 import S3ObjectStorage  # noqa: E402
 
@@ -111,6 +112,14 @@ class _FakeS3Client:
         return {}
 
 
+class _MissingS3Client(_FakeS3Client):
+    def get_object(self, **kwargs: object) -> object:
+        raise ClientError(
+            {"Error": {"Code": "NoSuchKey", "Message": "missing"}},
+            "GetObject",
+        )
+
+
 class S3ObjectStorageTests(unittest.IsolatedAsyncioTestCase):
     async def test_provider_uses_trusted_bucket_key_and_public_base(self) -> None:
         client = _FakeS3Client()
@@ -170,4 +179,22 @@ class S3ObjectStorageTests(unittest.IsolatedAsyncioTestCase):
             await storage.get(
                 key,
                 max_bytes=16,
+            )
+
+    async def test_missing_s3_object_has_distinct_not_found_error(self) -> None:
+        client = _MissingS3Client()
+        storage = S3ObjectStorage(
+            bucket="business-assets",
+            public_base_url="https://cdn.example.test/assets",
+            region="auto",
+            endpoint_url="https://objects.example.test",
+            access_key_id="not-printed",
+            secret_access_key="not-printed",
+            client=client,
+        )
+
+        with self.assertRaises(ObjectNotFoundError):
+            await storage.get(
+                "businesses/business-id/marketing/creatives/missing.png",
+                max_bytes=1024,
             )

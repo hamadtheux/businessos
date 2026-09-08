@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, BarChart3, Calendar, Check, Globe2, Plus, RefreshCw, Send, Sparkles, Target, TrendingUp, Wand2, X } from "lucide-react";
 import { useLocation } from "wouter";
@@ -12,9 +12,11 @@ import {
   channelGenerationNotice,
   createCreativeWithRecovery,
   creativeFormatForContent,
+  CREATIVE_GENERATION_POLL_MS,
   creativePhaseForDisplay,
   creativeResultNotice,
   generateCampaignChannelDrafts,
+  isCreativeGenerationActive,
   publishingCapability,
   runCreativeOperationWithRecovery,
   videoFormatForContent,
@@ -84,6 +86,11 @@ export function CmoPage() {
   const [historyContent, setHistoryContent] = useState<MarketingContent | null>(null);
   const [schedule, setSchedule] = useState<MarketingContent | null>(null);
   const [creativeProgress, setCreativeProgress] = useState<CreativeProgress>(null);
+  const [activeCreativeGeneration, setActiveCreativeGeneration] = useState<{
+    businessId: string;
+    assetId: string;
+    contentId?: string;
+  } | null>(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const period = useMemo(() => businessDateRange(activeBusiness?.timezone || "UTC", 30), [activeBusiness?.timezone]);
@@ -101,6 +108,27 @@ export function CmoPage() {
     queryKey: ["marketing", activeBusinessId, "creative-assets", "cmo", primary?.id],
     queryFn: ({ signal }) => marketingApi.creative.list(activeBusinessId, primary?.campaign_id || undefined, primary!.id, signal),
     enabled: Boolean(activeBusinessId && primary),
+  });
+  const activeCreativeAsset = useQuery({
+    queryKey: [
+      "marketing",
+      activeBusinessId,
+      "creative-asset",
+      activeCreativeGeneration?.assetId,
+    ],
+    queryFn: ({ signal }) => marketingApi.creative.get(
+      activeCreativeGeneration!.businessId,
+      activeCreativeGeneration!.assetId,
+      signal,
+    ),
+    enabled: Boolean(
+      activeCreativeGeneration &&
+      activeCreativeGeneration.businessId === activeBusinessId,
+    ),
+    refetchInterval: (query) =>
+      !query.state.data || isCreativeGenerationActive(query.state.data)
+        ? CREATIVE_GENERATION_POLL_MS
+        : false,
   });
 
   const versions = useQuery({
@@ -127,6 +155,44 @@ export function CmoPage() {
   const refreshCreatives = () => queryClient.invalidateQueries({
     queryKey: ["marketing", activeBusinessId, "creative-assets"],
   });
+  const observeCreativeGeneration = (asset: CreativeAsset) => {
+    if (!isCreativeGenerationActive(asset)) return;
+    setActiveCreativeGeneration({
+      businessId: activeBusinessId,
+      assetId: asset.id,
+      contentId: asset.content_id || undefined,
+    });
+    setCreativeProgress({
+      phase: asset.media_type === "video" ? "video_generation" : "visual",
+      contentId: asset.content_id || undefined,
+      assetId: asset.id,
+    });
+  };
+  useEffect(() => {
+    setActiveCreativeGeneration((current) =>
+      current?.businessId === activeBusinessId ? current : null,
+    );
+  }, [activeBusinessId]);
+  useEffect(() => {
+    if (activeCreativeGeneration) return;
+    const active = creativeAssets.data?.find(isCreativeGenerationActive);
+    if (active) observeCreativeGeneration(active);
+  }, [activeCreativeGeneration, creativeAssets.data]);
+  useEffect(() => {
+    const asset = activeCreativeAsset.data;
+    if (!activeCreativeGeneration || !asset || isCreativeGenerationActive(asset)) {
+      return;
+    }
+    setActiveCreativeGeneration(null);
+    setCreativeProgress(null);
+    setNotice(creativeResultNotice(asset));
+    setError(
+      asset.generation_status === "failed"
+        ? "The creative could not be completed. Its grounded strategy remains ready to retry."
+        : "",
+    );
+    void refreshCreatives();
+  }, [activeCreativeAsset.data, activeCreativeGeneration]);
 
   const generateContent = useMutation({
     mutationFn: (input: CampaignGenerationInput) =>
@@ -354,7 +420,7 @@ export function CmoPage() {
       refresh: refreshCreatives,
       onProgress: setCreativeProgress,
     }),
-    onSuccess: (asset) => { setNotice(creativeResultNotice(asset)); setError(""); },
+    onSuccess: (asset) => { observeCreativeGeneration(asset); setNotice(creativeResultNotice(asset)); setError(""); },
     onError: () => setError("The visual creative could not be completed. Refresh to see saved progress and try again."),
   });
   const createVideo = useMutation({
@@ -374,7 +440,7 @@ export function CmoPage() {
         setCreativeProgress(null);
       }
     },
-    onSuccess: (asset) => { setNotice(creativeResultNotice(asset)); setError(""); },
+    onSuccess: (asset) => { observeCreativeGeneration(asset); setNotice(creativeResultNotice(asset)); setError(""); },
     onError: () => setError("The video strategy could not be completed. Existing content and creative history remain available."),
   });
   const retryCreative = useMutation({
@@ -384,7 +450,7 @@ export function CmoPage() {
       refresh: refreshCreatives,
       onProgress: setCreativeProgress,
     }),
-    onSuccess: (asset) => { setNotice(creativeResultNotice(asset)); setError(""); },
+    onSuccess: (asset) => { observeCreativeGeneration(asset); setNotice(creativeResultNotice(asset)); setError(""); },
     onError: () => setError("The visual creative could not be completed. Refresh to see saved progress and try again."),
   });
   const regenerateCreative = useMutation({
@@ -394,7 +460,7 @@ export function CmoPage() {
       refresh: refreshCreatives,
       onProgress: setCreativeProgress,
     }),
-    onSuccess: (asset) => { setNotice(`${creativeResultNotice(asset)} The previous creative remains in history.`); setError(""); },
+    onSuccess: (asset) => { observeCreativeGeneration(asset); setNotice(`${creativeResultNotice(asset)} The previous creative remains in history.`); setError(""); },
     onError: () => setError("A new creative version could not be completed. Refresh to see any saved history before retrying."),
   });
 
@@ -420,7 +486,8 @@ export function CmoPage() {
     createCreative.isPending ||
     createVideo.isPending ||
     retryCreative.isPending ||
-    regenerateCreative.isPending;
+    regenerateCreative.isPending ||
+    Boolean(activeCreativeGeneration);
 
   const metrics = analytics.data;
   const currency = metrics?.currency || activeBusiness?.currency || "USD";

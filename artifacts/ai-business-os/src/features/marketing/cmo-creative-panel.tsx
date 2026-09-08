@@ -212,8 +212,14 @@ export function CmoCreativePanel({
       <StateFrame testId="creative-brief-ready"><ShieldCheck /><h3>{mediaType === "video" ? "Video strategy ready" : "Creative strategy ready"}</h3><p>{mediaType === "video" ? "The hook, storyboard, timed scenes, continuity, audio, captions, and end card are saved." : "The campaign angle and visual direction are grounded."}</p>{!isHistorical && <Button variant="primary" onClick={() => onRetry(displayed)} disabled={isPending}><Sparkles /> Generate {mediaType}</Button>}</StateFrame>
     );
   } else if (["queued", "generating", "reviewing", "repairing"].includes(displayed.generation_status)) {
-    const statusCopy = ["queued", "generating"].includes(displayed.generation_status) ? "Generating video" : "Reviewing video";
-    currentState = <StateFrame testId="creative-video-progress" live="polite"><RefreshCw className="spin" /><h3>{statusCopy}</h3><p>Your strategy is saved while 9D Brain prepares the next stage.</p>{onReload && <Button onClick={onReload} disabled={isPending}><RefreshCw /> Refresh status</Button>}</StateFrame>;
+    const statusCopy = displayed.generation_status === "queued"
+      ? `${mediaType === "video" ? "Video" : "Image"} queued`
+      : displayed.generation_status === "generating"
+        ? `Generating ${mediaType}`
+        : displayed.generation_status === "repairing"
+          ? `Refining ${mediaType}`
+          : `Reviewing ${mediaType}`;
+    currentState = <StateFrame testId="creative-generation-progress" live="polite"><RefreshCw className="spin" /><h3>{statusCopy}</h3><p>Your strategy is saved while 9D Brain prepares the next stage.</p>{onReload && <Button onClick={onReload} disabled={isPending}><RefreshCw /> Refresh status</Button>}</StateFrame>;
   } else if (displayed.generation_status === "failed") {
     currentState = <StateFrame testId="creative-failed-state" live="assertive"><AlertCircle /><h3>The {mediaType} could not be completed</h3><p>No unfinished media was attached. The grounded strategy is preserved.</p>{!isHistorical && <Button onClick={() => onRetry(displayed)} disabled={isPending}><RefreshCw /> Retry {mediaType}</Button>}</StateFrame>;
   } else if (displayed.generation_status === "ready" && safeReference) {

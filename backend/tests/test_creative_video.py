@@ -498,7 +498,10 @@ class CreativeVideoSchemaTests(TestCase):
             "provider_job_reference IS NULL OR provider_key IS NOT NULL",
             checks["consistent_provider_job_identity"],
         )
-        self.assertIn("generation_status NOT IN", checks["consistent_video_async_state"])
+        self.assertIn(
+            "NOT (media_type = 'video' AND generation_status IN",
+            checks["consistent_video_async_state"],
+        )
         provider_job_index = next(
             index
             for index in CreativeAsset.__table__.indexes

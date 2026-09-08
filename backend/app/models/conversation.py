@@ -89,7 +89,9 @@ class CustomerChannelIdentity(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UniqueConstraint("id", "business_id", name="uq_customer_channel_identities_id_business"),
         UniqueConstraint("business_id", "provider", "external_resource_reference", "external_user_reference", name="uq_customer_channel_identities_provider_identity"),
         CheckConstraint("provider IN ('facebook','instagram','whatsapp_business','website','gmail','microsoft_outlook','other')", name="valid_provider"),
-        CheckConstraint("char_length(btrim(external_resource_reference)) BETWEEN 1 AND 255", name="valid_external_resource_reference"),
+        # Keep the convention-expanded identifier below PostgreSQL's 63-byte
+        # limit so Alembic can compare the reflected and modeled names exactly.
+        CheckConstraint("char_length(btrim(external_resource_reference)) BETWEEN 1 AND 255", name="valid_external_resource_ref"),
         CheckConstraint("char_length(btrim(external_user_reference)) BETWEEN 1 AND 255", name="valid_external_user_reference"),
         CheckConstraint("display_name IS NULL OR char_length(btrim(display_name)) BETWEEN 1 AND 160", name="valid_display_name"),
         Index("ix_customer_channel_identities_business_customer", "business_id", "customer_id", "id"),

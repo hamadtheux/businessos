@@ -78,6 +78,19 @@ export type CreativeProgress = {
   assetId?: string;
 } | null;
 
+export const CREATIVE_GENERATION_POLL_MS = 3_000;
+const ACTIVE_CREATIVE_GENERATION_STATUSES = new Set<
+  CreativeAsset["generation_status"]
+>(["queued", "generating", "reviewing", "repairing"]);
+
+export function isCreativeGenerationActive(
+  asset: Pick<CreativeAsset, "generation_status"> | null | undefined,
+) {
+  return Boolean(
+    asset && ACTIVE_CREATIVE_GENERATION_STATUSES.has(asset.generation_status),
+  );
+}
+
 export const CONTENT_PROMPT_MAX = 4000;
 export const OWNER_GOAL_MAX = 2400;
 export const AUDIENCE_GUIDANCE_MAX = 400;

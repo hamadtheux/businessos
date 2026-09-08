@@ -1,5 +1,6 @@
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from pydantic import ValidationError
@@ -7,6 +8,7 @@ from pydantic import ValidationError
 
 TEST_DATABASE_URL = "postgresql+asyncpg://database.invalid/test"
 TEST_AUTH_SECRET = "configuration-test-auth-secret-with-at-least-thirty-two-bytes"
+EXAMPLE_ENV_FILE = Path(__file__).resolve().parents[1] / ".env.example"
 os.environ["AIBOS_DATABASE_URL"] = TEST_DATABASE_URL
 os.environ["AIBOS_AUTH_SECRET_KEY"] = TEST_AUTH_SECRET
 
@@ -16,7 +18,7 @@ from app.core.config import Settings  # noqa: E402
 class SettingsValidationTests(unittest.TestCase):
     def test_current_real_development_configuration_loads(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            config = Settings()
+            config = Settings(_env_file=EXAMPLE_ENV_FILE)
 
         self.assertEqual(config.environment, "development")
         self.assertEqual(config.app_name, "9D Brain API")

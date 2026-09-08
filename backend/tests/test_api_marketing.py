@@ -22,7 +22,7 @@ from app.api.v1.marketing import _mutate as marketing_mutate  # noqa: E402
 from app.db.session import get_db_session  # noqa: E402
 from app.exceptions.marketing import MarketingStateError  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models.marketing import Campaign, MarketingContent, MarketingPlan  # noqa: E402
+from app.models.marketing import Campaign, CreativeAsset, MarketingContent, MarketingPlan  # noqa: E402
 from app.services.marketing import (  # noqa: E402
     _register_creative_storage_compensation,
 )
@@ -74,6 +74,57 @@ class MarketingApiTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get(self._url("campaigns", OTHER_BUSINESS_ID))
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+    async def test_image_generation_returns_202_queued_asset_without_runtime_inputs(self) -> None:
+        asset = _creative_asset()
+        with patch(
+            "app.api.v1.marketing.service.queue_creative_asset_generation",
+            new=AsyncMock(return_value=asset),
+        ) as enqueue:
+            response = await self.client.post(
+                self._url(f"creative-assets/{asset.id}/generate")
+            )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["generation_status"], "queued")
+        self.assertNotIn("creative_metadata", response.json())
+        self.assertEqual(enqueue.await_args.kwargs["business_id"], BUSINESS_ID)
+        self.assertEqual(enqueue.await_args.kwargs["actor_user_id"], USER_ID)
+        self.assertEqual(enqueue.await_args.kwargs["creative_asset_id"], asset.id)
+
+    async def test_specific_creative_poll_is_tenant_scoped(self) -> None:
+        asset = _creative_asset()
+        with patch(
+            "app.api.v1.marketing.service.get_creative_asset",
+            new=AsyncMock(return_value=asset),
+        ) as get_asset:
+            response = await self.client.get(
+                self._url(f"creative-assets/{asset.id}")
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["id"], str(asset.id))
+        self.assertEqual(get_asset.await_args.kwargs["business_id"], BUSINESS_ID)
+
+    async def test_image_regeneration_returns_202_queued_immutable_revision(self) -> None:
+        revision = _creative_asset()
+        source_id = uuid4()
+        with patch(
+            "app.api.v1.marketing.service.queue_creative_asset_regeneration",
+            new=AsyncMock(return_value=revision),
+        ) as enqueue:
+            response = await self.client.post(
+                self._url(f"creative-assets/{source_id}/regenerate"),
+                json={"variation_mode": "alternate_metaphor"},
+            )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["id"], str(revision.id))
+        self.assertEqual(response.json()["generation_status"], "queued")
+        self.assertNotIn("creative_metadata", response.json())
+        self.assertEqual(enqueue.await_args.kwargs["business_id"], BUSINESS_ID)
+        self.assertEqual(enqueue.await_args.kwargs["creative_asset_id"], source_id)
+        self.assertEqual(
+            enqueue.await_args.kwargs["variation_mode"],
+            "alternate_metaphor",
+        )
 
     async def test_campaign_list_passes_bounded_filters_and_business(self) -> None:
         with patch("app.api.v1.marketing.service.list_campaigns", new=AsyncMock(return_value=([_campaign()], 1))) as service:
@@ -521,6 +572,30 @@ def _content(
         generation_reasoning="Owner revision",
         recommended_for="Instagram",
         source_evidence=[],
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _creative_asset() -> CreativeAsset:
+    return CreativeAsset(
+        id=uuid4(),
+        business_id=BUSINESS_ID,
+        campaign_id=None,
+        content_id=None,
+        asset_type="social_square",
+        media_type="image",
+        source_type="ai_brief",
+        instructions="Create a grounded visual.",
+        visual_direction="{}",
+        generation_status="queued",
+        storage_reference=None,
+        width=1080,
+        height=1080,
+        aspect_ratio="1:1",
+        alt_text="Campaign creative",
+        duration_seconds=None,
+        creative_metadata={"private": True},
         created_at=NOW,
         updated_at=NOW,
     )

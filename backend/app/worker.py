@@ -16,6 +16,7 @@ from app.services.background_jobs import (
     claim_jobs,
     record_job_failure,
     record_job_success,
+    renew_job_lease,
     upsert_worker_heartbeat,
 )
 from app.services.job_handlers import HandlerOutcome, dispatch_job_handler
@@ -28,6 +29,41 @@ from app.services.conversation_message_dispatcher import (
 logger = logging.getLogger("aibos.worker")
 
 
+async def _maintain_job_lease(
+    job: BackgroundJob,
+    *,
+    worker_id: str,
+    stopped: asyncio.Event,
+) -> None:
+    interval = max(5.0, settings.job_lease_seconds / 3)
+    while not stopped.is_set():
+        try:
+            await asyncio.wait_for(stopped.wait(), timeout=interval)
+            return
+        except TimeoutError:
+            pass
+        try:
+            async with AsyncSessionFactory() as session:
+                await renew_job_lease(
+                    session,
+                    job_id=job.id,
+                    worker_id=worker_id,
+                    lease_seconds=settings.job_lease_seconds,
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.error(
+                "job_lease_renewal_failed",
+                extra={
+                    "job_id": str(job.id),
+                    "business_id": str(job.business_id),
+                    "job_type": job.job_type,
+                    "worker_id": worker_id,
+                    "exception_type": type(exc).__name__,
+                },
+            )
+
+
 def build_instance_id(role: str) -> str:
     host = re.sub(r"[^a-zA-Z0-9-]", "-", socket.gethostname()).strip("-")[:24] or "host"
     return f"{role}-{host}-{os.getpid()}-{token_hex(4)}"[:96]
@@ -35,6 +71,10 @@ def build_instance_id(role: str) -> str:
 
 async def process_claimed_job(job: BackgroundJob, *, worker_id: str) -> None:
     outcome: HandlerOutcome
+    lease_stopped = asyncio.Event()
+    lease_task = asyncio.create_task(
+        _maintain_job_lease(job, worker_id=worker_id, stopped=lease_stopped)
+    )
     try:
         if job.job_type == "dispatch_action_execution":
             dispatched = await dispatch_action_execution_job(job)
@@ -67,6 +107,9 @@ async def process_claimed_job(job: BackgroundJob, *, worker_id: str) -> None:
             },
         )
         outcome = HandlerOutcome(False, "dependency_unavailable", True)
+    finally:
+        lease_stopped.set()
+        await lease_task
     try:
         async with AsyncSessionFactory() as session:
             if outcome.succeeded:

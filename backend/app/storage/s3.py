@@ -3,8 +3,10 @@ from typing import Protocol
 from urllib.parse import quote
 
 import boto3
+from botocore.exceptions import ClientError
 
 from app.storage.base import (
+    ObjectNotFoundError,
     ObjectStorage,
     StorageOperationError,
     validate_storage_key,
@@ -108,6 +110,12 @@ class S3ObjectStorage(ObjectStorage):
                 return content
             except StorageOperationError:
                 raise
+            except ClientError as exc:
+                error = exc.response.get("Error", {}) if isinstance(exc.response, dict) else {}
+                code = str(error.get("Code", ""))
+                if code in {"NoSuchKey", "404", "NotFound"}:
+                    raise ObjectNotFoundError("Stored object was not found") from None
+                raise StorageOperationError("Unable to read object") from None
             except Exception:
                 raise StorageOperationError("Unable to read object") from None
             finally:

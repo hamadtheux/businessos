@@ -10,6 +10,10 @@ class StorageOperationError(StorageError):
     """Raised when a trusted storage operation cannot be completed."""
 
 
+class ObjectNotFoundError(StorageOperationError):
+    """Raised only when a valid storage key has no stored object."""
+
+
 class InvalidStorageKeyError(StorageError):
     """Raised when an object key falls outside the controlled namespace."""
 

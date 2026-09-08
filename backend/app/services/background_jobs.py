@@ -40,7 +40,7 @@ from app.models.commerce import (
     CommerceWebhookReceipt,
 )
 from app.models.conversation import ConversationMessage
-from app.models.marketing import Campaign, SocialSchedule
+from app.models.marketing import Campaign, CreativeAsset, SocialSchedule
 from app.models.notification import Notification
 from app.models.opportunity import Opportunity
 from app.services.operations import record_audit
@@ -64,6 +64,7 @@ _REFERENCE_MODELS = {
     "commerce_feed_destination_id": CommerceFeedDestination,
     "marketing_campaign_id": Campaign,
     "opportunity_id": Opportunity,
+    "creative_asset_id": CreativeAsset,
 }
 
 
@@ -90,6 +91,7 @@ async def enqueue_job(
     commerce_feed_destination_id: UUID | None = None,
     marketing_campaign_id: UUID | None = None,
     opportunity_id: UUID | None = None,
+    creative_asset_id: UUID | None = None,
     scheduled_occurrence_at: datetime | None = None,
 ) -> BackgroundJob:
     """Enqueue one server-defined job without accepting arbitrary payloads."""
@@ -114,6 +116,7 @@ async def enqueue_job(
         "commerce_feed_destination_id": commerce_feed_destination_id,
         "marketing_campaign_id": marketing_campaign_id,
         "opportunity_id": opportunity_id,
+        "creative_asset_id": creative_asset_id,
     }
     if references[policy.reference_field] is None:
         raise BackgroundJobValidationError("job_reference_required")
@@ -178,6 +181,10 @@ async def enqueue_job(
         or (
             job_type == "dispatch_conversation_message"
             and job.conversation_message_id != conversation_message_id
+        )
+        or (
+            job_type == "generate_creative_asset"
+            and job.creative_asset_id != creative_asset_id
         )
     ):
         raise BackgroundJobValidationError("idempotency_key_conflict")
@@ -253,6 +260,25 @@ async def claim_jobs(
     return jobs
 
 
+async def renew_job_lease(
+    session: AsyncSession,
+    *,
+    job_id: UUID,
+    worker_id: str,
+    lease_seconds: int,
+    now: datetime | None = None,
+) -> BackgroundJob:
+    """Extend an owned processing lease while a bounded handler is active."""
+    if not 10 <= lease_seconds <= 900:
+        raise BackgroundJobValidationError("claim_parameters_invalid")
+    job = await _lock_job(session, job_id=job_id)
+    _require_claim_owner(job, worker_id)
+    timestamp = (now or datetime.now(UTC)).astimezone(UTC)
+    job.lease_expires_at = timestamp + timedelta(seconds=lease_seconds)
+    await _flush(session)
+    return job
+
+
 async def record_job_success(
     session: AsyncSession, *, job_id: UUID, worker_id: str,
 ) -> BackgroundJob:
@@ -313,6 +339,32 @@ async def _finalize_terminal_conversation_message_job(
         message.delivery_status = "uncertain"
 
 
+async def _finalize_terminal_creative_job(
+    session: AsyncSession,
+    *,
+    job: BackgroundJob,
+) -> None:
+    """Leave a terminal creative job with a truthful terminal asset state."""
+    if job.job_type != "generate_creative_asset" or job.creative_asset_id is None:
+        return
+    asset = await session.scalar(
+        select(CreativeAsset)
+        .where(
+            CreativeAsset.id == job.creative_asset_id,
+            CreativeAsset.business_id == job.business_id,
+        )
+        .with_for_update()
+    )
+    if asset is not None and asset.generation_status in {
+        "queued",
+        "generating",
+        "reviewing",
+        "repairing",
+    }:
+        asset.generation_status = "failed"
+        asset.storage_reference = None
+
+
 async def record_job_failure(
     session: AsyncSession,
     *,
@@ -347,6 +399,7 @@ async def record_job_failure(
         job.completed_at = now
         job.failure_code = "retry_exhausted" if exhausted else failure_code
         await _finalize_terminal_conversation_message_job(session, job=job)
+        await _finalize_terminal_creative_job(session, job=job)
         if exhausted:
             _add_failure_notification(session, job)
         await _synchronize_linked_run(
@@ -380,6 +433,7 @@ async def dead_letter_exhausted_leases(
         job.failure_code = "retry_exhausted"
         job.completed_at = timestamp
         await _finalize_terminal_conversation_message_job(session, job=job)
+        await _finalize_terminal_creative_job(session, job=job)
         _add_failure_notification(session, job)
         await _synchronize_linked_run(
             session,
@@ -492,6 +546,7 @@ async def cancel_job(
     # will never be entered. Finalize the linked queued message so the inbox
     # cannot display a reply as permanently pending.
     await _finalize_terminal_conversation_message_job(session, job=job)
+    await _finalize_terminal_creative_job(session, job=job)
 
     await _synchronize_linked_run(
         session,
