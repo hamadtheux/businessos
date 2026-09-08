@@ -199,7 +199,7 @@ class BusinessBrandingApiTests(unittest.IsolatedAsyncioTestCase):
                 "primary_color": "#176B45",
                 "secondary_color": "#45695A",
                 "accent_color": "#D36F32",
-                "logo_url": "https://storage.example.test/read-only.png",
+                "logo_url": None,
             },
         )
         self.assertEqual(self.session.commit_calls, 0)
@@ -221,7 +221,7 @@ class BusinessBrandingApiTests(unittest.IsolatedAsyncioTestCase):
         self._assert_private_cache_headers(response)
 
     async def test_put_creates_normalizes_and_commits_before_response(self) -> None:
-        def build_after_commit(branding: object) -> BusinessBrandingResponse:
+        def build_after_commit(branding: object, **kwargs: object) -> BusinessBrandingResponse:
             self.assertEqual(self.session.commit_calls, 1)
             return BusinessBrandingResponse.model_validate(branding)
 
@@ -264,7 +264,7 @@ class BusinessBrandingApiTests(unittest.IsolatedAsyncioTestCase):
             branding.logo_url,
             "https://storage.example.test/read-only.png",
         )
-        self.assertEqual(response.json()["logo_url"], branding.logo_url)
+        self.assertIsNone(response.json()["logo_url"])
 
     async def test_reset_removes_color_only_row_and_is_idempotent(self) -> None:
         self.session.brandings.append(

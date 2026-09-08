@@ -71,7 +71,7 @@ type ContentStudioCardProps = {
   onHistory?: (content: MarketingContent) => void;
   onCreateCreative: (mediaType: CreativeMediaType) => void;
   onEditCreativeDirection?: (mediaType: CreativeMediaType) => void;
-  onReloadCreative?: () => void;
+  onReloadCreative?: (creative?: CreativeAsset) => Promise<unknown> | unknown;
   onRetryCreative: (creative: CreativeAsset) => void;
   onRegenerateCreative: (creative: CreativeAsset) => void;
   onVariationCreative?: (

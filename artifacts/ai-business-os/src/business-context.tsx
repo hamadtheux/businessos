@@ -27,6 +27,8 @@ import {
   type BillingOverview,
 } from "@/services/billing";
 
+import { startBrandingRefresh } from "@/lib/branding-refresh";
+
 const ACTIVE_BUSINESS_KEY = "ai-os-active-business";
 
 type BusinessContextValue = {
@@ -234,6 +236,27 @@ export function BusinessProvider({ children }: { children: ReactNode }) {
     () => businesses.find((business) => business.id === activeBusinessId),
     [activeBusinessId, businesses],
   );
+
+  useEffect(() => {
+    if (status !== "authenticated" || !activeBusinessId) return;
+    let cancelled = false;
+    const stop = startBrandingRefresh(async () => {
+      const id = activeBusinessId;
+      const version = brandingVersion.current;
+      const snapshot = businessesRef.current;
+      const branding = await businessApi.getBranding(id);
+      if (cancelled || snapshot !== businessesRef.current || !isCurrentBrandingResponse(
+        id, version, activeBusinessIdRef.current, brandingVersion.current,
+      )) return;
+      const next = applyBrandingToBusinessList(businessesRef.current, id, branding);
+      businessesRef.current = next;
+      setBusinesses(next);
+    });
+    return () => {
+      cancelled = true;
+      stop();
+    };
+  }, [activeBusinessId, status]);
 
   const reloadBilling = useCallback(async () => {
     const businessId = activeBusinessIdRef.current;

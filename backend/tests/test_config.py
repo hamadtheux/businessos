@@ -322,6 +322,13 @@ class SettingsValidationTests(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     self._settings(**{field_name: value})
 
+    def test_storage_signed_url_ttl_is_bounded(self) -> None:
+        self.assertEqual(self._settings().storage_signed_url_ttl_seconds, 900)
+        for value in (59, 3601):
+            with self.subTest(value=value):
+                with self.assertRaises(ValidationError):
+                    self._settings(storage_signed_url_ttl_seconds=value)
+
     def test_empty_issuer_and_audience_fail(self) -> None:
         for field_name in ("auth_issuer", "auth_audience"):
             with self.subTest(field_name=field_name):

@@ -2269,6 +2269,43 @@ td strong {
   margin-top: 17px;
   padding: 0 17px;
 }
+.cmo-creative-state-stable {
+  min-height: 238px;
+}
+.cmo-creative-state-stable .empty {
+  width: min(100%, 440px);
+  grid-template-rows: 30px minmax(48px, auto) minmax(44px, auto) 59px;
+}
+.cmo-creative-stable-loader {
+  display: inline-flex;
+  width: 42px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  margin: 0 auto 10px;
+}
+.cmo-creative-stable-loader span {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #1268f3;
+  opacity: 0.38;
+  animation: cmo-creative-loader-pulse 1.4s ease-in-out infinite;
+}
+.cmo-creative-stable-loader span:nth-child(2) {
+  animation-delay: 0.16s;
+}
+.cmo-creative-stable-loader span:nth-child(3) {
+  animation-delay: 0.32s;
+}
+.cmo-creative-working-action {
+  min-height: 59px;
+}
+@keyframes cmo-creative-loader-pulse {
+  0%, 100% { opacity: 0.38; }
+  50% { opacity: 1; }
+}
 .cmo-creative-assurance {
   display: block;
   margin-top: 11px;
@@ -2993,6 +3030,10 @@ td strong {
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .cmo-creative-stable-loader span {
+    animation: none;
+    opacity: 0.7;
+  }
   .workspace-drawer-backdrop,
   .workspace-drawer-panel {
     animation: none !important;

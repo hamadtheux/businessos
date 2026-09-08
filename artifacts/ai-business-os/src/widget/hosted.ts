@@ -1,3 +1,4 @@
+import { startBrandingRefresh } from "../lib/branding-refresh.ts";
 import type { PublicSession, PublicWidgetConfig } from "./public-api.ts";
 
 const root = document.getElementById("hosted-root")!;
@@ -16,7 +17,7 @@ const bootstrap = async () => {
     { credentials: "omit" },
   );
   if (!configResponse.ok) return fail();
-  const config = await configResponse.json() as PublicWidgetConfig;
+  let config = await configResponse.json() as PublicWidgetConfig;
   const sessionResponse = await fetch(
     `/api/v1/public/hosted-widgets/${encodeURIComponent(widgetId)}/sessions`,
     { method: "POST", credentials: "omit" },
@@ -45,6 +46,17 @@ const bootstrap = async () => {
   window.addEventListener("message", receive);
   frame.src = frameUrl.toString();
   root.replaceChildren(frame);
+  startBrandingRefresh(async () => {
+    const refreshed = await fetch(
+      `/api/v1/public/hosted-widgets/${encodeURIComponent(widgetId)}/config`,
+      { credentials: "omit" },
+    );
+    if (!refreshed.ok) return;
+    config = await refreshed.json() as PublicWidgetConfig;
+    frame.contentWindow?.postMessage({
+      type: "aibos:widget-config", widgetId, config,
+    }, window.location.origin);
+  });
 };
 
 void bootstrap().catch(fail);

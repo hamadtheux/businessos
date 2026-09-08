@@ -113,6 +113,7 @@ class Settings(BaseSettings):
     storage_access_key_id: SecretStr | None = None
     storage_secret_access_key: SecretStr | None = None
     storage_public_base_url: AnyHttpUrl | None = None
+    storage_signed_url_ttl_seconds: int = Field(default=900, ge=60, le=3600)
 
     # Authentication
     auth_secret_key: SecretStr

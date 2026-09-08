@@ -26,12 +26,36 @@ from app.models.marketing import Campaign, CreativeAsset, MarketingContent, Mark
 from app.services.marketing import (  # noqa: E402
     _register_creative_storage_compensation,
 )
+from app.storage.factory import get_object_storage  # noqa: E402
 
 
 BUSINESS_ID = UUID("61000000-0000-0000-0000-000000000001")
 OTHER_BUSINESS_ID = UUID("62000000-0000-0000-0000-000000000002")
 USER_ID = UUID("63000000-0000-0000-0000-000000000003")
 NOW = datetime(2026, 8, 23, 12, tzinfo=UTC)
+
+
+class _ApiPresentationStorage:
+    def __init__(self) -> None:
+        self.presented: list[str] = []
+
+    def object_key_from_reference(self, storage_reference: str) -> str:
+        prefix = "https://media.example.test/"
+        if not storage_reference.startswith(prefix):
+            raise ValueError("invalid")
+        return storage_reference.removeprefix(prefix)
+
+    def presentation_url(
+        self,
+        object_key: str,
+        *,
+        expires_in_seconds: int,
+    ) -> str:
+        self.presented.append(object_key)
+        return (
+            f"https://objects.example.test/{object_key}"
+            f"?X-Amz-Expires={expires_in_seconds}&signature=fresh"
+        )
 
 
 class MarketingApiTests(unittest.IsolatedAsyncioTestCase):
@@ -52,6 +76,8 @@ class MarketingApiTests(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides[get_db_session] = override_session
         app.dependency_overrides[get_business_access] = override_access
         app.dependency_overrides[get_ai_agent_provider] = lambda: SimpleNamespace(provider_name="test")
+        self.storage = _ApiPresentationStorage()
+        app.dependency_overrides[get_object_storage] = lambda: self.storage
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
 
     async def asyncTearDown(self) -> None:
@@ -103,6 +129,101 @@ class MarketingApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["id"], str(asset.id))
         self.assertEqual(get_asset.await_args.kwargs["business_id"], BUSINESS_ID)
+
+    async def test_ready_creative_read_returns_fresh_presentation_only(self) -> None:
+        asset = _creative_asset()
+        asset.source_type = "future_provider"
+        asset.generation_status = "ready"
+        asset.storage_reference = (
+            "https://media.example.test/"
+            f"businesses/{BUSINESS_ID}/marketing/creatives/{asset.id}/"
+            "final/generation-5.png"
+        )
+        durable_reference = asset.storage_reference
+        with patch(
+            "app.api.v1.marketing.service.get_creative_asset",
+            new=AsyncMock(return_value=asset),
+        ):
+            response = await self.client.get(
+                self._url(f"creative-assets/{asset.id}")
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("X-Amz-Expires=900", response.json()["storage_reference"])
+        self.assertNotEqual(response.json()["storage_reference"], durable_reference)
+        self.assertEqual(asset.storage_reference, durable_reference)
+        self.assertNotIn("creative_metadata", response.json())
+        self.assertEqual(len(self.storage.presented), 1)
+
+    async def test_creative_list_materializes_ready_urls_and_hides_non_ready(self) -> None:
+        ready = _creative_asset()
+        ready.source_type = "future_provider"
+        ready.generation_status = "ready"
+        ready.storage_reference = (
+            "https://media.example.test/"
+            f"businesses/{BUSINESS_ID}/marketing/creatives/{ready.id}/"
+            "final/generation-5.png"
+        )
+        reviewing = _creative_asset()
+        reviewing.source_type = "future_provider"
+        reviewing.generation_status = "reviewing"
+        reviewing.storage_reference = (
+            "https://media.example.test/"
+            f"businesses/{BUSINESS_ID}/marketing/creatives/{reviewing.id}/"
+            "final/generation-4.png"
+        )
+        with patch(
+            "app.api.v1.marketing.service.list_creative_assets",
+            new=AsyncMock(return_value=[ready, reviewing]),
+        ):
+            response = await self.client.get(self._url("creative-assets"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("signature=fresh", response.json()[0]["storage_reference"])
+        self.assertIsNone(response.json()[1]["storage_reference"])
+        self.assertEqual(len(self.storage.presented), 1)
+
+    async def test_cross_tenant_creative_cannot_receive_media_url(self) -> None:
+        asset = _creative_asset()
+        asset.business_id = OTHER_BUSINESS_ID
+        asset.source_type = "future_provider"
+        asset.generation_status = "ready"
+        asset.storage_reference = (
+            "https://media.example.test/"
+            f"businesses/{OTHER_BUSINESS_ID}/marketing/creatives/{asset.id}/"
+            "final/generation-5.png"
+        )
+        with patch(
+            "app.api.v1.marketing.service.get_creative_asset",
+            new=AsyncMock(return_value=asset),
+        ):
+            response = await self.client.get(
+                self._url(f"creative-assets/{asset.id}")
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(self.storage.presented, [])
+
+    async def test_raw_checkpoint_reference_is_not_returned_or_signed(self) -> None:
+        asset = _creative_asset()
+        asset.source_type = "future_provider"
+        asset.generation_status = "ready"
+        asset.storage_reference = (
+            "https://media.example.test/"
+            f"businesses/{BUSINESS_ID}/marketing/creatives/{asset.id}/"
+            "raw/attempt-1.png"
+        )
+        with patch(
+            "app.api.v1.marketing.service.get_creative_asset",
+            new=AsyncMock(return_value=asset),
+        ):
+            response = await self.client.get(
+                self._url(f"creative-assets/{asset.id}")
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["storage_reference"])
+        self.assertEqual(self.storage.presented, [])
 
     async def test_image_regeneration_returns_202_queued_immutable_revision(self) -> None:
         revision = _creative_asset()

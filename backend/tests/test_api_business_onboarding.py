@@ -672,9 +672,9 @@ def _make_user() -> User:
 def _asserting_response_builder(session: _FakeAsyncSession):
     from app.api.v1.businesses import _build_onboarding_response
 
-    def build_after_commit(context: CreatedBusinessContext):
+    def build_after_commit(context: CreatedBusinessContext, **kwargs):
         if not session.transaction_committed:
             raise AssertionError("Response was built before transaction commit")
-        return _build_onboarding_response(context)
+        return _build_onboarding_response(context, **kwargs)
 
     return build_after_commit

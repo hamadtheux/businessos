@@ -9,6 +9,7 @@ from fastapi import APIRouter, Header, HTTPException, Path, Request, Response, s
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.storage.factory import ObjectStorageDependency
 from app.agents.provider import get_agent_provider_model_name, validate_agent_provider
 from app.api.dependencies.ai_agent import get_ai_agent_provider
 from app.api.dependencies.business import BusinessAccessDependency, SessionDependency
@@ -192,6 +193,7 @@ async def read_chatbot_analytics(
 )
 async def read_public_widget_config(
     widget_public_id: WidgetPublicId,
+    storage: ObjectStorageDependency,
     response: Response,
     session: SessionDependency,
     origin: OriginHeader = None,
@@ -201,6 +203,7 @@ async def read_public_widget_config(
         response,
         service.public_widget_config(
             session,
+            storage=storage,
             widget_public_id=widget_public_id,
             origin=origin,
             referer=referer,
@@ -216,6 +219,7 @@ async def read_public_widget_config(
 )
 async def read_public_hosted_widget_config(
     widget_public_id: WidgetPublicId,
+    storage: ObjectStorageDependency,
     response: Response,
     session: SessionDependency,
 ) -> PublicWidgetConfig:
@@ -223,6 +227,7 @@ async def read_public_hosted_widget_config(
         response,
         service.public_widget_config(
             session,
+            storage=storage,
             widget_public_id=widget_public_id,
             origin=None,
             referer=None,

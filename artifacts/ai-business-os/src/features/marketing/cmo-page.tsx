@@ -155,6 +155,22 @@ export function CmoPage() {
   const refreshCreatives = () => queryClient.invalidateQueries({
     queryKey: ["marketing", activeBusinessId, "creative-assets"],
   });
+  const refreshCreativeRecord = async (asset: CreativeAsset) => {
+    const refreshed = await queryClient.fetchQuery({
+      queryKey: ["marketing", activeBusinessId, "creative-asset", asset.id],
+      queryFn: ({ signal }) => marketingApi.creative.get(
+        activeBusinessId,
+        asset.id,
+        signal,
+      ),
+      staleTime: 0,
+    });
+    queryClient.setQueriesData<CreativeAsset[]>(
+      { queryKey: ["marketing", activeBusinessId, "creative-assets"] },
+      (current) => current?.map((item) => item.id === refreshed.id ? refreshed : item),
+    );
+    return refreshed;
+  };
   const observeCreativeGeneration = (asset: CreativeAsset) => {
     if (!isCreativeGenerationActive(asset)) return;
     setActiveCreativeGeneration({
@@ -599,7 +615,7 @@ export function CmoPage() {
             }
           }}
           onEditCreativeDirection={openAdvancedCreativeDirection}
-          onReloadCreative={() => void creativeAssets.refetch()}
+          onReloadCreative={(asset) => asset ? refreshCreativeRecord(asset) : creativeAssets.refetch()}
           onRetryCreative={(asset) => retryCreative.mutate(asset)}
           onRegenerateCreative={(asset) => regenerateCreative.mutate({ asset })}
           onVariationCreative={(asset) => regenerateCreative.mutate({ asset, mode: "alternate_metaphor" })}

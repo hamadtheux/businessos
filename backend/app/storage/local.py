@@ -1,7 +1,7 @@
 import asyncio
 import os
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 from uuid import uuid4
 
 from app.storage.base import (
@@ -81,6 +81,36 @@ class LocalObjectStorage(ObjectStorage):
     def public_url(self, object_key: str) -> str:
         key = validate_storage_key(object_key).as_posix()
         return f"{self.public_path}/{quote(key, safe='/')}"
+
+    def object_key_from_reference(self, storage_reference: str) -> str:
+        if not isinstance(storage_reference, str) or len(storage_reference) > 1024:
+            raise StorageOperationError("Invalid object storage reference")
+        prefix = f"{self.public_path}/"
+        try:
+            parsed = urlsplit(storage_reference)
+        except ValueError:
+            raise StorageOperationError("Invalid object storage reference") from None
+        if (
+            not storage_reference.startswith(prefix)
+            or parsed.scheme
+            or parsed.netloc
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise StorageOperationError("Invalid object storage reference")
+        key = validate_storage_key(unquote(storage_reference[len(prefix):])).as_posix()
+        if self.public_url(key) != storage_reference:
+            raise StorageOperationError("Invalid object storage reference")
+        return key
+
+    def presentation_url(
+        self,
+        object_key: str,
+        *,
+        expires_in_seconds: int,
+    ) -> str:
+        del expires_in_seconds
+        return self.public_url(object_key)
 
     def _resolve(self, object_key: str) -> Path:
         key = validate_storage_key(object_key)

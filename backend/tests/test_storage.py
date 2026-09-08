@@ -35,6 +35,14 @@ class LocalObjectStorageTests(unittest.IsolatedAsyncioTestCase):
                 storage.public_url(key),
                 "/api/v1/media/businesses/business-id/branding/logo/generated.png",
             )
+            self.assertEqual(
+                storage.object_key_from_reference(storage.public_url(key)),
+                key,
+            )
+            self.assertEqual(
+                storage.presentation_url(key, expires_in_seconds=900),
+                storage.public_url(key),
+            )
             await storage.delete(key)
             await storage.delete(key)
             self.assertFalse((root / key).exists())
@@ -80,12 +88,25 @@ class LocalObjectStorageTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(InvalidStorageKeyError):
                         storage.public_url(key)
 
+    async def test_local_reference_resolution_rejects_non_media_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = LocalObjectStorage(Path(directory), "/api/v1/media")
+            for reference in (
+                "/api/v1/businesses/business-id/marketing/creatives/image.png",
+                "/api/v1/media/../private/image.png",
+                "https://example.test/api/v1/media/businesses/a/image.png",
+            ):
+                with self.subTest(reference=reference):
+                    with self.assertRaises(Exception):
+                        storage.object_key_from_reference(reference)
+
 
 class _FakeS3Client:
     def __init__(self) -> None:
         self.put_calls: list[dict[str, object]] = []
         self.get_calls: list[dict[str, object]] = []
         self.delete_calls: list[dict[str, object]] = []
+        self.presign_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
         self.objects: dict[str, bytes] = {}
 
     def put_object(self, **kwargs: object) -> object:
@@ -110,6 +131,19 @@ class _FakeS3Client:
     def delete_object(self, **kwargs: object) -> object:
         self.delete_calls.append(kwargs)
         return {}
+
+    def generate_presigned_url(
+        self,
+        *args: object,
+        **kwargs: object,
+    ) -> str:
+        self.presign_calls.append((args, kwargs))
+        params = kwargs["Params"]
+        assert isinstance(params, dict)
+        return (
+            "https://objects.example.test/"
+            f"{params['Bucket']}/{params['Key']}?X-Amz-Expires={kwargs['ExpiresIn']}"
+        )
 
 
 class _MissingS3Client(_FakeS3Client):
@@ -151,6 +185,70 @@ class S3ObjectStorageTests(unittest.IsolatedAsyncioTestCase):
             storage.public_url(key),
             f"https://cdn.example.test/assets/{key}",
         )
+
+    async def test_valid_canonical_reference_produces_temporary_presigned_get(self) -> None:
+        client = _FakeS3Client()
+        storage = S3ObjectStorage(
+            bucket="business-assets",
+            public_base_url="https://cdn.example.test/assets",
+            region="auto",
+            endpoint_url="https://objects.example.test",
+            access_key_id="not-printed",
+            secret_access_key="not-printed",
+            client=client,
+        )
+        key = (
+            "businesses/business-id/marketing/creatives/creative-id/"
+            "final/generation-5.png"
+        )
+        durable_reference = storage.public_url(key)
+
+        resolved_key = storage.object_key_from_reference(durable_reference)
+        presentation_url = storage.presentation_url(
+            resolved_key,
+            expires_in_seconds=900,
+        )
+
+        self.assertEqual(resolved_key, key)
+        self.assertIn("X-Amz-Expires=900", presentation_url)
+        self.assertEqual(client.put_calls, [])
+        self.assertEqual(client.get_calls, [])
+        self.assertEqual(
+            client.presign_calls,
+            [
+                (
+                    ("get_object",),
+                    {
+                        "Params": {"Bucket": "business-assets", "Key": key},
+                        "ExpiresIn": 900,
+                    },
+                )
+            ],
+        )
+
+    async def test_reference_resolution_rejects_other_origins_and_queries(self) -> None:
+        client = _FakeS3Client()
+        storage = S3ObjectStorage(
+            bucket="business-assets",
+            public_base_url="https://cdn.example.test/assets/assets",
+            region="auto",
+            endpoint_url="https://objects.example.test",
+            access_key_id="not-printed",
+            secret_access_key="not-printed",
+            client=client,
+        )
+        invalid_references = (
+            "https://attacker.example/assets/businesses/a/final/image.png",
+            "https://cdn.example.test.evil/assets/businesses/a/final/image.png",
+            "https://cdn.example.test/assets/businesses/a/final/image.png?key=x",
+            "https://cdn.example.test/assets/businesses/a/../b/final/image.png",
+        )
+
+        for reference in invalid_references:
+            with self.subTest(reference=reference):
+                with self.assertRaises(Exception):
+                    storage.object_key_from_reference(reference)
+        self.assertEqual(client.presign_calls, [])
 
 
     async def test_get_fails_closed_when_s3_object_exceeds_read_limit(self) -> None:

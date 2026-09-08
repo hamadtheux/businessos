@@ -5,7 +5,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import UUID, uuid4
 
 os.environ.setdefault("AIBOS_DATABASE_URL", "postgresql+asyncpg://database.invalid/test")
@@ -84,6 +84,7 @@ class PublicWidgetOriginTests(unittest.IsolatedAsyncioTestCase):
             ):
                 value, _ = await public_widget_config(
                     session,
+                    storage=Mock(),
                     widget_public_id=WIDGET_ID,
                     origin="https://example.com",
                     referer=None,
@@ -91,6 +92,7 @@ class PublicWidgetOriginTests(unittest.IsolatedAsyncioTestCase):
             return value
 
         tenant = await load(SimpleNamespace(
+            business_id=BUSINESS_ID, logo_storage_key=None, secondary_color=None, accent_color=None,
             primary_color="#123456",
             logo_url=None,
         ))

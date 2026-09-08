@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Literal
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -138,6 +139,7 @@ from app.schemas.marketing import (
     ContentGenerateRequest,
     ContentVersionCreate,
     CreativeBriefCreate,
+    CreativeAssetResponse,
     CreativeVariationMode,
     CreativeStrategyProposal,
     LearningResponse,
@@ -160,6 +162,7 @@ from app.schemas.operations import OpportunityCreate
 from app.services.operations import create_opportunity, record_audit
 from app.services.automation_events import record_automation_event
 from app.services.background_jobs import enqueue_job
+from app.services.business_branding import validated_business_logo_key
 from app.services.logo_image import MAX_LOGO_UPLOAD_BYTES, sanitize_logo_bytes
 from app.exceptions.logo import LogoError
 from app.storage.base import ObjectNotFoundError, ObjectStorage, StorageError
@@ -4907,10 +4910,8 @@ async def _creative_logo_content(
     business_id: UUID,
     branding: BusinessBranding | None,
 ) -> bytes | None:
-    if branding is None or not branding.logo_storage_key:
-        return None
-    object_key = branding.logo_storage_key
-    if not object_key.startswith(f"businesses/{business_id}/branding/logo/"):
+    object_key = validated_business_logo_key(branding, business_id=business_id)
+    if object_key is None:
         return None
     try:
         content = await storage.get(object_key, max_bytes=MAX_LOGO_UPLOAD_BYTES)
@@ -5185,6 +5186,108 @@ async def list_creative_assets(session: AsyncSession, *, business_id: UUID, camp
         raise MarketingPersistenceError from None
 
 
+def materialize_creative_asset_response(
+    value: CreativeAsset,
+    *,
+    business_id: UUID,
+    storage: ObjectStorage,
+    signed_url_ttl_seconds: int,
+) -> CreativeAssetResponse:
+    """Build the tenant-authorized public view without mutating durable state."""
+    if value.business_id != business_id:
+        raise MarketingNotFoundError
+
+    response = CreativeAssetResponse.model_validate(value)
+    presentation_reference: str | None = None
+    durable_reference = value.storage_reference
+    if (
+        value.generation_status == "ready"
+        # The only final-object writer sets future_provider. Manual/import have
+        # no server-owned upload path and cannot establish storage ownership.
+        and value.source_type == "future_provider"
+        and isinstance(durable_reference, str)
+        and durable_reference
+    ):
+        try:
+            object_key = storage.object_key_from_reference(durable_reference)
+            expected_prefix = (
+                f"businesses/{business_id}/marketing/creatives/"
+                f"{value.id}/final/"
+            )
+            final_name = object_key.removeprefix(expected_prefix)
+            if (
+                not object_key.startswith(expected_prefix)
+                or not final_name
+                or "/" in final_name
+            ):
+                raise StorageError("Invalid final creative reference")
+            candidate = storage.presentation_url(
+                object_key,
+                expires_in_seconds=signed_url_ttl_seconds,
+            )
+            if not _safe_creative_presentation_reference(candidate):
+                raise StorageError("Invalid creative presentation URL")
+            presentation_reference = candidate
+        except (StorageError, ValueError):
+            # A malformed, foreign, raw, or unavailable reference is never
+            # copied into the public response and is never sent to the signer.
+            presentation_reference = None
+
+    return response.model_copy(
+        update={"storage_reference": presentation_reference}
+    )
+
+
+def _safe_creative_presentation_reference(value: object) -> bool:
+    if not isinstance(value, str) or not value or len(value) > 4096:
+        return False
+    if "\\" in value or any(ord(character) < 32 for character in value):
+        return False
+    if value.startswith("/") and not value.startswith("//"):
+        return True
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+    ) or (
+        parsed.scheme == "http"
+        and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        and parsed.username is None
+        and parsed.password is None
+    )
+
+
+async def list_creative_asset_responses(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    campaign_id: UUID | None,
+    content_id: UUID | None,
+    storage: ObjectStorage,
+    signed_url_ttl_seconds: int,
+) -> list[CreativeAssetResponse]:
+    values = await list_creative_assets(
+        session,
+        business_id=business_id,
+        campaign_id=campaign_id,
+        content_id=content_id,
+    )
+    return [
+        materialize_creative_asset_response(
+            value,
+            business_id=business_id,
+            storage=storage,
+            signed_url_ttl_seconds=signed_url_ttl_seconds,
+        )
+        for value in values
+    ]
+
+
 async def get_creative_asset(
     session: AsyncSession,
     *,
@@ -5196,6 +5299,27 @@ async def get_creative_asset(
         CreativeAsset,
         business_id,
         creative_asset_id,
+    )
+
+
+async def get_creative_asset_response(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    creative_asset_id: UUID,
+    storage: ObjectStorage,
+    signed_url_ttl_seconds: int,
+) -> CreativeAssetResponse:
+    value = await get_creative_asset(
+        session,
+        business_id=business_id,
+        creative_asset_id=creative_asset_id,
+    )
+    return materialize_creative_asset_response(
+        value,
+        business_id=business_id,
+        storage=storage,
+        signed_url_ttl_seconds=signed_url_ttl_seconds,
     )
 
 

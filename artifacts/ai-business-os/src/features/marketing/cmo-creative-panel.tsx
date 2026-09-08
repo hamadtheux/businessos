@@ -15,9 +15,11 @@ import {
 import { Badge, Button } from "@/components/product-ui";
 import {
   recommendedCreativeMediaForContent,
+  isCreativePreviewFailureCurrent,
   safeCreativeMediaUrl,
   videoFormatForContent,
   type CreativeMediaType,
+  type CreativePreviewFailure,
   type CreativePhase as CreativePhaseValue,
 } from "@/lib/cmo-ux";
 import type {
@@ -48,7 +50,7 @@ type CmoCreativePanelProps = {
   contentType?: MarketingContentType;
   onCreate: (mediaType: CreativeMediaType) => void;
   onEditDirection?: (mediaType: CreativeMediaType) => void;
-  onReload?: () => void;
+  onReload?: (creative?: CreativeAsset) => Promise<unknown> | unknown;
   onRetry: (creative: CreativeAsset) => void;
   onRegenerate: (creative: CreativeAsset) => void;
   onVariation?: (creative: CreativeAsset, mode: CreativeVariationMode) => void;
@@ -84,30 +86,57 @@ function StateFrame({
   testId,
   children,
   live,
+  stable = false,
 }: {
   testId: string;
   children: ReactNode;
   live?: "polite" | "assertive";
+  stable?: boolean;
 }) {
-  return <div className="cmo-creative-state" data-testid={testId} aria-live={live} role={live === "assertive" ? "alert" : live === "polite" ? "status" : undefined}><div className="empty compact-empty">{children}</div></div>;
+  return <div className={`cmo-creative-state${stable ? " cmo-creative-state-stable" : ""}`} data-testid={testId} aria-live={live} role={live === "assertive" ? "alert" : live === "polite" ? "status" : undefined}><div className="empty compact-empty">{children}</div></div>;
 }
 
-function WorkingState({ phase }: { phase: CreativePhase }) {
-  const isVideo = phase.startsWith("video_");
-  const title = phase === "video_strategy"
-    ? "Planning video…"
-    : phase === "video_review"
-      ? "Reviewing video…"
-      : isVideo
-        ? "Generating video…"
-        : phase === "strategy"
-          ? "Preparing creative direction…"
-          : "Generating branded image…";
+function StableCreativeLoader() {
+  return <span className="cmo-creative-stable-loader" aria-hidden="true"><span /><span /><span /></span>;
+}
+
+function WorkingState({
+  phase,
+  generationStatus,
+  mediaType,
+  onReload,
+  isPending = false,
+}: {
+  phase?: CreativePhase;
+  generationStatus?: "queued" | "generating" | "reviewing" | "repairing";
+  mediaType?: CreativeMediaType;
+  onReload?: () => Promise<unknown> | unknown;
+  isPending?: boolean;
+}) {
+  const isVideo = phase?.startsWith("video_") || mediaType === "video";
+  const title = generationStatus === "queued"
+    ? `${isVideo ? "Video" : "Image"} queued`
+    : generationStatus === "generating"
+      ? `Generating ${isVideo ? "video" : "image"}`
+      : generationStatus === "repairing"
+        ? `Refining ${isVideo ? "video" : "image"}`
+        : generationStatus === "reviewing"
+          ? `Reviewing ${isVideo ? "video" : "image"}`
+          : phase === "video_strategy"
+            ? "Planning video…"
+            : phase === "video_review"
+              ? "Reviewing video…"
+              : isVideo
+                ? "Generating video…"
+                : phase === "strategy"
+                  ? "Preparing creative direction…"
+                  : "Generating branded image…";
   return (
-    <StateFrame testId={`creative-loading-${phase}`} live="polite">
-      <RefreshCw className="spin" />
+    <StateFrame testId={phase ? `creative-loading-${phase}` : "creative-generation-progress"} live="polite" stable>
+      <StableCreativeLoader />
       <h3>{title}</h3>
       <p>{isVideo ? "Your strategy is saved while 9D Brain prepares the next stage." : "AI CMO is grounding the campaign story, then composing exact copy and brand identity."}</p>
+      <div className="cmo-creative-working-action">{generationStatus && onReload && <Button onClick={() => void onReload()} disabled={isPending}><RefreshCw /> Refresh status</Button>}</div>
     </StateFrame>
   );
 }
@@ -141,8 +170,8 @@ export function CmoCreativePanel({
   const [mediaType, setMediaType] = useState<CreativeMediaType>(initialMedia);
   const [historyId, setHistoryId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [failedPreviewId, setFailedPreviewId] = useState<string | null>(null);
-  const [previewAttempt, setPreviewAttempt] = useState(0);
+  const [previewFailure, setPreviewFailure] = useState<CreativePreviewFailure | null>(null);
+  const [previewRefreshPending, setPreviewRefreshPending] = useState(false);
   const contentScopeId = contentId ?? creative?.content_id ?? creatives?.[0]?.content_id;
   const mediaCreatives = useMemo(
     () => allCreatives.filter((item) => (item.media_type ?? "image") === mediaType),
@@ -153,7 +182,11 @@ export function CmoCreativePanel({
   const previousCreatives = mediaCreatives.filter((item) => item.id !== featured?.id);
   const isHistorical = Boolean(displayed && displayed.id !== featured?.id);
   const safeReference = safeCreativeMediaUrl(displayed?.storage_reference);
-  const previewFailed = Boolean(displayed && failedPreviewId === displayed.id);
+  const previewFailed = isCreativePreviewFailureCurrent(
+    previewFailure,
+    displayed?.id,
+    safeReference,
+  );
 
   useEffect(() => {
     setHistoryId(null);
@@ -165,19 +198,30 @@ export function CmoCreativePanel({
   }, [contentScopeId, initialMedia]);
 
   useEffect(() => {
-    setFailedPreviewId(null);
-    setPreviewAttempt(0);
-  }, [displayed?.id, displayed?.storage_reference]);
+    if (!previewFailed) setPreviewFailure(null);
+  }, [previewFailed]);
+
+  const retryPreview = async () => {
+    if (!displayed || !onReload || previewRefreshPending) return;
+    setPreviewRefreshPending(true);
+    try {
+      await onReload(displayed);
+    } catch {
+      // Keep the broken-preview state visible so the user can retry the read.
+    } finally {
+      setPreviewRefreshPending(false);
+    }
+  };
 
   const header = <StudioHeader mediaType={mediaType} recommendedMedia={recommendedMedia} onChange={setMediaType} disabled={isPending || isLoading} />;
 
   if (phase) return <div className="cmo-creative-panel">{header}<WorkingState phase={phase} /></div>;
   if (isLoading) {
-    return <div className="cmo-creative-panel">{header}<StateFrame testId="creative-loading-assets" live="polite"><RefreshCw className="spin" /><p>Loading creative history…</p></StateFrame></div>;
+    return <div className="cmo-creative-panel">{header}<StateFrame testId="creative-loading-assets" live="polite" stable><StableCreativeLoader /><p>Loading creative history…</p></StateFrame></div>;
   }
   if (error) {
     return (
-      <div className="cmo-creative-panel">{header}<StateFrame testId="creative-error" live="assertive"><AlertCircle /><h3>Creative history could not load</h3><p>{error}</p>{onReload && <Button onClick={onReload} disabled={isPending} data-testid="button-reload-creatives"><RefreshCw /> Retry history</Button>}</StateFrame></div>
+      <div className="cmo-creative-panel">{header}<StateFrame testId="creative-error" live="assertive"><AlertCircle /><h3>Creative history could not load</h3><p>{error}</p>{onReload && <Button onClick={() => void onReload()} disabled={isPending} data-testid="button-reload-creatives"><RefreshCw /> Retry history</Button>}</StateFrame></div>
     );
   }
 
@@ -212,14 +256,7 @@ export function CmoCreativePanel({
       <StateFrame testId="creative-brief-ready"><ShieldCheck /><h3>{mediaType === "video" ? "Video strategy ready" : "Creative strategy ready"}</h3><p>{mediaType === "video" ? "The hook, storyboard, timed scenes, continuity, audio, captions, and end card are saved." : "The campaign angle and visual direction are grounded."}</p>{!isHistorical && <Button variant="primary" onClick={() => onRetry(displayed)} disabled={isPending}><Sparkles /> Generate {mediaType}</Button>}</StateFrame>
     );
   } else if (["queued", "generating", "reviewing", "repairing"].includes(displayed.generation_status)) {
-    const statusCopy = displayed.generation_status === "queued"
-      ? `${mediaType === "video" ? "Video" : "Image"} queued`
-      : displayed.generation_status === "generating"
-        ? `Generating ${mediaType}`
-        : displayed.generation_status === "repairing"
-          ? `Refining ${mediaType}`
-          : `Reviewing ${mediaType}`;
-    currentState = <StateFrame testId="creative-generation-progress" live="polite"><RefreshCw className="spin" /><h3>{statusCopy}</h3><p>Your strategy is saved while 9D Brain prepares the next stage.</p>{onReload && <Button onClick={onReload} disabled={isPending}><RefreshCw /> Refresh status</Button>}</StateFrame>;
+    currentState = <WorkingState generationStatus={displayed.generation_status as "queued" | "generating" | "reviewing" | "repairing"} mediaType={mediaType} onReload={onReload ? () => onReload() : undefined} isPending={isPending} />;
   } else if (displayed.generation_status === "failed") {
     currentState = <StateFrame testId="creative-failed-state" live="assertive"><AlertCircle /><h3>The {mediaType} could not be completed</h3><p>No unfinished media was attached. The grounded strategy is preserved.</p>{!isHistorical && <Button onClick={() => onRetry(displayed)} disabled={isPending}><RefreshCw /> Retry {mediaType}</Button>}</StateFrame>;
   } else if (displayed.generation_status === "ready" && safeReference) {
@@ -227,9 +264,9 @@ export function CmoCreativePanel({
       <div className="cmo-creative-ready" data-testid="creative-ready-preview">
         <div className="cmo-creative-ready-head"><div><div className="eyebrow">{isHistorical ? "Previous creative" : "Current creative"}</div><strong>{mediaType === "video" ? `${displayed.duration_seconds ?? "—"} second video` : displayed.width && displayed.height ? `${displayed.width} × ${displayed.height} PNG` : "Branded image"}</strong><span>{new Date(displayed.created_at).toLocaleString()}</span></div><Badge tone="success"><ShieldCheck /> Ready for review</Badge></div>
         {previewFailed ? (
-          <div data-testid="creative-preview-unavailable"><StateFrame testId="creative-broken-preview" live="assertive">{mediaType === "video" ? <Video /> : <ImageIcon />}<h3>Creative is ready, but the preview could not be loaded.</h3><Button data-testid="button-retry-preview" onClick={() => { setFailedPreviewId(null); setPreviewAttempt((value) => value + 1); }}><RefreshCw /> Retry preview</Button></StateFrame></div>
+          <div data-testid="creative-preview-unavailable"><StateFrame testId="creative-broken-preview" live="assertive">{mediaType === "video" ? <Video /> : <ImageIcon />}<h3>Creative is ready, but the preview could not be loaded.</h3><Button data-testid="button-retry-preview" onClick={() => void retryPreview()} disabled={!onReload || previewRefreshPending}><RefreshCw /> {previewRefreshPending ? "Refreshing preview…" : "Retry preview"}</Button></StateFrame></div>
         ) : (
-          <div className="cmo-creative-image-wrap">{mediaType === "video" ? <video key={`${displayed.id}-${previewAttempt}`} src={safeReference} controls preload="metadata" onError={() => setFailedPreviewId(displayed.id)} className="cmo-creative-image" /> : <img key={`${displayed.id}-${previewAttempt}`} src={safeReference} alt={displayed.alt_text || "Branded marketing creative preview"} onError={() => setFailedPreviewId(displayed.id)} className="cmo-creative-image" />}</div>
+          <div className="cmo-creative-image-wrap">{mediaType === "video" ? <video key={`${displayed.id}-${safeReference}`} src={safeReference} controls preload="metadata" onError={() => setPreviewFailure({ creativeId: displayed.id, reference: safeReference })} className="cmo-creative-image" /> : <img key={`${displayed.id}-${safeReference}`} src={safeReference} alt={displayed.alt_text || "Branded marketing creative preview"} onError={() => setPreviewFailure({ creativeId: displayed.id, reference: safeReference })} className="cmo-creative-image" />}</div>
         )}
         <div className="cmo-creative-actions">
           <a className="btn btn-secondary btn-sm" href={safeReference} target="_blank" rel="noreferrer"><ExternalLink /> Preview</a>

@@ -51,6 +51,8 @@ from app.exceptions.scheduling import (
     SchedulingValidationError,
 )
 from app.models.appointment_type import AppointmentType
+from app.services.business_branding import materialize_business_branding_response
+from app.storage.base import ObjectStorage
 from app.models.business import Business
 from app.models.business_branding import BusinessBranding
 from app.models.catalog_item import CatalogItem
@@ -500,6 +502,7 @@ def _guided_instructions(target_type: str) -> list[str]:
 async def public_widget_config(
     session: AsyncSession,
     *,
+    storage: ObjectStorage,
     widget_public_id: str,
     origin: str | None,
     referer: str | None,
@@ -532,7 +535,14 @@ async def public_widget_config(
             )
             for item in values
         ]
+    # Widget/domain (or hosted deployment) authorization has completed above.
     branding = context.branding
+    presentation = materialize_business_branding_response(
+        branding,
+        business_id=context.business.id,
+        storage=storage,
+        signed_url_ttl_seconds=settings.storage_signed_url_ttl_seconds,
+    )
     return PublicWidgetConfig(
         widget_id=context.config.widget_public_id,
         display_name=context.config.display_name,
@@ -540,7 +550,7 @@ async def public_widget_config(
         welcome_message=context.config.welcome_message,
         placeholder_text=context.config.placeholder_text,
         primary_color=(branding.primary_color if branding and branding.primary_color else "#1D863A"),
-        logo_url=_safe_public_asset_url(branding.logo_url if branding else None),
+        logo_url=presentation.logo_url,
         tone=context.config.tone,
         theme=context.config.theme,
         position=context.config.position,
@@ -1663,17 +1673,6 @@ def _reference(namespace: str, value: UUID | str) -> str:
 def _slot_reference(type_id: UUID, provider_id: UUID, starts_at: datetime) -> str:
     instant = starts_at.astimezone(UTC).isoformat()
     return _reference("slot", f"{type_id}:{provider_id}:{instant}")
-
-
-def _safe_public_asset_url(value: str | None) -> str | None:
-    if not value:
-        return None
-    if value.startswith("/") and not value.startswith("//"):
-        return value
-    parsed = urlsplit(value)
-    if parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username and not parsed.password:
-        return value
-    return None
 
 
 def _normalize_stored_phone(value: str | None) -> str | None:

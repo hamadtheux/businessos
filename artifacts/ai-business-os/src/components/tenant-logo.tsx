@@ -55,6 +55,7 @@ export function TenantLogo({
     >
       {presentation.kind === "logo" ? (
         <img
+          key={presentation.key}
           src={presentation.logoUrl}
           alt=""
           aria-hidden="true"

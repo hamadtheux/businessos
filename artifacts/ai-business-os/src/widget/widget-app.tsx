@@ -58,6 +58,19 @@ export function WidgetApp() {
   }, []);
 
   useEffect(() => {
+    if (!init) return;
+    const refreshConfig = (event: MessageEvent) => {
+      const value = event.data;
+      if (event.source !== window.parent || event.origin !== init.hostOrigin
+        || value?.type !== "aibos:widget-config" || value.widgetId !== init.widgetId
+        || value.config?.widget_id !== init.widgetId) return;
+      setInit((current) => current ? { ...current, config: value.config } : current);
+    };
+    window.addEventListener("message", refreshConfig);
+    return () => window.removeEventListener("message", refreshConfig);
+  }, [init?.hostOrigin, init?.widgetId]);
+
+  useEffect(() => {
     const escape = (event: KeyboardEvent) => {
       if (event.key === "Escape" && init) {
         window.parent.postMessage({ type: "aibos:widget-close" }, init.hostOrigin);

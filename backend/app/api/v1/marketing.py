@@ -15,6 +15,7 @@ from app.api.dependencies.creative import (
 from app.api.dependencies.business import BusinessAccessDependency, require_business_role
 from app.api.response_materialization import materialize_response_before_commit
 from app.db.session import get_db_session
+from app.core.config import settings
 from app.exceptions.marketing import MarketingAIError, MarketingNotFoundError, MarketingPersistenceError, MarketingStateError, MarketingValidationError
 from app.exceptions.automation_intelligence import (
     AutomationIntelligenceNotFoundError,
@@ -110,6 +111,7 @@ from app.services.advertising_spend_policy import (
     set_advertising_spend_policy,
 )
 from app.services.operations import record_audit
+from app.storage.factory import ObjectStorageDependency
 
 
 router = APIRouter(prefix="/businesses/{business_id}/marketing", tags=["Marketing OS"])
@@ -353,8 +355,8 @@ async def change_content_status(content_id: UUID, data: StatusUpdate, access: Bu
 
 
 @router.get("/creative-assets", response_model=list[CreativeAssetResponse])
-async def read_creative_assets(access: BusinessAccessDependency, response: Response, session: SessionDependency, campaign_id: UUID | None = None, content_id: UUID | None = None):
-    return await _read(response, service.list_creative_assets(session, business_id=access.business.id, campaign_id=campaign_id, content_id=content_id))
+async def read_creative_assets(access: BusinessAccessDependency, response: Response, session: SessionDependency, storage: ObjectStorageDependency, campaign_id: UUID | None = None, content_id: UUID | None = None):
+    return await _read(response, service.list_creative_asset_responses(session, business_id=access.business.id, campaign_id=campaign_id, content_id=content_id, storage=storage, signed_url_ttl_seconds=settings.storage_signed_url_ttl_seconds))
 
 
 @router.get(
@@ -366,21 +368,24 @@ async def read_creative_asset(
     access: BusinessAccessDependency,
     response: Response,
     session: SessionDependency,
+    storage: ObjectStorageDependency,
 ):
     return await _read(
         response,
-        service.get_creative_asset(
+        service.get_creative_asset_response(
             session,
             business_id=access.business.id,
             creative_asset_id=creative_asset_id,
+            storage=storage,
+            signed_url_ttl_seconds=settings.storage_signed_url_ttl_seconds,
         ),
     )
 
 
 @router.post("/creative-assets/brief", response_model=CreativeAssetResponse, status_code=status.HTTP_201_CREATED)
-async def create_creative_brief(data: CreativeBriefCreate, access: BusinessAccessDependency, response: Response, session: SessionDependency, provider: AIAgentProviderDependency):
+async def create_creative_brief(data: CreativeBriefCreate, access: BusinessAccessDependency, response: Response, session: SessionDependency, provider: AIAgentProviderDependency, storage: ObjectStorageDependency):
     await _guard(session, access.business.id, "marketing_cmo", ai=True)
-    return await _mutate(response, session, service.create_creative_brief(session, business_id=access.business.id, actor_user_id=access.user.id, data=data, provider=provider))
+    return await _mutate_creative(response, session, service.create_creative_brief(session, business_id=access.business.id, actor_user_id=access.user.id, data=data, provider=provider), business_id=access.business.id, storage=storage)
 
 
 @router.post(
@@ -394,9 +399,10 @@ async def create_video_creative_strategy(
     response: Response,
     session: SessionDependency,
     provider: AIAgentProviderDependency,
+    storage: ObjectStorageDependency,
 ):
     await _guard(session, access.business.id, "marketing_cmo", ai=True)
-    return await _mutate(
+    return await _mutate_creative(
         response,
         session,
         service.create_video_creative_strategy(
@@ -406,6 +412,8 @@ async def create_video_creative_strategy(
             data=data,
             provider=provider,
         ),
+        business_id=access.business.id,
+        storage=storage,
     )
 
 
@@ -419,9 +427,10 @@ async def start_video_generation(
     response: Response,
     session: SessionDependency,
     provider: VideoGenerationProviderDependency,
+    storage: ObjectStorageDependency,
 ):
     await _guard(session, access.business.id, "marketing_cmo", ai=True)
-    return await _mutate(
+    return await _mutate_creative(
         response,
         session,
         service.start_video_generation(
@@ -431,6 +440,8 @@ async def start_video_generation(
             actor_user_id=access.user.id,
             provider=provider,
         ),
+        business_id=access.business.id,
+        storage=storage,
     )
 
 
@@ -444,6 +455,7 @@ async def generate_creative_asset(
     access: BusinessAccessDependency,
     response: Response,
     session: SessionDependency,
+    storage: ObjectStorageDependency,
 ):
     await _guard(
         session,
@@ -451,7 +463,7 @@ async def generate_creative_asset(
         "marketing_cmo",
         ai=True,
     )
-    return await _mutate(
+    return await _mutate_creative(
         response,
         session,
         service.queue_creative_asset_generation(
@@ -460,6 +472,8 @@ async def generate_creative_asset(
             creative_asset_id=creative_asset_id,
             actor_user_id=access.user.id,
         ),
+        business_id=access.business.id,
+        storage=storage,
     )
 
 
@@ -473,6 +487,7 @@ async def regenerate_creative_asset(
     access: BusinessAccessDependency,
     response: Response,
     session: SessionDependency,
+    storage: ObjectStorageDependency,
     data: CreativeVariationRequest | None = None,
 ):
     await _guard(
@@ -481,7 +496,7 @@ async def regenerate_creative_asset(
         "marketing_cmo",
         ai=True,
     )
-    return await _mutate(
+    return await _mutate_creative(
         response,
         session,
         service.queue_creative_asset_regeneration(
@@ -491,6 +506,8 @@ async def regenerate_creative_asset(
             actor_user_id=access.user.id,
             variation_mode=(data.variation_mode if data is not None else None),
         ),
+        business_id=access.business.id,
+        storage=storage,
     )
 
 
@@ -893,6 +910,25 @@ async def _mutate(response: Response | None, session: AsyncSession, operation: A
     if response is not None:
         _private(response)
     return value
+
+
+async def _mutate_creative(
+    response: Response,
+    session: AsyncSession,
+    operation: Awaitable,
+    *,
+    business_id: UUID,
+    storage: ObjectStorageDependency,
+) -> CreativeAssetResponse:
+    value = await _mutate(None, session, operation)
+    result = service.materialize_creative_asset_response(
+        value,
+        business_id=business_id,
+        storage=storage,
+        signed_url_ttl_seconds=settings.storage_signed_url_ttl_seconds,
+    )
+    _private(response)
+    return result
 
 
 async def _abort_mutation(session: AsyncSession) -> None:

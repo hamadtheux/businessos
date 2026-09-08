@@ -49,7 +49,10 @@ type LoaderSession = { session_token: string; expires_at: string; locale: string
     wrap.style.setProperty("--brand", config.primary_color);
     button.classList.toggle("circle", config.launcher_style !== "pill");
     button.setAttribute("aria-label", `Open chat with ${config.display_name}`);
-    if (config.launcher_style === "pill") button.append(document.createTextNode(" Chat with us"));
+    if (config.launcher_style === "pill" && !button.textContent?.includes("Chat with us")) button.append(document.createTextNode(" Chat with us"));
+    frame?.contentWindow?.postMessage({
+      type: "aibos:widget-config", widgetId, config,
+    }, new URL(widgetAppUrl).origin);
   };
 
   const createSession = async () => {
@@ -124,5 +127,18 @@ type LoaderSession = { session_token: string; expires_at: string; locale: string
     if (event.data?.type === "aibos:widget-close") close();
   });
   button.addEventListener("click", () => void open());
-  void bootstrap().catch(() => host.remove());
+  void bootstrap().then(() => {
+    // Keep this classic embed script self-contained (no shared module imports).
+    let refreshing = false;
+    const refresh = async () => {
+      if (refreshing || document.visibilityState === "hidden") return;
+      refreshing = true;
+      try { await bootstrap(); } catch { /* Keep the current conversation usable. */ }
+      finally { refreshing = false; }
+    };
+    window.setInterval(refresh, 45_000);
+    window.addEventListener("focus", refresh);
+    window.addEventListener("online", refresh);
+    document.addEventListener("visibilitychange", refresh);
+  }).catch(() => host.remove());
 })();

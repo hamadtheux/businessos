@@ -24,6 +24,7 @@ import {
   creativeResultNotice,
   generateCampaignChannelDrafts,
   isCreativeGenerationActive,
+  isCreativePreviewFailureCurrent,
   publishingCapability,
   recommendedCreativeMediaForContent,
   runCreativeOperationWithRecovery,
@@ -60,6 +61,38 @@ test("creative polling is bounded to active generation states", () => {
   ] as const) {
     assert.equal(isCreativeGenerationActive({ generation_status }), false);
   }
+});
+
+test("creative preview failure is cleared only by a different asset or URL", () => {
+  const failure = {
+    creativeId: "creative-one",
+    reference: "https://media.example.test/final.png?signature=expired",
+  };
+
+  assert.equal(
+    isCreativePreviewFailureCurrent(
+      failure,
+      "creative-one",
+      "https://media.example.test/final.png?signature=expired",
+    ),
+    true,
+  );
+  assert.equal(
+    isCreativePreviewFailureCurrent(
+      failure,
+      "creative-one",
+      "https://media.example.test/final.png?signature=fresh",
+    ),
+    false,
+  );
+  assert.equal(
+    isCreativePreviewFailureCurrent(
+      failure,
+      "creative-two",
+      failure.reference,
+    ),
+    false,
+  );
 });
 
 const publicCreativeAsset: CreativeAsset = {

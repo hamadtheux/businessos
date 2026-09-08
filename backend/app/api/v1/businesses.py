@@ -1,5 +1,6 @@
 import logging
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import (
     APIRouter,
@@ -16,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies.auth import CurrentUserDependency
 from app.api.dependencies.business import BusinessAccessDependency, require_business_role
+from app.core.config import settings
+from app.models.business_branding import BusinessBranding
 from app.db.session import get_db_session
 from app.exceptions.business import (
     BusinessBrandingPersistenceError,
@@ -45,6 +48,7 @@ from app.services.business import (
 )
 from app.services.business_branding import (
     get_business_branding,
+    materialize_business_branding_response,
     update_business_branding,
 )
 from app.services.business_logo import (
@@ -94,6 +98,7 @@ async def create_business(
     response: Response,
     current_user: CurrentUserDependency,
     session: SessionDependency,
+    storage: ObjectStorageDependency,
 ) -> BusinessOnboardingResponse:
     # CurrentUserDependency has already autobegun the shared session transaction.
     # This route owns its completion so no success response precedes the commit.
@@ -137,7 +142,7 @@ async def create_business(
     )
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
-    return _build_onboarding_response(context)
+    return _build_onboarding_response(context, storage=storage)
 
 
 @router.get(
@@ -249,6 +254,7 @@ async def read_business_branding(
     access: BusinessAccessDependency,
     response: Response,
     session: SessionDependency,
+    storage: ObjectStorageDependency,
 ) -> BusinessBrandingResponse:
     try:
         branding = await get_business_branding(session, access.business.id)
@@ -256,7 +262,7 @@ async def read_business_branding(
         raise _branding_unavailable_exception() from None
 
     _set_private_response_headers(response)
-    return _build_branding_response(branding)
+    return _build_branding_response(branding, business_id=access.business.id, storage=storage)
 
 
 @router.put(
@@ -274,6 +280,7 @@ async def replace_business_branding(
     access: BusinessAccessDependency,
     response: Response,
     session: SessionDependency,
+    storage: ObjectStorageDependency,
 ) -> BusinessBrandingResponse:
     require_business_role(access)
     try:
@@ -288,7 +295,7 @@ async def replace_business_branding(
         raise _branding_unavailable_exception() from None
 
     _set_private_response_headers(response)
-    return _build_branding_response(branding)
+    return _build_branding_response(branding, business_id=access.business.id, storage=storage)
 
 
 @router.post(
@@ -356,7 +363,7 @@ async def upload_business_logo(
         )
 
     _set_private_response_headers(response)
-    return _build_branding_response(prepared.branding)
+    return _build_branding_response(prepared.branding, business_id=access.business.id, storage=storage)
 
 
 @router.delete(
@@ -402,13 +409,15 @@ async def delete_business_logo(
 
 def _build_onboarding_response(
     context: CreatedBusinessContext,
+    *,
+    storage: ObjectStorage,
 ) -> BusinessOnboardingResponse:
     business = context.business
     branding = context.branding
     return BusinessOnboardingResponse(
         business=_build_business_summary(business, context.membership.role),
         branding=(
-            BusinessBrandingResponse.model_validate(branding)
+            _build_branding_response(branding, business_id=business.id, storage=storage)
             if branding is not None
             else None
         ),
@@ -417,16 +426,20 @@ def _build_onboarding_response(
 
 
 def _build_branding_response(
-    branding: object | None,
+    branding: BusinessBranding | None,
+    *,
+    business_id: UUID,
+    storage: ObjectStorage,
 ) -> BusinessBrandingResponse:
-    if branding is None:
-        return BusinessBrandingResponse(
-            primary_color=None,
-            secondary_color=None,
-            accent_color=None,
-            logo_url=None,
+    try:
+        return materialize_business_branding_response(
+            branding,
+            business_id=business_id,
+            storage=storage,
+            signed_url_ttl_seconds=settings.storage_signed_url_ttl_seconds,
         )
-    return BusinessBrandingResponse.model_validate(branding)
+    except BusinessBrandingPersistenceError:
+        raise _branding_unavailable_exception() from None
 
 
 def _build_business_summary(business: object, membership_role: str) -> BusinessSummary:

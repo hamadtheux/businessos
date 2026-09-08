@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions.logo import BusinessLogoPersistenceError
 from app.models.business_branding import BusinessBranding
-from app.services.business_branding import get_business_branding
+from app.services.business_branding import get_business_branding, validated_business_logo_key
 from app.services.logo_image import SanitizedLogo
 from app.storage.base import ObjectStorage, StorageError, StorageOperationError
 
@@ -34,11 +34,13 @@ async def prepare_business_logo_upload(
     storage: ObjectStorage,
 ) -> PreparedLogoUpload:
     branding = await get_business_branding(session, business_id)
-    previous_storage_key = branding.logo_storage_key if branding is not None else None
+    previous_storage_key = validated_business_logo_key(branding, business_id=business_id)
     new_storage_key = _new_logo_storage_key(business_id, logo.extension)
 
     await storage.put(new_storage_key, logo.content, logo.content_type)
     try:
+        # Persist only the durable canonical reference. API delivery is projected
+        # from logo_storage_key after authorization and commit.
         logo_url = storage.public_url(new_storage_key)
         if len(logo_url) > 2048:
             raise StorageOperationError("Generated public URL is too long")
@@ -70,8 +72,8 @@ async def prepare_business_logo_deletion(
     if branding is None:
         return PreparedLogoDeletion(previous_storage_key=None)
 
-    previous_storage_key = branding.logo_storage_key
-    if branding.logo_url is None and previous_storage_key is None:
+    previous_storage_key = validated_business_logo_key(branding, business_id=business_id)
+    if branding.logo_url is None and branding.logo_storage_key is None:
         return PreparedLogoDeletion(previous_storage_key=None)
 
     try:

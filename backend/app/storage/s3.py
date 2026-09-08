@@ -1,6 +1,6 @@
 import asyncio
 from typing import Protocol
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 import boto3
 from botocore.exceptions import ClientError
@@ -19,6 +19,8 @@ class S3Client(Protocol):
     def get_object(self, **kwargs: object) -> object: ...
 
     def delete_object(self, **kwargs: object) -> object: ...
+
+    def generate_presigned_url(self, *args: object, **kwargs: object) -> str: ...
 
 
 class S3ObjectStorage(ObjectStorage):
@@ -141,3 +143,64 @@ class S3ObjectStorage(ObjectStorage):
     def public_url(self, object_key: str) -> str:
         key = validate_storage_key(object_key).as_posix()
         return f"{self.public_base_url}/{quote(key, safe='/')}"
+
+    def object_key_from_reference(self, storage_reference: str) -> str:
+        if not isinstance(storage_reference, str) or len(storage_reference) > 1024:
+            raise StorageOperationError("Invalid object storage reference")
+        prefix = f"{self.public_base_url}/"
+        try:
+            parsed = urlsplit(storage_reference)
+            base = urlsplit(self.public_base_url)
+        except ValueError:
+            raise StorageOperationError("Invalid object storage reference") from None
+        if (
+            not storage_reference.startswith(prefix)
+            or parsed.scheme != base.scheme
+            or parsed.netloc != base.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise StorageOperationError("Invalid object storage reference")
+        key = validate_storage_key(unquote(storage_reference[len(prefix):])).as_posix()
+        if self.public_url(key) != storage_reference:
+            raise StorageOperationError("Invalid object storage reference")
+        return key
+
+    def presentation_url(
+        self,
+        object_key: str,
+        *,
+        expires_in_seconds: int,
+    ) -> str:
+        key = validate_storage_key(object_key).as_posix()
+        if (
+            not isinstance(expires_in_seconds, int)
+            or isinstance(expires_in_seconds, bool)
+            or not 60 <= expires_in_seconds <= 3600
+        ):
+            raise ValueError("Invalid presentation URL expiry")
+        try:
+            reference = self.client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": self.bucket, "Key": key},
+                ExpiresIn=expires_in_seconds,
+            )
+        except Exception:
+            raise StorageOperationError("Unable to present object") from None
+        try:
+            parsed = urlsplit(reference)
+        except (TypeError, ValueError):
+            raise StorageOperationError("Unable to present object") from None
+        if (
+            not isinstance(reference, str)
+            or not reference
+            or len(reference) > 4096
+            or parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise StorageOperationError("Unable to present object")
+        return reference

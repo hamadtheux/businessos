@@ -48,7 +48,21 @@ class ObjectStorage(ABC):
 
     @abstractmethod
     def public_url(self, object_key: str) -> str:
-        """Return the trusted public presentation URL for an object key."""
+        """Return the durable canonical reference for an object key."""
+
+    def object_key_from_reference(self, storage_reference: str) -> str:
+        """Resolve a canonical server-owned reference back to its object key."""
+        raise InvalidStorageKeyError("Invalid object storage reference")
+
+    def presentation_url(
+        self,
+        object_key: str,
+        *,
+        expires_in_seconds: int,
+    ) -> str:
+        """Return a browser-loadable URL for a previously validated object key."""
+        del expires_in_seconds
+        return self.public_url(object_key)
 
 
 def validate_storage_key(object_key: str) -> PurePosixPath:

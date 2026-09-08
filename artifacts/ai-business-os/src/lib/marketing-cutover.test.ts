@@ -196,13 +196,14 @@ test("plain regeneration sends no body while variation is explicit", async () =>
 });
 
 test("CMO creative studio exposes honest visual lifecycle states and immutable regeneration", async () => {
-  const [panel, studio, page, social, helpers, contentDrawer] = await Promise.all([
+  const [panel, studio, page, social, helpers, contentDrawer, styles] = await Promise.all([
     readFile(new URL("../features/marketing/cmo-creative-panel.tsx", import.meta.url), "utf8"),
     readFile(new URL("../features/marketing/cmo-content-studio.tsx", import.meta.url), "utf8"),
     readFile(new URL("../features/marketing/cmo-page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../features/marketing/marketing-pages.tsx", import.meta.url), "utf8"),
     readFile(new URL("./cmo-ux.ts", import.meta.url), "utf8"),
     readFile(new URL("../features/marketing/cmo-content-generator-drawer.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../index.css", import.meta.url), "utf8"),
   ]);
 
   assert.match(panel, /creative-\$\{mediaType\}-empty-state/);
@@ -218,6 +219,12 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
   assert.match(social, /CREATIVE_GENERATION_POLL_MS/);
   assert.match(page, /marketingApi\.creative\.get/);
   assert.match(social, /marketingApi\.creative\.get/);
+  assert.match(page, /refreshCreativeRecord/);
+  assert.match(page, /queryClient\.fetchQuery/);
+  assert.match(social, /refreshCreativeRecord/);
+  assert.match(social, /queryClient\.fetchQuery/);
+  assert.match(social, /onReload=\{\(asset\) => asset \? refreshCreativeRecord\(asset\)/);
+  assert.match(page, /onReloadCreative=\{\(asset\) => asset \? refreshCreativeRecord\(asset\)/);
   assert.match(page, /activeCreativeGeneration\.businessId === activeBusinessId/);
   assert.match(social, /activeCreativeGeneration\.businessId === activeBusinessId/);
   assert.match(panel, /creative-loading-\$\{phase\}/);
@@ -233,13 +240,17 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
   assert.match(panel, /role="group" aria-label="Creative media type"/);
   assert.match(panel, /aria-expanded=\{historyOpen\}/);
   assert.match(panel, /aria-controls=\{`creative-history-\$\{mediaType\}`\}/);
-  assert.match(panel, /testId=\{`creative-loading-\$\{phase\}`\} live="polite"/);
+  assert.match(panel, /testId=\{phase \? `creative-loading-\$\{phase\}` : "creative-generation-progress"\} live="polite" stable/);
   assert.match(panel, /testId="creative-error" live="assertive"/);
   assert.match(panel, /Previous media remains read-only and is never overwritten/);
   assert.match(panel, /safeCreativeMediaUrl/);
-  assert.match(panel, /onError=\{\(\) => setFailedPreviewId/);
+  assert.match(panel, /<video[^>]*src=\{safeReference\}/);
+  assert.match(panel, /<img[^>]*src=\{safeReference\}/);
+  assert.match(panel, /onError=\{\(\) => setPreviewFailure/);
   assert.match(panel, /creative-preview-unavailable/);
   assert.match(panel, /button-retry-preview/);
+  assert.match(panel, /await onReload\(displayed\)/);
+  assert.match(panel, /isCreativePreviewFailureCurrent/);
   assert.match(panel, /Creative is ready, but the preview could not be loaded/);
   assert.match(panel, /Immutable \{mediaType\} history/);
   assert.match(panel, /Previous \$\{mediaType\} creative/);
@@ -247,6 +258,22 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
   assert.match(panel, /creative-operation-error/);
   assert.match(panel, /button-retry-creative-operation/);
   assert.match(panel, /disabled=\{isPending\}/);
+  assert.match(panel, /StableCreativeLoader/);
+  assert.match(panel, /cmo-creative-state-stable/);
+  for (const status of ["queued", "generating", "reviewing", "repairing"]) {
+    assert.match(panel, new RegExp(`generationStatus === "${status}"|"${status}"`));
+  }
+  assert.doesNotMatch(panel, /className="spin"/);
+  assert.doesNotMatch(panel, /previewAttempt|setFailedPreviewId/);
+  const previewRetry = panel.slice(
+    panel.indexOf("const retryPreview"),
+    panel.indexOf("const header", panel.indexOf("const retryPreview")),
+  );
+  assert.match(previewRetry, /onReload\(displayed\)/);
+  assert.doesNotMatch(previewRetry, /onRetry|onRegenerate|onVariation|onCreate/);
+  assert.match(styles, /\.cmo-creative-state-stable\s*\{[^}]*min-height:/s);
+  assert.match(styles, /@keyframes cmo-creative-loader-pulse/);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.cmo-creative-stable-loader span\s*\{[\s\S]*animation: none/);
   assert.doesNotMatch(panel, /placeholder artwork|data:image/);
   for (const forbidden of ["server-side", "OpenAI", "API key", "raw visual"]) {
     assert.equal(panel.toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);

@@ -1663,6 +1663,22 @@ export function SocialManagementPage() {
   const refreshCreatives = () => queryClient.invalidateQueries({
     queryKey: ["marketing", activeBusinessId, "creative-assets"],
   });
+  const refreshCreativeRecord = async (asset: CreativeAsset) => {
+    const refreshed = await queryClient.fetchQuery({
+      queryKey: ["marketing", activeBusinessId, "creative-asset", asset.id],
+      queryFn: ({ signal }) => marketingApi.creative.get(
+        activeBusinessId,
+        asset.id,
+        signal,
+      ),
+      staleTime: 0,
+    });
+    queryClient.setQueriesData<CreativeAsset[]>(
+      { queryKey: ["marketing", activeBusinessId, "creative-assets"] },
+      (current) => current?.map((item) => item.id === refreshed.id ? refreshed : item),
+    );
+    return refreshed;
+  };
   const refreshPublishingReadiness = () => queryClient.invalidateQueries({
     queryKey: ["integrations", activeBusinessId],
   });
@@ -2945,7 +2961,7 @@ export function SocialManagementPage() {
                   setError("");
                   setPostWorkspaceMode("creative_brief");
                 }}
-                onReload={() => void assets.refetch()}
+                onReload={(asset) => asset ? refreshCreativeRecord(asset) : assets.refetch()}
                 onRetry={(asset) => startCreativeOperation(() => generateVisual.mutate(asset))}
                 onRegenerate={(asset) => startCreativeOperation(() => regenerateVisual.mutate({ asset }))}
                 onVariation={(asset) => startCreativeOperation(() => regenerateVisual.mutate({ asset, mode: "alternate_metaphor" }))}

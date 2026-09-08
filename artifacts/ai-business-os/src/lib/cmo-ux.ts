@@ -78,6 +78,11 @@ export type CreativeProgress = {
   assetId?: string;
 } | null;
 
+export type CreativePreviewFailure = {
+  creativeId: string;
+  reference: string;
+};
+
 export const CREATIVE_GENERATION_POLL_MS = 3_000;
 const ACTIVE_CREATIVE_GENERATION_STATUSES = new Set<
   CreativeAsset["generation_status"]
@@ -88,6 +93,20 @@ export function isCreativeGenerationActive(
 ) {
   return Boolean(
     asset && ACTIVE_CREATIVE_GENERATION_STATUSES.has(asset.generation_status),
+  );
+}
+
+export function isCreativePreviewFailureCurrent(
+  failure: CreativePreviewFailure | null,
+  creativeId: string | undefined,
+  reference: string | null,
+) {
+  return Boolean(
+    failure &&
+      creativeId &&
+      reference &&
+      failure.creativeId === creativeId &&
+      failure.reference === reference,
   );
 }
 
