@@ -4247,7 +4247,10 @@ async def _generate_creative_asset_value(
             )
 
         candidates = composed_values
-        approved_candidates: list[
+        semantic_review_available = (
+            visual_review_provider is not None and max_visual_review_calls > 0
+        )
+        eligible_candidates: list[
             tuple[CreativeCompositionResult, CreativeQualityAssessment]
         ] = []
         candidate_failure_kinds: list[str | None] = []
@@ -4256,12 +4259,23 @@ async def _generate_creative_asset_value(
                 candidate,
                 threshold=quality_threshold,
             )
-            if assessment.approved_for_delivery:
-                approved_candidates.append((candidate, assessment))
+            if assessment.approved_for_delivery or (
+                semantic_review_available
+                and assessment.eligible_for_semantic_review
+            ):
+                eligible_candidates.append((candidate, assessment))
             else:
                 candidate_failure_kinds.append(assessment.failure_kind)
 
-        if not approved_candidates:
+        # The compositor already ranks post-render layout evidence. Re-rank the
+        # technically valid subset by the complete deterministic assessment,
+        # preserving compositor order when scores tie.
+        eligible_candidates.sort(
+            key=lambda item: item[1].overall_score,
+            reverse=True,
+        )
+
+        if not eligible_candidates:
             all_failed_from_raw_visual = bool(candidate_failure_kinds) and all(
                 kind == "raw_visual" for kind in candidate_failure_kinds
             )
@@ -4298,7 +4312,7 @@ async def _generate_creative_asset_value(
                     stage="semantic_review",
                 )
 
-            final, quality = approved_candidates[0]
+            final, quality = eligible_candidates[0]
 
             if visual_review_provider is None:
                 logger.info(
@@ -4316,7 +4330,7 @@ async def _generate_creative_asset_value(
         )
 
         critic_raw_failure = False
-        for candidate, assessment in approved_candidates:
+        for candidate, assessment in eligible_candidates:
             if visual_review_calls >= max_visual_review_calls:
                 safe_review_provider = (
                     _safe_provider_attribute(
@@ -4348,8 +4362,10 @@ async def _generate_creative_asset_value(
 
                 # Explicitly optional low-level callers retain the prior
                 # deterministic-QA degradation behavior.
-                final, quality = candidate, assessment
-                break
+                if assessment.approved_for_delivery:
+                    final, quality = candidate, assessment
+                    break
+                continue
             visual_review_calls += 1
             review_request = CreativeVisualReviewRequest(
                 final_png=candidate.content,
@@ -4402,8 +4418,10 @@ async def _generate_creative_asset_value(
                         stage="semantic_review",
                     )
 
-                final, quality = candidate, assessment
-                break
+                if assessment.approved_for_delivery:
+                    final, quality = candidate, assessment
+                    break
+                continue
 
             # Operational diagnosis only. These values are bounded typed
             # classifications from the visual-review schema. Never log image
@@ -4584,14 +4602,14 @@ async def _generate_creative_asset_value(
         summary=(
             f"Generated and stored a validated {final.width}x{final.height} final "
             f"branded creative using the {final.selected_layout} layout"
-            f"{f' at quality score {quality.overall_score}' if quality else ''}; nothing "
+            f"{f' at deterministic quality score {quality.overall_score}' if quality else ''}; nothing "
             "was published externally."
         ),
     )
 
     if quality is not None:
         logger.info(
-            "creative_quality_passed score=%d layout=%s",
+            "creative_deterministic_quality_selected score=%d layout=%s",
             quality.overall_score,
             final.selected_layout,
             extra={

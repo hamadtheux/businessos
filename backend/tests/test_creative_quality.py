@@ -218,6 +218,24 @@ class CreativeLayoutAndQualityTests(TestCase):
         self.assertFalse(assessment.approved_for_delivery)
         self.assertEqual(assessment.failure_kind, "layout")
 
+    def test_below_threshold_without_hard_failures_is_semantic_review_eligible(self) -> None:
+        result = _composition(_visual())
+        conservative_report = replace(
+            result.quality,
+            layout_score=30,
+            content_centroid_offset=1.0,
+        )
+
+        assessment = assess_creative_quality(
+            replace(result, quality=conservative_report),
+            threshold=82,
+        )
+
+        self.assertEqual(assessment.overall_score, 75)
+        self.assertEqual(assessment.hard_failures, ())
+        self.assertTrue(assessment.eligible_for_semantic_review)
+        self.assertFalse(assessment.approved_for_delivery)
+
     def test_awkward_short_headline_wrap_is_a_layout_hard_failure(self) -> None:
         result = _composition(_visual())
         awkward = replace(
@@ -239,6 +257,7 @@ class CreativeLayoutAndQualityTests(TestCase):
         )
 
         self.assertFalse(assessment.approved_for_delivery)
+        self.assertFalse(assessment.eligible_for_semantic_review)
         self.assertEqual(assessment.failure_kind, "layout")
         self.assertIn("unnatural_headline_wrapping", assessment.hard_failures)
         self.assertLess(assessment.typography_quality, 60)
@@ -271,6 +290,7 @@ class CreativeLayoutAndQualityTests(TestCase):
     def test_valid_composition_passes_and_overlap_is_a_hard_failure(self) -> None:
         result = _composition(_visual())
         valid = assess_creative_quality(result, threshold=82)
+        self.assertTrue(valid.eligible_for_semantic_review)
         self.assertTrue(valid.approved_for_delivery)
 
         broken_bounds = dict(result.quality.text_bounds)
@@ -284,6 +304,7 @@ class CreativeLayoutAndQualityTests(TestCase):
             quality=broken_report,
         )
         broken = assess_creative_quality(broken_result, threshold=82)
+        self.assertFalse(broken.eligible_for_semantic_review)
         self.assertFalse(broken.approved_for_delivery)
         self.assertTrue(any("overlap" in value for value in broken.hard_failures))
 

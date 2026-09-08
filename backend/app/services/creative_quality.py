@@ -32,6 +32,7 @@ class CreativeQualityAssessment(BaseModel):
     overall_score: int = Field(ge=0, le=100)
     hard_failures: tuple[str, ...] = Field(max_length=12)
     improvement_actions: tuple[str, ...] = Field(max_length=8)
+    eligible_for_semantic_review: bool
     approved_for_delivery: bool
     failure_kind: str | None = Field(default=None, max_length=40)
 
@@ -219,8 +220,10 @@ def assess_creative_quality(
     overall = round(sum(dimensions.values()) / len(dimensions))
     if failures:
         overall = min(overall, threshold - 1)
+    unique_failures = tuple(dict.fromkeys(failures))
     actions = _improvements(failures, overall, threshold)
-    approved = not failures and overall >= threshold
+    eligible_for_semantic_review = not unique_failures
+    approved = eligible_for_semantic_review and overall >= threshold
     failure_kind = None
     if not approved:
         # Deterministic final-art QA measures technical composition:
@@ -231,8 +234,9 @@ def assess_creative_quality(
     return CreativeQualityAssessment(
         **dimensions,
         overall_score=overall,
-        hard_failures=tuple(dict.fromkeys(failures)),
+        hard_failures=unique_failures,
         improvement_actions=actions,
+        eligible_for_semantic_review=eligible_for_semantic_review,
         approved_for_delivery=approved,
         failure_kind=failure_kind,
     )

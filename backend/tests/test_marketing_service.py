@@ -2029,6 +2029,249 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
         storage.put.assert_awaited_once()
         self.assertEqual(storage.put.await_args.args[1], second.content)
 
+    async def test_semantic_review_receives_only_ranked_technically_valid_candidates(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        score_73 = _composed_candidate("cinematic_overlay", color=(10, 20, 30))
+        hard_failure = _composed_candidate("editorial_split", color=(30, 40, 50))
+        score_75 = _composed_candidate("framed_campaign", color=(50, 60, 70))
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(
+                side_effect=[
+                    _visual_result(
+                        _visual_review(
+                            approved=False,
+                            repair_class="layout",
+                            excessive_whitespace=True,
+                            repair_instructions="Try the next local layout.",
+                        )
+                    ),
+                    _visual_result(_visual_review_at_score(82)),
+                ]
+            ),
+        )
+        assessments = [
+            SimpleNamespace(
+                eligible_for_semantic_review=True,
+                approved_for_delivery=False,
+                failure_kind="layout",
+                overall_score=73,
+            ),
+            SimpleNamespace(
+                eligible_for_semantic_review=False,
+                approved_for_delivery=False,
+                hard_failures=("unnatural_headline_wrapping",),
+                failure_kind="layout",
+                overall_score=73,
+            ),
+            SimpleNamespace(
+                eligible_for_semantic_review=True,
+                approved_for_delivery=False,
+                failure_kind="layout",
+                overall_score=75,
+            ),
+        ]
+
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(score_73, hard_failure, score_75),
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                side_effect=assessments,
+            ),
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None, asset]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                storage=storage,
+                quality_threshold=82,
+                require_semantic_review=True,
+            )
+
+        self.assertEqual(generated.generation_status, "ready")
+        self.assertEqual(image_provider.generate_draft.await_count, 1)
+        self.assertEqual(reviewer.review.await_count, 2)
+        reviewed_images = [
+            call.args[0].final_png for call in reviewer.review.await_args_list
+        ]
+        self.assertEqual(reviewed_images, [score_75.content, score_73.content])
+        self.assertNotIn(hard_failure.content, reviewed_images)
+        self.assertEqual(storage.put.await_args.args[1], score_73.content)
+
+    async def test_below_deterministic_threshold_semantic_failure_is_not_deliverable(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        candidate = _composed_candidate("framed_campaign", color=(10, 20, 30))
+        below_threshold = SimpleNamespace(
+            eligible_for_semantic_review=True,
+            approved_for_delivery=False,
+            failure_kind="layout",
+            overall_score=75,
+        )
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(
+                return_value=_visual_result(_visual_review_at_score(81))
+            ),
+        )
+
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(candidate,),
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=below_threshold,
+            ),
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                storage=storage,
+                quality_threshold=82,
+                require_semantic_review=True,
+            )
+
+        self.assertEqual(generated.generation_status, "failed")
+        self.assertIsNone(generated.storage_reference)
+        self.assertEqual(reviewer.review.await_count, 1)
+        self.assertEqual(image_provider.generate_draft.await_count, 1)
+        storage.put.assert_not_awaited()
+
+    async def test_nonsemantic_path_keeps_strict_deterministic_threshold(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        candidate = _composed_candidate("framed_campaign", color=(10, 20, 30))
+        below_threshold = SimpleNamespace(
+            eligible_for_semantic_review=True,
+            approved_for_delivery=False,
+            failure_kind="layout",
+            overall_score=75,
+        )
+
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(candidate,),
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=below_threshold,
+            ),
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=None,
+                storage=storage,
+                quality_threshold=82,
+                require_semantic_review=False,
+            )
+
+        self.assertEqual(generated.generation_status, "failed")
+        self.assertIsNone(generated.storage_reference)
+        self.assertEqual(image_provider.generate_draft.await_count, 1)
+        storage.put.assert_not_awaited()
+
+    async def test_optional_semantic_outage_cannot_promote_below_threshold_candidate(self) -> None:
+        asset = _creative_asset()
+        storage = _ObjectStorage()
+        image_provider = SimpleNamespace(
+            provider_name="test",
+            generate_draft=AsyncMock(
+                return_value=CreativeGenerationResult(
+                    content=_png_bytes(),
+                    width=1024,
+                    height=1024,
+                )
+            ),
+        )
+        candidate = _composed_candidate("framed_campaign", color=(10, 20, 30))
+        below_threshold = SimpleNamespace(
+            eligible_for_semantic_review=True,
+            approved_for_delivery=False,
+            failure_kind="layout",
+            overall_score=75,
+        )
+        reviewer = SimpleNamespace(
+            provider_name="test_vision",
+            review=AsyncMock(side_effect=TimeoutError("review timed out")),
+        )
+
+        with (
+            patch(
+                "app.services.marketing.CreativeCompositor.compose_candidates",
+                return_value=(candidate,),
+            ),
+            patch(
+                "app.services.marketing.assess_creative_quality",
+                return_value=below_threshold,
+            ),
+            self.assertLogs("aibos.marketing", level="WARNING"),
+        ):
+            generated = await generate_creative_asset(
+                _ScalarSession([asset, _business_record(), None]),
+                business_id=BUSINESS_ID,
+                creative_asset_id=asset.id,
+                actor_user_id=USER_ID,
+                provider=image_provider,
+                visual_review_provider=reviewer,
+                storage=storage,
+                quality_threshold=82,
+                require_semantic_review=False,
+            )
+
+        self.assertEqual(generated.generation_status, "failed")
+        self.assertIsNone(generated.storage_reference)
+        self.assertEqual(reviewer.review.await_count, 1)
+        self.assertEqual(image_provider.generate_draft.await_count, 1)
+        storage.put.assert_not_awaited()
+
     async def test_all_semantic_candidates_below_runtime_threshold_fail_quality(self) -> None:
         asset = _creative_asset()
         storage = _ObjectStorage()
