@@ -21,6 +21,7 @@ import {
   createCreativeWithRecovery,
   creativeFormatForContent,
   creativePhaseForDisplay,
+  creativeWorkspaceForDisplay,
   creativeResultNotice,
   generateCampaignChannelDrafts,
   isCreativeGenerationActive,
@@ -115,6 +116,63 @@ const publicCreativeAsset: CreativeAsset = {
   created_at: "2026-09-06T00:00:00Z",
   updated_at: "2026-09-06T00:00:00Z",
 };
+
+test("active creative stays authoritative over a stale failed creative", () => {
+  const failedCreative: CreativeAsset = {
+    ...publicCreativeAsset,
+    id: "creative-old-failed",
+    generation_status: "failed",
+    updated_at: "2026-09-06T00:01:00Z",
+  };
+  const generatingCreative: CreativeAsset = {
+    ...publicCreativeAsset,
+    id: "creative-new-generating",
+    generation_status: "generating",
+    updated_at: "2026-09-06T00:02:00Z",
+  };
+
+  const beforeExactPoll = creativeWorkspaceForDisplay(
+    [failedCreative],
+    generatingCreative.id,
+  );
+
+  assert.equal(
+    beforeExactPoll.creative,
+    undefined,
+    "an old failed creative must never replace an unresolved active generation",
+  );
+  assert.deepEqual(
+    beforeExactPoll.creatives,
+    [],
+    "stale creative history must not become the displayed fallback while the active asset resolves",
+  );
+
+  const afterExactPoll = creativeWorkspaceForDisplay(
+    [failedCreative],
+    generatingCreative.id,
+    generatingCreative,
+  );
+
+  assert.equal(afterExactPoll.creative?.id, generatingCreative.id);
+  assert.deepEqual(
+    afterExactPoll.creatives?.map((item) => item.id),
+    [generatingCreative.id, failedCreative.id],
+  );
+
+  assert.equal(
+    creativePhaseForDisplay(
+      {
+        phase: "visual",
+        contentId: generatingCreative.content_id || undefined,
+        assetId: generatingCreative.id,
+      },
+      generatingCreative.content_id || undefined,
+      generatingCreative.id,
+    ),
+    "visual",
+  );
+});
+
 
 function content(
   channel: MarketingChannel,

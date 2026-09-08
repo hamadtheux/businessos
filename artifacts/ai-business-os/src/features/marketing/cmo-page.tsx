@@ -14,6 +14,7 @@ import {
   creativeFormatForContent,
   CREATIVE_GENERATION_POLL_MS,
   creativePhaseForDisplay,
+  creativeWorkspaceForDisplay,
   creativeResultNotice,
   generateCampaignChannelDrafts,
   isCreativeGenerationActive,
@@ -172,7 +173,18 @@ export function CmoPage() {
     return refreshed;
   };
   const observeCreativeGeneration = (asset: CreativeAsset) => {
-    if (!isCreativeGenerationActive(asset)) return;
+    if (
+      !isCreativeGenerationActive(asset) ||
+      asset.business_id !== activeBusinessId
+    ) {
+      return;
+    }
+
+    queryClient.setQueryData<CreativeAsset>(
+      ["marketing", activeBusinessId, "creative-asset", asset.id],
+      asset,
+    );
+
     setActiveCreativeGeneration({
       businessId: activeBusinessId,
       assetId: asset.id,
@@ -194,9 +206,61 @@ export function CmoPage() {
     const active = creativeAssets.data?.find(isCreativeGenerationActive);
     if (active) observeCreativeGeneration(active);
   }, [activeCreativeGeneration, creativeAssets.data]);
+
   useEffect(() => {
     const asset = activeCreativeAsset.data;
-    if (!activeCreativeGeneration || !asset || isCreativeGenerationActive(asset)) {
+    if (
+      !activeCreativeGeneration ||
+      !asset ||
+      activeCreativeGeneration.businessId !== activeBusinessId ||
+      asset.id !== activeCreativeGeneration.assetId ||
+      asset.business_id !== activeBusinessId ||
+      (
+        activeCreativeGeneration.contentId &&
+        asset.content_id !== activeCreativeGeneration.contentId
+      )
+    ) {
+      return;
+    }
+
+    const merge = (current: CreativeAsset[] | undefined) => [
+      asset,
+      ...(current ?? []).filter((item) => item.id !== asset.id),
+    ];
+
+    if (asset.content_id) {
+      queryClient.setQueryData<CreativeAsset[]>(
+        [
+          "marketing",
+          activeBusinessId,
+          "creative-assets",
+          "cmo",
+          asset.content_id,
+        ],
+        merge,
+      );
+    }
+  }, [
+    activeCreativeAsset.data,
+    activeCreativeGeneration,
+    activeBusinessId,
+    queryClient,
+  ]);
+
+  useEffect(() => {
+    const asset = activeCreativeAsset.data;
+    if (
+      !activeCreativeGeneration ||
+      !asset ||
+      activeCreativeGeneration.businessId !== activeBusinessId ||
+      asset.id !== activeCreativeGeneration.assetId ||
+      asset.business_id !== activeCreativeGeneration.businessId ||
+      (
+        activeCreativeGeneration.contentId &&
+        asset.content_id !== activeCreativeGeneration.contentId
+      ) ||
+      isCreativeGenerationActive(asset)
+    ) {
       return;
     }
     setActiveCreativeGeneration(null);
@@ -208,7 +272,11 @@ export function CmoPage() {
         : "",
     );
     void refreshCreatives();
-  }, [activeCreativeAsset.data, activeCreativeGeneration]);
+  }, [
+    activeCreativeAsset.data,
+    activeCreativeGeneration,
+    activeBusinessId,
+  ]);
 
   const generateContent = useMutation({
     mutationFn: (input: CampaignGenerationInput) =>
@@ -480,10 +548,27 @@ export function CmoPage() {
     onError: () => setError("A new creative version could not be completed. Refresh to see any saved history before retrying."),
   });
 
+  const activeCreativeMatchesPrimary =
+    activeCreativeGeneration?.businessId === activeBusinessId &&
+    activeCreativeGeneration.contentId === primary?.id;
+
+  const activeCreativeAssetId = activeCreativeMatchesPrimary
+    ? activeCreativeGeneration?.assetId
+    : undefined;
+
+  const {
+    creative: workspaceCreative,
+    creatives: workspaceCreatives,
+  } = creativeWorkspaceForDisplay(
+    creativeAssets.data,
+    activeCreativeAssetId,
+    activeCreativeAsset.data,
+  );
+
   const creativePhase = creativePhaseForDisplay(
     creativeProgress,
     primary?.id,
-    creativeAssets.data?.[0]?.id,
+    activeCreativeAssetId ?? workspaceCreative?.id,
   );
   const primaryConnector = integrationRegistry.data?.find(
     (item) => item.connector_type === primary?.channel,
@@ -582,8 +667,8 @@ export function CmoPage() {
           }
           isRegenerating={regenerate.isPending}
           isApproving={approve.isPending}
-          creative={creativeAssets.data?.[0]}
-          creatives={creativeAssets.data}
+          creative={workspaceCreative}
+          creatives={workspaceCreatives}
           isCreativeLoading={creativeAssets.isLoading}
           isCreativePending={creativePending}
           creativeError={creativeAssets.isError ? humanizeApiError(creativeAssets.error, "Retry loading creative history.") : null}

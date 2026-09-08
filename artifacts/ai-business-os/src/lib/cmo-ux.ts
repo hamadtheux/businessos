@@ -458,6 +458,42 @@ export function creativePhaseForDisplay(
   return progress.phase;
 }
 
+export function creativeWorkspaceForDisplay(
+  creatives: CreativeAsset[] | undefined,
+  activeAssetId?: string,
+  activeAsset?: CreativeAsset | null,
+) {
+  if (!activeAssetId) {
+    return {
+      creative: creatives?.[0],
+      creatives,
+    };
+  }
+
+  const authoritative =
+    activeAsset?.id === activeAssetId
+      ? activeAsset
+      : creatives?.find((item) => item.id === activeAssetId);
+
+  if (!authoritative) {
+    return {
+      creative: undefined,
+      creatives: [],
+    };
+  }
+
+  return {
+    creative: authoritative,
+    creatives: [
+      authoritative,
+      ...(creatives ?? []).filter(
+        (item) => item.id !== authoritative.id,
+      ),
+    ],
+  };
+}
+
+
 async function refreshAfterCreativeOperation(refresh: () => Promise<unknown>) {
   try {
     await refresh();

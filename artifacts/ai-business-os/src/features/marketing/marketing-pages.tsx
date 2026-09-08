@@ -51,6 +51,7 @@ import {
   CREATIVE_GENERATION_POLL_MS,
   creativeFormatForContent,
   creativePhaseForDisplay,
+  creativeWorkspaceForDisplay,
   creativeResultNotice,
   generateCampaignChannelDrafts,
   isCreativeGenerationActive,
@@ -1683,7 +1684,18 @@ export function SocialManagementPage() {
     queryKey: ["integrations", activeBusinessId],
   });
   const observeCreativeGeneration = (asset: CreativeAsset) => {
-    if (!isCreativeGenerationActive(asset)) return;
+    if (
+      !isCreativeGenerationActive(asset) ||
+      asset.business_id !== activeBusinessId
+    ) {
+      return;
+    }
+
+    queryClient.setQueryData<CreativeAsset>(
+      ["marketing", activeBusinessId, "creative-asset", asset.id],
+      asset,
+    );
+
     setActiveCreativeGeneration({
       businessId: activeBusinessId,
       assetId: asset.id,
@@ -1707,9 +1719,60 @@ export function SocialManagementPage() {
     );
     if (active) observeCreativeGeneration(active);
   }, [activeCreativeGeneration, assets.data, libraryAssets.data]);
+
   useEffect(() => {
     const asset = activeCreativeAsset.data;
-    if (!activeCreativeGeneration || !asset || isCreativeGenerationActive(asset)) {
+    if (
+      !activeCreativeGeneration ||
+      !asset ||
+      activeCreativeGeneration.businessId !== activeBusinessId ||
+      asset.id !== activeCreativeGeneration.assetId ||
+      asset.business_id !== activeBusinessId ||
+      (
+        activeCreativeGeneration.contentId &&
+        asset.content_id !== activeCreativeGeneration.contentId
+      )
+    ) {
+      return;
+    }
+
+    const merge = (current: CreativeAsset[] | undefined) => [
+      asset,
+      ...(current ?? []).filter((item) => item.id !== asset.id),
+    ];
+
+    if (asset.content_id) {
+      queryClient.setQueryData<CreativeAsset[]>(
+        ["marketing", activeBusinessId, "creative-assets", asset.content_id],
+        merge,
+      );
+    }
+
+    queryClient.setQueryData<CreativeAsset[]>(
+      ["marketing", activeBusinessId, "creative-assets", "content-library"],
+      merge,
+    );
+  }, [
+    activeCreativeAsset.data,
+    activeCreativeGeneration,
+    activeBusinessId,
+    queryClient,
+  ]);
+
+  useEffect(() => {
+    const asset = activeCreativeAsset.data;
+    if (
+      !activeCreativeGeneration ||
+      !asset ||
+      activeCreativeGeneration.businessId !== activeBusinessId ||
+      asset.id !== activeCreativeGeneration.assetId ||
+      asset.business_id !== activeCreativeGeneration.businessId ||
+      (
+        activeCreativeGeneration.contentId &&
+        asset.content_id !== activeCreativeGeneration.contentId
+      ) ||
+      isCreativeGenerationActive(asset)
+    ) {
       return;
     }
     setActiveCreativeGeneration(null);
@@ -1721,7 +1784,11 @@ export function SocialManagementPage() {
         : "",
     );
     void refreshCreatives();
-  }, [activeCreativeAsset.data, activeCreativeGeneration]);
+  }, [
+    activeCreativeAsset.data,
+    activeCreativeGeneration,
+    activeBusinessId,
+  ]);
   useEffect(() => {
     setCreativeActionError("");
     if (
@@ -2153,10 +2220,27 @@ export function SocialManagementPage() {
   });
   const selectedProviderWriteReady = selectedPublishCapability.canPrepare;
   const selectedProviderCopy = selectedPublishCapability.copy;
+  const activeCreativeMatchesSelection =
+    activeCreativeGeneration?.businessId === activeBusinessId &&
+    activeCreativeGeneration.contentId === selected?.id;
+
+  const activeCreativeAssetId = activeCreativeMatchesSelection
+    ? activeCreativeGeneration?.assetId
+    : undefined;
+
+  const {
+    creative: workspaceCreative,
+    creatives: workspaceCreatives,
+  } = creativeWorkspaceForDisplay(
+    assets.data,
+    activeCreativeAssetId,
+    activeCreativeAsset.data,
+  );
+
   const creativePhase = creativePhaseForDisplay(
     creativeProgress,
     selected?.id,
-    assets.data?.[0]?.id,
+    activeCreativeAssetId ?? workspaceCreative?.id,
   );
   const selectedCreativeFormat = selected
     ? creativeFormatForContent(selected)
@@ -2942,8 +3026,8 @@ export function SocialManagementPage() {
                 </Button>
               </div>
               <CmoCreativePanel
-                creative={assets.data?.[0]}
-                creatives={assets.data}
+                creative={workspaceCreative}
+                creatives={workspaceCreatives}
                 isLoading={assets.isLoading}
                 error={assets.isError ? humanizeApiError(assets.error, "Retry loading creative history.") : null}
                 actionError={creativeActionError}
