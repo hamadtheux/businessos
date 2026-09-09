@@ -3503,17 +3503,27 @@ async def _creative_direction_with_fallback(
             )
             return direction, execution.provider_metadata
         quality_fields = _creative_direction_quality_log_fields(direction)
+        quality_event = (
+            "director_repair_failed_quality"
+            if repair
+            else "director_initial_failed_quality"
+        )
+        # Preserve the stable event name for tests/monitoring, while emitting a
+        # second Render-visible line with only bounded numeric diagnostics.
+        logger.info(
+            quality_event,
+            extra={
+                "director_call_number": call_index + 1,
+                **quality_fields,
+            },
+        )
         logger.info(
             (
-                "%s director_call_number=%d "
+                "creative_direction_quality_scores event=%s call=%d "
                 "overall=%d business=%d mechanism=%d idea=%d visual=%d "
                 "commercial=%d generic=%d replaceable=%d"
             ),
-            (
-                "director_repair_failed_quality"
-                if repair
-                else "director_initial_failed_quality"
-            ),
+            quality_event,
             call_index + 1,
             quality_fields["selected_overall_score"],
             quality_fields["business_specificity"],
@@ -3523,10 +3533,6 @@ async def _creative_direction_with_fallback(
             quality_fields["commercial_readiness"],
             quality_fields["genericness_risk"],
             quality_fields["replaceable_brand_risk"],
-            extra={
-                "director_call_number": call_index + 1,
-                **quality_fields,
-            },
         )
         state["rejected"] = repair
         rejected = direction.selected_concept
