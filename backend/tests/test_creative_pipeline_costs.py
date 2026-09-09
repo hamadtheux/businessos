@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 
 from creative_pipeline_fixtures import brand_inputs, brand_plan, brand_strategy, brand_synthesis
 from test_creative_world_class import _saas_authority, _saas_brain_bundle
@@ -18,7 +19,13 @@ from test_marketing_service import (
 from app.agents.provider import AIAgentProviderMetadata
 from app.exceptions.marketing import MarketingAIError, MarketingNotFoundError, MarketingPersistenceError
 from app.services import marketing
-from app.services.creative_direction import build_creative_direction, creative_direction_meets_quality_floor
+from app.services.creative_direction import (
+    CreativeConceptProposal,
+    CreativeDirectorSynthesis,
+    CreativeDirectionCheckpoint,
+    build_creative_direction,
+    creative_direction_meets_quality_floor,
+)
 from app.services.creative_provider import CreativeGenerationResult
 
 
@@ -51,6 +58,194 @@ def providers(reviews=None):
     return image, review
 
 
+def test_full_director_checkpoint_reproduces_the_16kb_metadata_overflow():
+    strategy, context, research = brand_inputs()
+    plan = build_creative_direction(
+        strategy=strategy,
+        context=context,
+        research=research,
+        story_mode="brand_offer",
+        synthesis=_production_sized_director_synthesis(),
+    )
+    base_metadata = {
+        "image_generation_epoch": 1,
+        "image_generation_started_attempt": 0,
+        "generation_requested_by_user_id": str(USER_ID),
+    }
+    old_metadata = {
+        **base_metadata,
+        "director_state": {
+            "epoch": 1,
+            "mode": "brand_offer",
+            "calls": 1,
+            "pending": False,
+            "plans": {"1": plan.model_dump(mode="json")},
+        },
+    }
+    old_size = marketing._creative_metadata_byte_size(old_metadata)
+    assert old_size > 16_384
+
+    checkpoint = CreativeDirectionCheckpoint(
+        generation_epoch=1,
+        image_attempt=1,
+        selected_concept=CreativeConceptProposal.model_validate(
+            plan.selected_concept.model_dump(exclude={"scorecard"})
+        ),
+        research_fingerprint=plan.research_fingerprint,
+        used_live_research=plan.used_live_research,
+        used_ai_synthesis=plan.used_ai_synthesis,
+    )
+    compact_metadata = {
+        **base_metadata,
+        "director_state": {
+            "checkpoint_version": 1,
+            "epoch": 1,
+            "mode": "brand_offer",
+            "calls": 1,
+            "pending": False,
+            "plans": {"1": checkpoint.model_dump(mode="json")},
+        },
+    }
+    compact_size = marketing._creative_metadata_byte_size(compact_metadata)
+    assert compact_size <= marketing._CREATIVE_METADATA_APP_MAX_BYTES
+    assert "scorecard" not in json.dumps(compact_metadata)
+
+
+@pytest.mark.asyncio
+async def test_compact_checkpoint_is_persisted_without_scorecards(runtime):
+    runtime.execute.return_value = execution()
+    asset = asset_for_job()
+    image, review = providers()
+
+    result = await run(asset, image, review)
+
+    assert result.generation_status == "ready"
+    state = asset.creative_metadata["director_state"]
+    checkpoint = state["plans"]["1"]
+    assert state["checkpoint_version"] == 1
+    assert checkpoint["checkpoint_version"] == 1
+    assert "scorecard" not in checkpoint
+    assert marketing._creative_metadata_byte_size(asset.creative_metadata) <= marketing._CREATIVE_METADATA_APP_MAX_BYTES
+
+
+@pytest.mark.asyncio
+async def test_director_result_persistence_rolls_back_and_logs_only_safe_integrity_diagnostics(
+    runtime,
+    caplog,
+):
+    runtime.execute.return_value = execution()
+    strategy, context, research = brand_inputs()
+    asset = asset_for_job()
+    session = _FailingFlushOnCall([asset], fail_on_flush=2)
+
+    with pytest.raises(MarketingPersistenceError):
+        await marketing._creative_direction_with_fallback(
+            session,
+            business_id=BUSINESS_ID,
+            strategy=strategy,
+            research=research,
+            context=context,
+            provider=SimpleNamespace(provider_name="fake_director"),
+            max_output_tokens=4_000,
+            story_mode="brand_offer",
+            value=asset,
+            persist_progress=True,
+        )
+
+    assert session.rollback_calls == 1
+    records = [
+        record for record in caplog.records
+        if record.getMessage().startswith("creative_direction_state_persist_failed")
+    ]
+    assert len(records) == 1
+    assert records[0].exception_type == "IntegrityError"
+    assert records[0].metadata_bytes <= marketing._CREATIVE_METADATA_APP_MAX_BYTES
+    assert "private database detail" not in caplog.text
+    assert "creative metadata check contained" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_recovery_revalidates_compact_checkpoint_with_current_authority(
+    runtime,
+    monkeypatch,
+):
+    runtime.authority.return_value = _saas_authority(business_id=BUSINESS_ID)
+    runtime.execute.return_value = _saas_pipeline_execution(strong=True)
+    asset = asset_for_job()
+    asset.visual_direction = _saas_pipeline_strategy().model_dump_json()
+    image, review = providers()
+    storage = _DurableCheckpointStorage()
+
+    monkeypatch.setattr(
+        marketing.CreativeCompositor,
+        "compose_candidates",
+        lambda *args: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        await run(asset, image, review, storage=storage)
+
+    assert "scorecard" not in json.dumps(asset.creative_metadata)
+    monkeypatch.setattr(
+        marketing.CreativeCompositor,
+        "compose_candidates",
+        lambda *args: (_composed_candidate("minimal_hero", color=(100, 120, 140)),),
+    )
+    recovered = await run(asset, image, review, storage=storage)
+
+    assert recovered.generation_status == "ready"
+    assert runtime.authority.await_count == 2
+    assert runtime.execute.await_count == 1
+    assert image.generate_draft.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_persisted_scorecards_cannot_authorize_a_currently_weak_concept(runtime):
+    strategy, context, research = brand_inputs()
+    weak_plan = build_creative_direction(
+        strategy=strategy,
+        context=context,
+        research=research,
+        story_mode="brand_offer",
+        synthesis=brand_synthesis(strong=False),
+    )
+    legacy = weak_plan.model_dump(mode="json")
+    for candidate in legacy["candidates"]:
+        candidate["scorecard"] = {
+            key: 0 for key in candidate["scorecard"]
+        }
+    selected_name = weak_plan.selected_concept.concept_name
+    for candidate in legacy["candidates"]:
+        if candidate["concept_name"] == selected_name:
+            candidate["scorecard"] = {
+                key: 100 for key in candidate["scorecard"]
+            }
+    legacy["selected_concept"] = next(
+        candidate for candidate in legacy["candidates"]
+        if candidate["concept_name"] == selected_name
+    )
+    asset = asset_for_job()
+    asset.creative_metadata["director_state"] = {
+        "epoch": 1,
+        "mode": "brand_offer",
+        "calls": 1,
+        "pending": False,
+        "plans": {"1": legacy},
+    }
+    with pytest.raises(MarketingAIError):
+        await marketing._creative_direction_with_fallback(
+            _ScalarSession([asset]),
+            business_id=BUSINESS_ID,
+            strategy=strategy,
+            research=research,
+            context=context,
+            provider=runtime,
+            max_output_tokens=4_000,
+            story_mode="brand_offer",
+            value=asset,
+        )
+    runtime.execute.assert_not_awaited()
+
+
 async def run(asset, image, review, *, storage=None, session=None):
     return await marketing.run_queued_creative_asset_generation(
         session or _PipelineSession([asset,_business_record(),None,asset]), business_id=BUSINESS_ID,
@@ -62,6 +257,94 @@ async def run(asset, image, review, *, storage=None, session=None):
 
 class _PipelineSession(_ScalarSession, AsyncSession):
     """In-memory session that exercises the production AsyncSession boundary."""
+
+
+class _FailingFlushOnCall(_ScalarSession):
+    def __init__(self, values, *, fail_on_flush: int):
+        super().__init__(values)
+        self.fail_on_flush = fail_on_flush
+
+    async def flush(self):
+        self.flush_calls += 1
+        if self.flush_calls == self.fail_on_flush:
+            raise IntegrityError(
+                "creative metadata check contained a private value",
+                {},
+                ValueError("private database detail"),
+            )
+
+
+def _production_sized_director_synthesis() -> CreativeDirectorSynthesis:
+    """Three valid proposals with fields close to the production maxima."""
+    _strategy, _context, _research = brand_inputs()
+    maxima = {
+        "concept_name": 100,
+        "marketing_idea": 300,
+        "customer_care_reason": 300,
+        "strategic_reason": 300,
+        "hero_subject": 500,
+        "hero_relevance": 300,
+        "product_story": 400,
+        "scroll_stopping_hook": 300,
+        "visual_metaphor": 300,
+        "layout_intent": 500,
+        "focal_area": 160,
+        "text_zone": 220,
+        "offer_treatment": 160,
+        "cta_treatment": 160,
+        "depth": 180,
+        "image_style": 220,
+        "camera_direction": 220,
+        "lighting": 240,
+        "mood": 240,
+        "visual_density": 120,
+        "background_complexity": 180,
+        "brand_expression": 300,
+        "originality_notes": 300,
+    }
+    unique_tokens = (
+        ("amber", "ledger", "canopy"),
+        ("cobalt", "shutter", "ribbon"),
+        ("violet", "threshold", "lantern"),
+    )
+    proposals = []
+    for index, (first, second, third) in enumerate(unique_tokens):
+        values = {
+            field: (
+                f"{first} {second} {third} grounded detail "
+                + "material evidence " * 50
+            )[:maximum]
+            for field, maximum in maxima.items()
+        }
+        values.update(
+            concept_name=f"{first} {second} {third} concept {index}",
+            marketing_idea=(
+                f"{first} {second} {third} distinct mechanism evidence "
+                + "material " * 60
+            )[:300],
+            visual_metaphor=(
+                f"{first} {second} {third} distinct visual metaphor "
+                + "shape tension " * 60
+            )[:300],
+            hero_subject=(
+                f"{first} {second} {third} shopkeeper scene "
+                + "grounded physical subject " * 60
+            )[:500],
+            product_story=(
+                f"{first} {second} {third} visible consequence grounded scene "
+                + "material detail " * 60
+            )[:400],
+            inspiration_principles=tuple(
+                f"{first} principle {item} grounded"[:180]
+                for item in range(6)
+            ),
+            avoid_patterns=tuple(
+                f"avoid {first} {item} generic"[:180]
+                for item in range(6)
+            ),
+        )
+        proposals.append(CreativeConceptProposal.model_validate(values))
+    return CreativeDirectorSynthesis(candidates=tuple(proposals))
 
 
 def concept_failure():

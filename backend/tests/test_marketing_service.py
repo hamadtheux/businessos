@@ -4630,6 +4630,7 @@ class _ScalarSession:
         self.added = []
         self.flush_calls = 0
         self.commit_calls = 0
+        self.rollback_calls = 0
         self.scalar_statements = []
         self.scalars_statements = []
 
@@ -4649,6 +4650,9 @@ class _ScalarSession:
 
     async def commit(self):
         self.commit_calls += 1
+
+    async def rollback(self):
+        self.rollback_calls += 1
 
 
 class _FailingFlushSession(_ScalarSession):

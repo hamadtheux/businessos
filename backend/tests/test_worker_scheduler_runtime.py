@@ -16,6 +16,7 @@ os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 
 from app import scheduler as scheduler_module  # noqa: E402
 from app import worker as worker_module  # noqa: E402
+from app.services.job_handlers import HandlerOutcome  # noqa: E402
 
 
 class _Session:
@@ -29,12 +30,64 @@ class _Session:
         return None
 
 
+class _WorkerSession(_Session):
+    def __init__(self):
+        self.failed_transaction = False
+        self.commit_calls = 0
+        self.rollback_calls = 0
+
+    async def commit(self) -> None:
+        self.commit_calls += 1
+        if self.failed_transaction:
+            raise AssertionError("PendingRollbackError would mask the primary failure")
+
+    async def rollback(self) -> None:
+        self.rollback_calls += 1
+        self.failed_transaction = False
+
+
 class _SessionFactory:
     def __call__(self):
         return _Session()
 
 
+class _WorkerSessionFactory:
+    def __init__(self):
+        self.sessions = []
+
+    def __call__(self):
+        session = _WorkerSession()
+        self.sessions.append(session)
+        return session
+
+
 class WorkerSchedulerRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_persisted_handler_failure_is_clean_before_worker_commit(self) -> None:
+        factory = _WorkerSessionFactory()
+        job = SimpleNamespace(
+            id=uuid4(),
+            business_id=uuid4(),
+            job_type="generate_creative_asset",
+            attempt_count=1,
+        )
+
+        async def failed_dispatch(session, _job):
+            session.failed_transaction = True
+            await session.rollback()
+            return HandlerOutcome(False, "dependency_unavailable", True)
+
+        with (
+            patch.object(worker_module, "AsyncSessionFactory", factory),
+            patch.object(worker_module, "dispatch_job_handler", new=AsyncMock(side_effect=failed_dispatch)),
+            patch.object(worker_module, "record_job_failure", new=AsyncMock()),
+            patch.object(worker_module, "record_job_success", new=AsyncMock()),
+        ):
+            await worker_module.process_claimed_job(job, worker_id="worker-test")
+
+        self.assertGreaterEqual(len(factory.sessions), 2)
+        self.assertEqual(factory.sessions[0].rollback_calls, 1)
+        self.assertEqual(factory.sessions[0].commit_calls, 1)
+
     async def test_worker_claim_failure_does_not_kill_process_loop(self) -> None:
         stop_event = asyncio.Event()
         iterations = 0

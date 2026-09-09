@@ -331,8 +331,10 @@ class CreativeConceptCandidate(CreativeConceptProposal):
 
 
 class CreativeDirectionPlan(DirectionSchema):
+    """A scored direction, or a selected-only direction reconstructed on recovery."""
+
     candidates: tuple[CreativeConceptCandidate, ...] = Field(
-        min_length=3,
+        min_length=1,
         max_length=3,
     )
     selected_concept: CreativeConceptCandidate
@@ -349,6 +351,18 @@ class CreativeDirectionPlan(DirectionSchema):
         if winner != self.selected_concept:
             raise ValueError("selected concept must be the highest-scoring candidate")
         return self
+
+
+class CreativeDirectionCheckpoint(DirectionSchema):
+    """The bounded durable identity of the direction used by an image attempt."""
+
+    checkpoint_version: Literal[1] = 1
+    generation_epoch: int = Field(ge=1)
+    image_attempt: int = Field(ge=1, le=2)
+    selected_concept: CreativeConceptProposal
+    research_fingerprint: str = Field(min_length=16, max_length=64)
+    used_live_research: bool
+    used_ai_synthesis: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -580,6 +594,54 @@ def build_creative_direction(
         research_fingerprint=research.research_fingerprint,
         used_live_research=not research.degraded and research.reference_count > 0,
         used_ai_synthesis=synthesis is not None,
+    )
+
+
+def revalidate_selected_creative_concept(
+    *,
+    selected_concept: CreativeConceptProposal,
+    strategy: CreativeStrategyProposal,
+    research: CreativeResearchBundle,
+    context: PublicCreativeResearchContext,
+    story_mode: CreativeStoryMode = "offering_proof",
+    authoritative_context: AuthoritativeCreativeContext | None = None,
+    research_fingerprint: str | None = None,
+    used_live_research: bool | None = None,
+    used_ai_synthesis: bool = False,
+) -> CreativeDirectionPlan:
+    """Re-score one durable renderer-bound concept using current server rules.
+
+    A recovered image attempt must not trust a persisted scorecard or rebuild a
+    purchase decision from stale alternatives. The selected proposal is the
+    durable identity; its score is rebuilt from current research and current
+    authoritative tenant context.
+    """
+    scorecard = _score_candidates(
+        (selected_concept,),
+        strategy=strategy,
+        research=research,
+        context=context,
+        story_mode=story_mode,
+        authoritative_context=authoritative_context,
+    )[0]
+    candidate = CreativeConceptCandidate(
+        **selected_concept.model_dump(),
+        scorecard=scorecard,
+    )
+    return CreativeDirectionPlan(
+        candidates=(candidate,),
+        selected_concept=candidate,
+        research_fingerprint=(
+            research_fingerprint
+            if research_fingerprint is not None
+            else research.research_fingerprint
+        ),
+        used_live_research=(
+            used_live_research
+            if used_live_research is not None
+            else not research.degraded and research.reference_count > 0
+        ),
+        used_ai_synthesis=used_ai_synthesis,
     )
 
 

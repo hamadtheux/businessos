@@ -27,6 +27,7 @@ from app.services.job_handlers import (  # noqa: E402
     JOB_HANDLERS,
     handle_analyze_business_opportunity,
     handle_dispatch_conversation_message,
+    dispatch_job_handler,
     handle_generate_creative_asset,
     handle_process_automation_event,
     handle_process_integration_event,
@@ -143,6 +144,39 @@ class JobHandlerTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(storage_outcome.failure_code, "dependency_unavailable")
         self.assertTrue(storage_outcome.retryable)
+
+    async def test_creative_persistence_failure_rolls_back_before_retryable_outcome(self) -> None:
+        job = _job(job_type="generate_creative_asset", creative_asset_id=uuid4())
+        runtime = SimpleNamespace(
+            provider=object(), storage=object(), research_engine=object(),
+            director_provider=None, visual_review_provider=None,
+        )
+        session = _Session()
+        with patch(
+            "app.services.job_handlers.build_creative_generation_runtime",
+            return_value=runtime,
+        ), patch(
+            "app.services.job_handlers.run_queued_creative_asset_generation",
+            new=AsyncMock(side_effect=MarketingPersistenceError()),
+        ):
+            outcome = await handle_generate_creative_asset(session, job)  # type: ignore[arg-type]
+
+        self.assertFalse(outcome.succeeded)
+        self.assertTrue(outcome.retryable)
+        self.assertEqual(session.rollback_calls, 1)
+
+    async def test_generic_persistence_failure_rolls_back_before_dispatch_returns(self) -> None:
+        session = _Session()
+        handler = AsyncMock(side_effect=MarketingPersistenceError())
+        handlers = {**JOB_HANDLERS, "test_persistence": handler}
+        with patch("app.services.job_handlers.JOB_HANDLERS", handlers):
+            outcome = await dispatch_job_handler(
+                session, _job(job_type="test_persistence")  # type: ignore[arg-type]
+            )
+
+        self.assertFalse(outcome.succeeded)
+        self.assertTrue(outcome.retryable)
+        self.assertEqual(session.rollback_calls, 1)
 
     async def test_opportunity_analysis_resolves_server_provider_and_delegates(self) -> None:
         opportunity_id = uuid4()
@@ -413,12 +447,16 @@ class _Session:
     def __init__(self, scalar_value=None):
         self.scalar_value = scalar_value
         self.added: list[object] = []
+        self.rollback_calls = 0
 
     async def scalar(self, _statement):
         return self.scalar_value
 
     def add(self, value: object) -> None:
         self.added.append(value)
+
+    async def rollback(self) -> None:
+        self.rollback_calls += 1
 
 
 def _job(

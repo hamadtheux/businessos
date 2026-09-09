@@ -68,6 +68,7 @@ from app.services.creative_compositor import (
 from app.services.creative_direction import (
     CreativeConceptProposal,
     CreativeDirectorTaskBudgetError,
+    CreativeDirectionCheckpoint,
     CreativeDirectorSynthesis,
     CreativeDirectionPlan,
     build_creative_director_task,
@@ -75,6 +76,7 @@ from app.services.creative_direction import (
     build_visual_art_direction,
     creative_direction_meets_quality_floor,
     creative_directions_materially_differ,
+    revalidate_selected_creative_concept,
 )
 from app.services.creative_quality import (
     CreativeQualityAssessment,
@@ -172,6 +174,7 @@ from app.schemas.operations import OpportunityCreate
 from app.services.operations import create_opportunity, record_audit
 from app.services.automation_events import record_automation_event
 from app.services.background_jobs import enqueue_job
+from app.db.transactions import rollback_session
 from app.services.business_branding import validated_business_logo_key
 from app.services.logo_image import MAX_LOGO_UPLOAD_BYTES, sanitize_logo_bytes
 from app.exceptions.logo import LogoError
@@ -183,6 +186,9 @@ MONEY_QUANTUM = Decimal("0.0001")
 RATIO_QUANTUM = Decimal("0.000001")
 
 logger = logging.getLogger("aibos.marketing")
+
+_CREATIVE_METADATA_APP_MAX_BYTES = 12_000
+_CREATIVE_DIRECTOR_CHECKPOINT_VERSION = 1
 
 _SAFE_AI_DIAGNOSTIC_IDENTIFIER = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
@@ -545,10 +551,94 @@ async def _paged(session: AsyncSession, statement: Select, page: int, page_size:
         raise MarketingPersistenceError from None
 
 
+def _serialized_json_byte_size(value: object) -> int:
+    """Return the deterministic UTF-8 size used by application JSON guards."""
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+
+
+def _creative_metadata_byte_size(metadata: dict[str, object]) -> int:
+    if not isinstance(metadata, dict):
+        raise TypeError("Creative metadata must be an object")
+    return _serialized_json_byte_size(metadata)
+
+
+def _log_creative_direction_persist_failure(
+    error: BaseException,
+    *,
+    metadata_bytes: int,
+) -> None:
+    """Emit only bounded diagnostics at the Director metadata boundary."""
+    logger.error(
+        "creative_direction_state_persist_failed exception_type=%s metadata_bytes=%d",
+        type(error).__name__,
+        metadata_bytes,
+        extra={
+            "exception_type": type(error).__name__,
+            "metadata_bytes": metadata_bytes,
+        },
+    )
+
+
+async def _rollback_session(session: AsyncSession) -> None:
+    """Best-effort rollback used when a persistence failure is being translated."""
+    await rollback_session(session)
+
+
+def _guard_creative_metadata_size(metadata: dict[str, object]) -> int:
+    metadata_bytes = _creative_metadata_byte_size(metadata)
+    if metadata_bytes > _CREATIVE_METADATA_APP_MAX_BYTES:
+        _log_creative_direction_persist_failure(
+            ValueError("creative metadata exceeds application ceiling"),
+            metadata_bytes=metadata_bytes,
+        )
+        raise MarketingPersistenceError from None
+    return metadata_bytes
+
+
+async def _flush_creative_direction_state(
+    session: AsyncSession,
+    *,
+    metadata_bytes: int,
+) -> None:
+    try:
+        await session.flush()
+    except SQLAlchemyError as error:
+        _log_creative_direction_persist_failure(
+            error,
+            metadata_bytes=metadata_bytes,
+        )
+        await _rollback_session(session)
+        raise MarketingPersistenceError from None
+
+
+async def _commit_creative_direction_state(
+    session: AsyncSession,
+    *,
+    metadata_bytes: int,
+) -> None:
+    try:
+        await session.commit()
+    except SQLAlchemyError as error:
+        _log_creative_direction_persist_failure(
+            error,
+            metadata_bytes=metadata_bytes,
+        )
+        await _rollback_session(session)
+        raise MarketingPersistenceError from None
+
+
 async def _flush(session: AsyncSession) -> None:
     try:
         await session.flush()
     except SQLAlchemyError:
+        await _rollback_session(session)
         raise MarketingPersistenceError from None
 
 
@@ -3337,9 +3427,19 @@ async def _creative_direction_with_fallback(
             logger.info("creative_direction_rejected reason=missing_direction_checkpoint")
             raise MarketingAIError
         state = {
+            "checkpoint_version": _CREATIVE_DIRECTOR_CHECKPOINT_VERSION,
             "epoch": epoch, "mode": story_mode, "calls": 0,
             "pending": False, "plans": {},
         }
+    if state.get("checkpoint_version") not in {
+        None,
+        _CREATIVE_DIRECTOR_CHECKPOINT_VERSION,
+    }:
+        raise MarketingAIError
+    state.setdefault(
+        "checkpoint_version",
+        _CREATIVE_DIRECTOR_CHECKPOINT_VERSION,
+    )
     calls = state.get("calls")
     if type(calls) is not int or not 0 <= calls <= _MAX_CREATIVE_DIRECTOR_CALLS:
         raise MarketingAIError
@@ -3352,15 +3452,24 @@ async def _creative_direction_with_fallback(
             return
         if _image_generation_epoch(value) != epoch:
             raise MarketingStateError
-        value.creative_metadata = {
+        metadata = {
             **(value.creative_metadata or {}), "director_state": deepcopy(state),
         }
-        await _flush(session)
+        try:
+            metadata_bytes = _guard_creative_metadata_size(metadata)
+        except MarketingPersistenceError:
+            await _rollback_session(session)
+            raise
+        value.creative_metadata = metadata
+        await _flush_creative_direction_state(
+            session,
+            metadata_bytes=metadata_bytes,
+        )
         if persist_progress:
-            try:
-                await session.commit()
-            except SQLAlchemyError:
-                raise MarketingPersistenceError from None
+            await _commit_creative_direction_state(
+                session,
+                metadata_bytes=metadata_bytes,
+            )
 
     def viable(direction: CreativeDirectionPlan) -> bool:
         return creative_direction_meets_quality_floor(direction) and (
@@ -3369,36 +3478,93 @@ async def _creative_direction_with_fallback(
         )
 
     async def remember(direction: CreativeDirectionPlan) -> None:
-        state["plans"][str(image_attempt)] = direction.model_dump(mode="json")
+        if value is None:
+            # This path is used only by non-persisted unit-level direction tests.
+            state["plans"][str(image_attempt)] = direction.model_dump(mode="json")
+        else:
+            state["plans"][str(image_attempt)] = CreativeDirectionCheckpoint(
+                generation_epoch=epoch,
+                image_attempt=image_attempt,
+                selected_concept=CreativeConceptProposal.model_validate(
+                    direction.selected_concept.model_dump(exclude={"scorecard"})
+                ),
+                research_fingerprint=direction.research_fingerprint,
+                used_live_research=direction.used_live_research,
+                used_ai_synthesis=direction.used_ai_synthesis,
+            ).model_dump(mode="json")
         await save()
 
     cached = state["plans"].get(str(image_attempt))
     if cached is not None:
+        if not isinstance(cached, dict):
+            raise MarketingAIError
         try:
-            cached_plan = CreativeDirectionPlan.model_validate(cached)
-            # Never treat persisted numeric scores as authority after recovery.
-            direction = build_creative_direction(
-                strategy=strategy, research=research, context=context,
-                story_mode=story_mode,
-                authoritative_context=authoritative_context,
-                synthesis=CreativeDirectorSynthesis(candidates=tuple(
-                    CreativeConceptProposal.model_validate(
-                        candidate.model_dump(exclude={"scorecard"})
-                    )
-                    for candidate in cached_plan.candidates
-                )),
-            )
+            if cached.get("checkpoint_version") == _CREATIVE_DIRECTOR_CHECKPOINT_VERSION:
+                checkpoint = CreativeDirectionCheckpoint.model_validate(cached)
+                if (
+                    checkpoint.generation_epoch != epoch
+                    or checkpoint.image_attempt != image_attempt
+                ):
+                    raise ValueError("Creative direction checkpoint identity changed")
+                # Never treat persisted numeric scores as authority after recovery.
+                direction = revalidate_selected_creative_concept(
+                    selected_concept=checkpoint.selected_concept,
+                    strategy=strategy,
+                    research=research,
+                    context=context,
+                    story_mode=story_mode,
+                    authoritative_context=authoritative_context,
+                    research_fingerprint=checkpoint.research_fingerprint,
+                    used_live_research=checkpoint.used_live_research,
+                    used_ai_synthesis=checkpoint.used_ai_synthesis,
+                )
+                cached_selected = checkpoint.selected_concept.model_dump()
+            else:
+                # Read older full-plan checkpoints for a safe rolling upgrade,
+                # but immediately replace them with the compact selected-only
+                # form. Persisted scorecards are never used as authority.
+                cached_plan = CreativeDirectionPlan.model_validate(cached)
+                direction = build_creative_direction(
+                    strategy=strategy, research=research, context=context,
+                    story_mode=story_mode,
+                    authoritative_context=authoritative_context,
+                    synthesis=CreativeDirectorSynthesis(candidates=tuple(
+                        CreativeConceptProposal.model_validate(
+                            candidate.model_dump(exclude={"scorecard"})
+                        )
+                        for candidate in cached_plan.candidates
+                    )),
+                )
+                cached_selected = cached_plan.selected_concept.model_dump(
+                    exclude={"scorecard"}
+                )
         except (ValidationError, ValueError):
             raise MarketingAIError from None
         if (
             not viable(direction)
             or direction.selected_concept.model_dump(exclude={"scorecard"})
-            != cached_plan.selected_concept.model_dump(exclude={"scorecard"})
+            != cached_selected
         ):
             # A changed winner cannot be attached to an already purchased image.
             raise MarketingAIError
+        if cached.get("checkpoint_version") != _CREATIVE_DIRECTOR_CHECKPOINT_VERSION:
+            state["plans"][str(image_attempt)] = CreativeDirectionCheckpoint(
+                generation_epoch=epoch,
+                image_attempt=image_attempt,
+                selected_concept=CreativeConceptProposal.model_validate(
+                    direction.selected_concept.model_dump(exclude={"scorecard"})
+                ),
+                research_fingerprint=direction.research_fingerprint,
+                used_live_research=direction.used_live_research,
+                used_ai_synthesis=direction.used_ai_synthesis,
+            ).model_dump(mode="json")
+            await save()
         return direction.model_copy(update={
-            "used_ai_synthesis": cached_plan.used_ai_synthesis,
+            "used_ai_synthesis": (
+                direction.used_ai_synthesis
+                if cached.get("checkpoint_version") == _CREATIVE_DIRECTOR_CHECKPOINT_VERSION
+                else cached_plan.used_ai_synthesis
+            ),
         }), empty_metadata
     if state.get("pending") or state.get("rejected"):
         raise MarketingAIError
@@ -4254,10 +4420,53 @@ async def _generate_creative_asset_value(
                     actor_user_id=actor_user_id, stage="direction_quality",
                 )
         elif attempt_plan is None:
-            state["plans"][str(image_attempt)] = direction.model_dump(mode="json")
-            value.creative_metadata = {
+            state["plans"][str(image_attempt)] = CreativeDirectionCheckpoint(
+                generation_epoch=generation_epoch,
+                image_attempt=image_attempt,
+                selected_concept=CreativeConceptProposal.model_validate(
+                    direction.selected_concept.model_dump(exclude={"scorecard"})
+                ),
+                research_fingerprint=direction.research_fingerprint,
+                used_live_research=direction.used_live_research,
+                used_ai_synthesis=direction.used_ai_synthesis,
+            ).model_dump(mode="json")
+            metadata = {
                 **(value.creative_metadata or {}), "director_state": state,
             }
+            try:
+                _guard_creative_metadata_size(metadata)
+            except MarketingPersistenceError:
+                await _rollback_session(session)
+                raise
+            value.creative_metadata = metadata
+        elif (
+            isinstance(attempt_plan, dict)
+            and attempt_plan.get("checkpoint_version")
+            != _CREATIVE_DIRECTOR_CHECKPOINT_VERSION
+        ):
+            # A legacy caller or an older worker may have supplied a full plan
+            # without passing through the checkpoint upgrader above. Compact it
+            # before the next creative metadata flush.
+            state["checkpoint_version"] = _CREATIVE_DIRECTOR_CHECKPOINT_VERSION
+            state["plans"][str(image_attempt)] = CreativeDirectionCheckpoint(
+                generation_epoch=generation_epoch,
+                image_attempt=image_attempt,
+                selected_concept=CreativeConceptProposal.model_validate(
+                    direction.selected_concept.model_dump(exclude={"scorecard"})
+                ),
+                research_fingerprint=direction.research_fingerprint,
+                used_live_research=direction.used_live_research,
+                used_ai_synthesis=direction.used_ai_synthesis,
+            ).model_dump(mode="json")
+            metadata = {
+                **(value.creative_metadata or {}), "director_state": state,
+            }
+            try:
+                _guard_creative_metadata_size(metadata)
+            except MarketingPersistenceError:
+                await _rollback_session(session)
+                raise
+            value.creative_metadata = metadata
         logger.info("creative_image_attempt attempt=%d", image_attempt,
                     extra={"image_attempt_number": image_attempt})
         if image_attempt > 1:
@@ -4348,6 +4557,7 @@ async def _generate_creative_asset_value(
                 try:
                     await session.commit()
                 except SQLAlchemyError:
+                    await _rollback_session(session)
                     raise MarketingPersistenceError from None
             try:
                 result = await provider.generate_draft(
@@ -5317,6 +5527,7 @@ async def _persist_creative_generation_progress(
         try:
             await session.commit()
         except SQLAlchemyError:
+            await _rollback_session(session)
             raise MarketingPersistenceError from None
 
 
@@ -5349,6 +5560,7 @@ async def _record_creative_generation_dependency_failure(
         try:
             await session.commit()
         except SQLAlchemyError:
+            await _rollback_session(session)
             raise MarketingPersistenceError from None
 
 

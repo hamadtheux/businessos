@@ -105,6 +105,7 @@ from app.services.ad_commerce import synchronize_destination
 from app.services.customer_agent import process_customer_agent_response
 from app.services.automation_copilot import analyze_business_opportunity
 from app.services.billing import BillingEntitlementError
+from app.db.transactions import rollback_session
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +164,7 @@ async def handle_customer_agent_response(
     except CustomerAgentValidationError:
         return HandlerOutcome(False, "invalid_job_state")
     except CustomerAgentPersistenceError:
+        await rollback_session(session)
         return HandlerOutcome(False, "dependency_unavailable", True)
     if result.retryable:
         return HandlerOutcome(
@@ -408,6 +410,7 @@ async def handle_generate_creative_asset(
     except MarketingNotFoundError:
         return HandlerOutcome(False, "resource_not_found")
     except MarketingPersistenceError:
+        await rollback_session(session)
         return HandlerOutcome(False, "dependency_unavailable", True)
     except (MarketingStateError, MarketingValidationError):
         return HandlerOutcome(False, "invalid_job_state")
@@ -464,6 +467,7 @@ async def handle_analyze_business_opportunity(
     except (AIWorkforceConflictError, AIWorkforceValidationError):
         return HandlerOutcome(False, "invalid_job_state")
     except AIWorkforcePersistenceError:
+        await rollback_session(session)
         return HandlerOutcome(False, "dependency_unavailable", True)
 
     if outcome.execution.status == "running":
@@ -499,6 +503,7 @@ async def handle_commerce_sync(
     except CommerceValidationError:
         return HandlerOutcome(False, "invalid_job_state", False)
     except CommercePersistenceError:
+        await rollback_session(session)
         return HandlerOutcome(False, "dependency_unavailable", True)
     return SUCCESS
 
@@ -518,6 +523,7 @@ async def handle_commerce_webhook_reconcile(
     except CommerceNotFoundError:
         return HandlerOutcome(False, "resource_not_found")
     except CommercePersistenceError:
+        await rollback_session(session)
         return HandlerOutcome(False, "dependency_unavailable", True)
     return SUCCESS
 
@@ -551,6 +557,7 @@ async def handle_destination_status_sync(
     except CommerceProviderError as error:
         return HandlerOutcome(False, "provider_unavailable", error.retryable, error.retry_after_seconds)
     except CommercePersistenceError:
+        await rollback_session(session)
         return HandlerOutcome(False, "dependency_unavailable", True)
     return SUCCESS
 
@@ -744,10 +751,12 @@ async def dispatch_job_handler(
     except (AutomationStateError, AutomationValidationError, AutomationConflictError, MarketingStateError):
         return HandlerOutcome(False, "workflow_invalid")
     except (AutomationPersistenceError, IntegrationPersistenceError, MarketingPersistenceError):
+        await rollback_session(session)
         return HandlerOutcome(False, "dependency_unavailable", True)
     except AutomationIntelligenceNotFoundError:
         return HandlerOutcome(False, "resource_not_found")
     except AutomationIntelligenceProviderError:
         return HandlerOutcome(False, "provider_unavailable", True)
     except AutomationIntelligencePersistenceError:
+        await rollback_session(session)
         return HandlerOutcome(False, "dependency_unavailable", True)
