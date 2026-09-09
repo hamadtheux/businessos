@@ -438,7 +438,7 @@ class CreativeDirectionTests(TestCase):
             context=context,
             story_mode="brand_offer",
         )
-        self.assertTrue(creative_direction_meets_quality_floor(plan))
+        self.assertFalse(creative_direction_meets_quality_floor(plan))
         self.assertTrue(
             all(
                 not _brand_offer_has_unsupported_offering_story(candidate)

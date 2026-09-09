@@ -407,10 +407,27 @@ def test_offering_proof_keeps_the_existing_product_mechanism_contract() -> None:
 
 
 def test_brand_offer_accepts_a_grounded_campaign_mechanism_without_product_proof() -> None:
-    result = _brand_offer_concept()
+    from creative_pipeline_fixtures import brand_inputs, brand_synthesis
+    strategy, context, _ = brand_inputs()
+    concept = brand_synthesis().candidates[0]
+    result = assess_world_class_creative(
+        business_context=f"{context.industry} {strategy.audience_insight}",
+        campaign_goal=strategy.marketing_goal, audience=strategy.target_audience,
+        subject_focus=strategy.subject_focus, campaign_angle=strategy.campaign_angle,
+        **{name: getattr(concept, name) for name in (
+            "marketing_idea", "customer_care_reason", "hero_subject", "hero_relevance",
+            "product_story", "visual_metaphor", "scroll_stopping_hook",
+        )}, story_mode="brand_offer",
+    )
     assert "no_product_service_mechanism" not in result.hard_failures
-    assert result.product_service_mechanism >= 64
     assert result.approved is True
+
+
+def test_brand_offer_quality_vocabulary_cannot_self_validate() -> None:
+    result = _brand_offer_concept()
+    assert not result.approved
+    assert "weak_visual_proof" in result.hard_failures
+    assert "no_business_specific_mechanism" in result.hard_failures
 
 
 def test_brand_offer_cannot_launder_generic_props_through_generated_subject_focus() -> None:

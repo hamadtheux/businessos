@@ -67,7 +67,9 @@ def get_creative_director_provider() -> AIAgentProvider | None:
     if not settings.creative_director_enabled:
         return None
     try:
-        return create_openai_provider(settings)
+        # The logical creative job owns its initial + one repair budget.
+        # Other text-agent workflows retain their configured retry policy.
+        return create_openai_provider(settings.model_copy(update={"openai_max_retries": 0}))
     except AIAgentProviderError:
         return None
 

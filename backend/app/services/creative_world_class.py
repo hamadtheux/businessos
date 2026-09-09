@@ -383,6 +383,97 @@ def _bounded(value: float) -> int:
     return max(0, min(100, round(value)))
 
 
+# Design instructions and quality labels are not evidence about a business or a
+# scene. Remove them before checking the relationships between the brief, hero,
+# advertising idea and visible consequence. This is part of the existing gate,
+# not an additional score or a raised quality threshold.
+_DIRECTION_LANGUAGE = frozenset("""
+    campaign specific grounded audience brand branded owned category context
+    tension contrast reveal consequence transition transformation unexpected
+    visual proof mechanism moment occasion before after cause outcome because
+    creates turns helps delivers without consequence supported credible directly
+    demonstrate demonstrates demonstration describe describes represents represent
+    compatibility field schema offering idea meaning meaningful distinctive
+    confident confidence premium modern cinematic editorial quiet clear clarity
+    focus controlled commercial strategic quality value generic relevant
+    connect connects connect directly immediate immediately unmistakable
+    customer customers business businesses owner owners small real only use
+    scene story hero subject focal launch day decision signals choices path
+    marketing intention intended atmosphere mood audience grounded
+""".split())
+
+# Observable actions, rather than promises such as "transforms the campaign".
+# These verbs only establish executability when their clause contains a subject
+# grounded in the brief and shared with the hero; they confer no quality points.
+_SCENE_ACTION = re.compile(
+    r"\b(?:block(?:s|ed|ing)?|open(?:s|ed|ing)?|clos(?:e|es|ed|ing)|"
+    r"hold(?:s|ing)?|held|pull(?:s|ed|ing)?|push(?:es|ed|ing)?|"
+    r"stack(?:s|ed|ing)?|pil(?:e|es|ed|ing)|cover(?:s|ed|ing)?|"
+    r"spill(?:s|ed|ing)?|pour(?:s|ed|ing)?|cast(?:s|ing)?|"
+    r"cut(?:s|ting)?|split(?:s|ting)?|stretch(?:es|ed|ing)?|"
+    r"fold(?:s|ed|ing)?|balanc(?:e|es|ed|ing)|weigh(?:s|ed|ing)?|"
+    r"hang(?:s|ing)?|hung|lift(?:s|ed|ing)?|carry|carries|carrying|"
+    r"reach(?:es|ed|ing)?|cross(?:es|ed|ing)?|pass(?:es|ed|ing)?|"
+    r"touch(?:es|ed|ing)?|meet(?:s|ing)?|separat(?:e|es|ed|ing)|"
+    r"replac(?:e|es|ed|ing)|fill(?:s|ed|ing)?|empty|empties|"
+    r"stop(?:s|ped|ping)?|scatter(?:s|ed|ing)?|squeez(?:e|es|ed|ing))\b",
+    re.IGNORECASE,
+)
+
+
+def creative_story_evidence_tokens(value: str) -> frozenset[str]:
+    """Scene/brief terms without self-authored quality or presentation labels."""
+    return _normalized_relevance_tokens(value) - _DIRECTION_LANGUAGE
+
+
+def _grounded_brand_story_evidence(
+    *, business_context: str, campaign_goal: str, audience: str,
+    campaign_angle: str, marketing_idea: str, customer_care_reason: str,
+    hero_subject: str, product_story: str,
+) -> tuple[int, int, int] | None:
+    """Require a connected, executable scene; labels cannot establish one.
+
+    Generated subject_focus and aesthetic fields are deliberately excluded as
+    authority. Independent brief anchors must occur in the hero AND its action
+    clause, and also connect the idea to the audience's reason to care. This is
+    conservative screening; final image semantics still require the critic.
+    """
+    context = creative_story_evidence_tokens(business_context)
+    brief = context | creative_story_evidence_tokens(
+        f"{campaign_goal} {audience} {campaign_angle}"
+    )
+    hero = creative_story_evidence_tokens(hero_subject)
+    idea = creative_story_evidence_tokens(marketing_idea)
+    care = creative_story_evidence_tokens(customer_care_reason)
+    story = creative_story_evidence_tokens(product_story)
+    shared_subject = hero & story & brief
+    action_clauses = re.split(r"[.;]", product_story)
+    # A single prop being held is not a cause -> visible consequence. Require
+    # interacting observable states/actions, connected to the same brief subject.
+    observable_actions = {
+        match.group().casefold() for match in _SCENE_ACTION.finditer(product_story)
+    }
+    connected = (
+        len(observable_actions) >= 2
+        and len(shared_subject) >= 2
+        and bool(shared_subject & context)
+        and bool(idea & shared_subject)
+        and bool(care & brief & (idea | story))
+        and any(
+            _SCENE_ACTION.search(clause)
+            and len(creative_story_evidence_tokens(clause) & shared_subject) >= 2
+            # A relationship needs detail beyond copying the subject's name.
+            and len(creative_story_evidence_tokens(clause) - shared_subject) >= 2
+            for clause in action_clauses
+        )
+    )
+    if not connected:
+        return None
+    # Counts describe grounded relationships, never quality words. They feed
+    # the existing score formulas without adding another engine or changing bars.
+    return len(observable_actions), len(shared_subject), len(idea & shared_subject)
+
+
 def assess_world_class_creative(
     *,
     business_context: str,
@@ -445,6 +536,14 @@ def assess_world_class_creative(
     concept_tokens = _tokens(concept_text)
     subject_tokens = _tokens(subject_focus)
     business_tokens = _tokens(business_context)
+    if story_mode == "brand_offer":
+        # Generated subject_focus and design vocabulary cannot boost grounding.
+        strategy_tokens = creative_story_evidence_tokens(
+            f"{business_context} {campaign_goal} {audience} {campaign_angle}"
+        )
+        concept_tokens = creative_story_evidence_tokens(concept_text)
+        subject_tokens = creative_story_evidence_tokens(f"{audience} {campaign_angle}")
+        business_tokens = creative_story_evidence_tokens(business_context)
 
     strategy_overlap = _overlap(concept_tokens, strategy_tokens)
     subject_overlap = _overlap(concept_tokens, subject_tokens)
@@ -496,6 +595,21 @@ def assess_world_class_creative(
         f"{marketing_idea} {scroll_stopping_hook} {visual_metaphor}",
         _COMMERCIAL_IDEA_MARKERS,
     )
+
+    grounded_brand_story = True
+    if story_mode == "brand_offer":
+        evidence = _grounded_brand_story_evidence(
+            business_context=business_context, campaign_goal=campaign_goal,
+            audience=audience, campaign_angle=campaign_angle,
+            marketing_idea=marketing_idea, customer_care_reason=customer_care_reason,
+            hero_subject=hero_subject, product_story=product_story,
+        )
+        grounded_brand_story = evidence is not None
+        if evidence is None:
+            mechanism_count = causality_count = proof_count = commercial_idea_count = 0
+        else:
+            mechanism_count, proof_count, commercial_idea_count = evidence
+            causality_count = mechanism_count
 
     generic_lifestyle_without_mechanism = (
         lifestyle_count >= 2
@@ -618,6 +732,8 @@ def assess_world_class_creative(
     )
 
     failures: list[WorldClassFailure] = []
+    if not grounded_brand_story:
+        failures.extend(("no_business_specific_mechanism", "weak_visual_proof"))
 
     if generic_lifestyle_without_mechanism:
         failures.append("generic_lifestyle_stock_scene")

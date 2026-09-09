@@ -340,6 +340,27 @@ def _visual_result(review: CreativeVisualReview) -> CreativeVisualReviewResult:
 
 
 class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        # These tests isolate rendering, storage, semantic review and delivery.
+        # Concept selection now fails closed without a strong Director; supply
+        # an actually scored scene here. The full Director/gate/spend flow is
+        # exercised without this stub in test_creative_pipeline_costs.py.
+        from creative_pipeline_fixtures import brand_plan
+        plan = brand_plan()
+
+        async def selected_direction(session, **kwargs):
+            value = kwargs.get("value")
+            if value is not None:
+                value.creative_metadata = {
+                    **(value.creative_metadata or {}),
+                    "director_state": {"plans": {"1": plan.model_dump(mode="json")}},
+                }
+            return plan, AIAgentProviderMetadata()
+
+        selection = patch("app.services.marketing._creative_direction_with_fallback", side_effect=selected_direction)
+        selection.start()
+        self.addCleanup(selection.stop)
+
     def test_pagination_and_search_are_bounded(self) -> None:
         self.assertEqual(_page(3, 10), (20, 10))
         self.assertEqual(_term(" Summer "), "Summer")
@@ -2739,7 +2760,7 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             image_provider.generate_draft.await_count,
-            2,
+            1,
         )
         self.assertEqual(
             reviewer.review.await_count,

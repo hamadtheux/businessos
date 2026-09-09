@@ -258,7 +258,7 @@ class CreativeProviderTests(IsolatedAsyncioTestCase):
         self.assertIsNone(failure_log.provider_error_code)
         self.assertIsNone(failure_log.provider_error_type)
 
-    def test_image_provider_uses_dedicated_timeout(self) -> None:
+    def test_image_provider_uses_dedicated_timeout_without_hidden_retries(self) -> None:
         config = SimpleNamespace(
             openai_api_key_value="test-provider-key",
             openai_timeout_seconds=45.0,
@@ -274,7 +274,7 @@ class CreativeProviderTests(IsolatedAsyncioTestCase):
         client_class.assert_called_once_with(
             api_key="test-provider-key",
             timeout=237.0,
-            max_retries=2,
+            max_retries=0,
         )
         self.assertIsInstance(provider, OpenAICreativeGenerationProvider)
         self.assertEqual(provider.model, "gpt-image-2")

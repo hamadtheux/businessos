@@ -61,6 +61,7 @@ _STOPWORDS = frozenset(
 
 from app.services.creative_world_class import (
     CreativeStoryMode,
+    creative_story_evidence_tokens,
     assess_world_class_creative,
 )
 
@@ -200,6 +201,16 @@ _BRAND_OFFER_FEATURE_STORY = re.compile(
 )
 
 
+_BRAND_OFFER_UNSUPPORTED_CLAIM = re.compile(
+    r"\b(?:guarantees?|guaranteed|testimonials?|proven results)\b|"
+    r"\b(?:saves?|saved|reduces?|reduced|increases?|increased|boosts?|boosted|"
+    r"doubles?|doubled|triples?|tripled)\b.{0,45}"
+    r"\b(?:revenue|profit|sales|conversion|conversions|hours|costs|income)\b|"
+    r"\b(?:revenue|profit|sales|conversion|income)\b.{0,30}\d+\s*%",
+    re.IGNORECASE,
+)
+
+
 def _brand_offer_text_has_unsupported_offering_story(value: str) -> bool:
     """Detect positive offering/UI stories that brand mode cannot authorize."""
     return any(
@@ -209,6 +220,7 @@ def _brand_offer_text_has_unsupported_offering_story(value: str) -> bool:
             _BRAND_OFFER_INVENTED_ARTIFACT,
             _BRAND_OFFER_OFFERING_DEPICTION,
             _BRAND_OFFER_FEATURE_STORY,
+            _BRAND_OFFER_UNSUPPORTED_CLAIM,
         )
     )
 
@@ -242,6 +254,10 @@ def _brand_offer_has_unsupported_offering_story(
         proposal.mood,
         proposal.visual_density,
         proposal.background_complexity,
+        proposal.brand_expression,
+        proposal.text_zone,
+        proposal.offer_treatment,
+        proposal.cta_treatment,
         *proposal.inspiration_principles,
     )
     return any(
@@ -542,12 +558,28 @@ def build_creative_direction(
     )
 
 
+def creative_directions_materially_differ(
+    previous: CreativeDirectionPlan, revised: CreativeDirectionPlan,
+) -> bool:
+    old, new = previous.selected_concept, revised.selected_concept
+    return all(
+        _jaccard_similarity(
+            creative_story_evidence_tokens(first), creative_story_evidence_tokens(second),
+        ) <= 0.72
+        for first, second in (
+            (old.hero_subject, new.hero_subject),
+            (old.product_story, new.product_story),
+        )
+    )
+
+
 def build_creative_director_task(
     *,
     strategy: CreativeStrategyProposal,
     research: CreativeResearchBundle,
     context: PublicCreativeResearchContext,
     story_mode: CreativeStoryMode = "offering_proof",
+    repair: bool = False,
 ) -> str:
     """
     Build one bounded Creative Director task without blind truncation.
@@ -692,6 +724,14 @@ def build_creative_director_task(
         "not final copy."
     )
 
+    if repair:
+        mandatory_suffix += (
+            "\nSERVER REPAIR: Previous direction failed the concept gate. Replace the "
+            "hero, action and visible consequence, not adjectives. Ground the same "
+            "concrete subject in the brief, hero, idea and action clause of product_story. "
+            "Explain the audience's reason to care. Quality labels are not evidence. "
+            "Do not invent facts or offerings. This is the only text repair."
+        )
     fixed_task = mandatory_prefix + mandatory_suffix
 
     if len(fixed_task) > max_task_length:
@@ -1521,6 +1561,23 @@ def _score_candidates(
             "genericness_risk": genericness_risk,
             "replaceable_brand_risk": replaceable_brand_risk,
         }
+        if story_mode == "brand_offer":
+            # One commercial policy owns these dimensions. The older keyword
+            # heuristics must neither reward boilerplate nor penalize a grounded
+            # scene merely because it omits those labels.
+            genericness_risk = max(
+                world_class.stock_lifestyle_risk, world_class.decorative_abstraction_risk,
+            )
+            replaceable_brand_risk = world_class.replaceable_brand_risk
+            dimensions.update(
+                business_specific_relevance=world_class.business_specificity,
+                marketing_idea_strength=world_class.marketing_idea_strength,
+                commercial_sophistication=world_class.commercial_readiness,
+                product_relevance=world_class.product_service_mechanism,
+                visual_storytelling=world_class.visual_proof,
+                genericness_risk=genericness_risk,
+                replaceable_brand_risk=replaceable_brand_risk,
+            )
         if unsupported_brand_story:
             # A disobedient Director cannot earn its way past a server-owned
             # no-invention contract with otherwise polished score dimensions.
@@ -1766,18 +1823,7 @@ def _genericness_risk(
             "workflows",
         )
         if story_mode == "offering_proof"
-        else (
-            "audience tension",
-            "brand",
-            "campaign",
-            "consequence",
-            "contrast",
-            "occasion",
-            "reveal",
-            "transition",
-            "transformation",
-            "unexpected",
-        )
+        else ()
     )
     decorative_count = sum(
         _contains_any(value, (marker,)) for marker in decorative_markers
@@ -1816,18 +1862,7 @@ def _replaceable_brand_risk(
             "workflows",
         )
         if story_mode == "offering_proof"
-        else (
-            "audience tension",
-            "campaign mechanism",
-            "consequence",
-            "contrast",
-            "occasion",
-            "reveal",
-            "transition",
-            "transformation",
-            "unexpected",
-            "visual tension",
-        )
+        else ()
     )
     explicit_story = _contains_any(
         f"{proposal.marketing_idea} {proposal.product_story} {proposal.hero_relevance}",

@@ -530,7 +530,9 @@ def create_creative_generation_provider(
     client = AsyncOpenAI(
         api_key=api_key,
         timeout=config.openai_image_timeout_seconds,
-        max_retries=config.openai_max_retries,
+        # The epoch/attempt state machine owns retries. An SDK replay after an
+        # ambiguous transport failure could purchase an uncounted second image.
+        max_retries=0,
     )
 
     return OpenAICreativeGenerationProvider(

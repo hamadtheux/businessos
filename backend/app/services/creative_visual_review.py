@@ -302,6 +302,25 @@ def validate_visual_review_for_mode(
     return review
 
 
+def semantic_review_has_concept_failure(review: CreativeVisualReview) -> bool:
+    """Server-owned spending decision; never trust free-form repair prose.
+
+    The provider schema's raw_visual bucket covers both idea and execution
+    defects. A concept defect takes precedence over simultaneous render defects.
+    """
+    return bool(set(review.hard_failures).intersection({
+        "meaningless_focal_story", "replaceable_brand_creative",
+        "commercially_weak", "generic_template_output",
+        "irrelevant_visual", "irrelevant_decorative_art",
+        "decorative_abstraction_dominates", "no_product_service_story",
+    })) or (
+        not review.approved and (
+            review.product_relevance < 60 or review.visual_storytelling < 60
+            or review.business_specific_relevance < 60 or review.generic_template_risk > 48
+        )
+    )
+
+
 def build_visual_review_task(
     request: CreativeVisualReviewRequest,
 ) -> str:
