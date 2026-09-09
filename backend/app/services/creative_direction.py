@@ -12,6 +12,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.schemas.ai_agent import MAX_AGENT_TASK_LENGTH
 from app.schemas.marketing import CreativeStrategyProposal
 from app.services.creative_research import (
     CreativeResearchBundle,
@@ -573,6 +574,16 @@ def creative_directions_materially_differ(
     )
 
 
+class CreativeDirectorTaskBudgetError(ValueError):
+    """Safe task-construction diagnostics without retaining campaign content."""
+
+    def __init__(self, *, task_length: int, mandatory_length: int) -> None:
+        super().__init__("Creative Director task exceeds the safe task budget")
+        self.task_length = task_length
+        self.mandatory_length = mandatory_length
+        self.max_task_length = MAX_AGENT_TASK_LENGTH
+
+
 def build_creative_director_task(
     *,
     strategy: CreativeStrategyProposal,
@@ -589,7 +600,10 @@ def build_creative_director_task(
     may be shortened to satisfy the global 4,000-character task ceiling.
     """
 
-    max_task_length = 4000
+    # Repair policy belongs exclusively to the runtime's bounded server_context.
+    # Keep this task identical for initial and repair calls, including its facts
+    # and mandatory safety policy. The repair flag remains caller-compatible.
+    max_task_length = MAX_AGENT_TASK_LENGTH
 
     if story_mode not in {"offering_proof", "brand_offer"}:
         raise ValueError("Creative story mode is invalid")
@@ -724,20 +738,12 @@ def build_creative_director_task(
         "not final copy."
     )
 
-    if repair:
-        mandatory_suffix += (
-            "\nSERVER REPAIR: Previous direction failed the concept gate. Replace the "
-            "hero, action and visible consequence, not adjectives. Ground the same "
-            "concrete subject in the brief, hero, idea and action clause of product_story. "
-            "Explain the audience's reason to care. Quality labels are not evidence. "
-            "Do not invent facts or offerings. This is the only text repair."
-        )
     fixed_task = mandatory_prefix + mandatory_suffix
 
     if len(fixed_task) > max_task_length:
         # Never truncate authoritative campaign values or mandatory policy.
-        raise ValueError(
-            "Creative Director mandatory task content exceeds the safe task budget"
+        raise CreativeDirectorTaskBudgetError(
+            task_length=len(fixed_task), mandatory_length=len(fixed_task),
         )
 
     remaining = max_task_length - len(fixed_task)
@@ -811,8 +817,8 @@ def build_creative_director_task(
     task = mandatory_prefix + dynamic + mandatory_suffix
 
     if len(task) > max_task_length:
-        raise ValueError(
-            "Creative Director task exceeded the safe task budget"
+        raise CreativeDirectorTaskBudgetError(
+            task_length=len(task), mandatory_length=len(fixed_task),
         )
 
     required_contract_markers = (

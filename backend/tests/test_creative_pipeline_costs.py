@@ -78,7 +78,11 @@ async def test_weak_initial_strong_text_repair_buys_only_after_second_director(r
     assert runtime.execute.await_count == 2
     assert image.generate_draft.await_count == 1
     task = runtime.request.await_args.args[2]
-    assert "SERVER REPAIR" in task and len(task) <= 4000
+    assert "SERVER REPAIR" not in task and len(task) <= 4000
+    repair_context = json.loads(runtime.execute.await_args.kwargs["server_context"])
+    assert repair_context["reason"] == "concept_quality_failed"
+    assert "This is the only text repair" in repair_context["instruction"]
+    assert set(repair_context["rejected_proposal"]) == {"hero", "story"}
 
 
 @pytest.mark.asyncio
@@ -104,6 +108,7 @@ async def test_concept_failure_requires_materially_new_validated_direction(runti
     result = await run(asset,image,review)
     assert runtime.execute.await_count == 2
     assert "PRIVATE_CRITIC_PROSE" not in runtime.request.await_args.args[2]
+    assert "PRIVATE_CRITIC_PROSE" not in runtime.execute.await_args.kwargs["server_context"]
     assert image.generate_draft.await_count == (2 if repair == "different" else 1)
     assert result.generation_status == ("ready" if repair == "different" else "failed")
     if repair == "different":
