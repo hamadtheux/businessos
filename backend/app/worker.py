@@ -95,8 +95,25 @@ async def process_claimed_job(job: BackgroundJob, *, worker_id: str) -> None:
                 outcome = await dispatch_job_handler(session, job)
                 await session.commit()
     except Exception as exc:
+        # Render's default log presentation does not surface structured ``extra``
+        # fields. Emit only safe exception diagnostics in the visible message:
+        # exception class and sanitized Python frame locations. Never emit
+        # ``str(exc)``, provider payloads, business context, credentials, or
+        # source-line contents.
+        frames: list[str] = []
+        traceback_value = exc.__traceback__
+        while traceback_value is not None:
+            frame = traceback_value.tb_frame
+            frames.append(
+                f"{os.path.basename(frame.f_code.co_filename)}:"
+                f"{traceback_value.tb_lineno}:{frame.f_code.co_name}"
+            )
+            traceback_value = traceback_value.tb_next
+        safe_stack = ">".join(frames[-10:]) or "unavailable"
         logger.error(
-            "job_handler_failed",
+            "job_handler_failed exception_type=%s stack=%s",
+            type(exc).__name__,
+            safe_stack,
             extra={
                 "job_id": str(job.id),
                 "business_id": str(job.business_id),
