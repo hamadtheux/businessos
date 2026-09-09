@@ -112,8 +112,21 @@ _DECORATIVE_MARKERS: Final[tuple[str, ...]] = (
     "shapes",
     "swirl",
     "swirls",
+    "digital network",
+    "floating nodes",
+    "glowing nodes",
+    "hologram",
+    "holographic",
     "wave",
     "waves",
+)
+
+_GENERIC_NETWORK_MARKERS: Final[tuple[str, ...]] = (
+    "digital network",
+    "floating nodes",
+    "glowing nodes",
+    "hologram",
+    "holographic network",
 )
 
 
@@ -400,6 +413,20 @@ _DIRECTION_LANGUAGE = frozenset("""
     customer customers business businesses owner owners small real only use
     scene story hero subject focal launch day decision signals choices path
     marketing intention intended atmosphere mood audience grounded
+    coordinate coordinates coordinated coordinating route routes routed routing
+    handoff handoffs connect connects connected connecting
+    converge converges converged converging
+    assign assigns assigned assigning
+    distribute distributes distributed distributing
+    organize organizes organized organizing
+    synchronize synchronizes synchronized synchronizing
+    prioritize prioritizes prioritized prioritizing
+    surface surfaces surfaced surfacing
+    track tracks tracked tracking
+    respond responds responded responding
+    flow flows flowed flowing
+    move moves moved moving
+    pass passes passed passing
 """.split())
 
 # Observable actions, rather than promises such as "transforms the campaign".
@@ -421,6 +448,21 @@ _SCENE_ACTION = re.compile(
 )
 
 
+# A brand campaign can also communicate a real business relationship without
+# relying on a literal physical action. These verbs describe observable
+# operational relationships, but they are removed from evidence-token scoring
+# above so their mere presence cannot self-certify quality.
+_OPERATIONAL_ACTION = re.compile(
+    r"\b(?:coordinate(?:s|d|ing)?|route(?:s|d|ing)?|handoff(?:s)?|"
+    r"connect(?:s|ed|ing)?|converge(?:s|d|ing)?|assign(?:s|ed|ing)?|"
+    r"distribute(?:s|d|ing)?|organize(?:s|d|ing)?|"
+    r"synchroniz(?:e|es|ed|ing)|prioritiz(?:e|es|ed|ing)|"
+    r"surface(?:s|d|ing)?|track(?:s|ed|ing)?|respond(?:s|ed|ing)?|"
+    r"flow(?:s|ed|ing)?|move(?:s|d|ing)?|pass(?:es|ed|ing)?)\b",
+    re.IGNORECASE,
+)
+
+
 def creative_story_evidence_tokens(value: str) -> frozenset[str]:
     """Scene/brief terms without self-authored quality or presentation labels."""
     return _normalized_relevance_tokens(value) - _DIRECTION_LANGUAGE
@@ -430,48 +472,119 @@ def _grounded_brand_story_evidence(
     *, business_context: str, campaign_goal: str, audience: str,
     campaign_angle: str, marketing_idea: str, customer_care_reason: str,
     hero_subject: str, product_story: str,
+    authoritative_evidence_segments: tuple[frozenset[str], ...] = (),
 ) -> tuple[int, int, int] | None:
-    """Require a connected, executable scene; labels cannot establish one.
+    """Require a connected executable brand scene without keyword laundering.
 
-    Generated subject_focus and aesthetic fields are deliberately excluded as
-    authority. Independent brief anchors must occur in the hero AND its action
-    clause, and also connect the idea to the audience's reason to care. This is
-    conservative screening; final image semantics still require the critic.
+    Two independently valid forms are supported:
+
+    1. A physical observable scene, preserving the original strict behavior.
+    2. A grounded operational relationship for businesses such as SaaS,
+       professional services, automation, platforms, and other non-physical
+       categories.
+
+    Generated quality labels and mechanism verbs are never grounding evidence.
+    The operational path must connect multiple independent campaign-authorized
+    subject terms through multiple observable relationships.
     """
     context = creative_story_evidence_tokens(business_context)
-    brief = context | creative_story_evidence_tokens(
-        f"{campaign_goal} {audience} {campaign_angle}"
+    campaign_anchor = creative_story_evidence_tokens(
+        f"{campaign_goal} {campaign_angle}"
     )
+    brief = (
+        context
+        | campaign_anchor
+        | creative_story_evidence_tokens(audience)
+    )
+
     hero = creative_story_evidence_tokens(hero_subject)
     idea = creative_story_evidence_tokens(marketing_idea)
     care = creative_story_evidence_tokens(customer_care_reason)
     story = creative_story_evidence_tokens(product_story)
+
     shared_subject = hero & story & brief
     action_clauses = re.split(r"[.;]", product_story)
-    # A single prop being held is not a cause -> visible consequence. Require
-    # interacting observable states/actions, connected to the same brief subject.
-    observable_actions = {
-        match.group().casefold() for match in _SCENE_ACTION.finditer(product_story)
+
+    physical_actions = {
+        match.group().casefold()
+        for match in _SCENE_ACTION.finditer(product_story)
     }
-    connected = (
-        len(observable_actions) >= 2
+    operational_actions = {
+        match.group().casefold()
+        for match in _OPERATIONAL_ACTION.finditer(product_story)
+    }
+
+    common_grounding = (
+        bool(idea & shared_subject)
+        and bool(care & brief & (idea | story))
+    )
+
+    physical_connected = (
+        common_grounding
         and len(shared_subject) >= 2
         and bool(shared_subject & context)
-        and bool(idea & shared_subject)
-        and bool(care & brief & (idea | story))
+        and len(physical_actions) >= 2
         and any(
             _SCENE_ACTION.search(clause)
-            and len(creative_story_evidence_tokens(clause) & shared_subject) >= 2
-            # A relationship needs detail beyond copying the subject's name.
-            and len(creative_story_evidence_tokens(clause) - shared_subject) >= 2
+            and len(
+                creative_story_evidence_tokens(clause)
+                & shared_subject
+            ) >= 2
+            and len(
+                creative_story_evidence_tokens(clause)
+                - shared_subject
+            ) >= 2
             for clause in action_clauses
         )
     )
-    if not connected:
+
+    operational_connected = (
+        common_grounding
+        and len(shared_subject) >= 3
+        and len(idea & shared_subject) >= 2
+        and len(operational_actions) >= 2
+        # Operational subjects must be present in the separately assembled,
+        # tenant-scoped Business Brain. Strategy prose cannot authorize them.
+        # Terms must co-occur in one positive source segment; a global union of
+        # unrelated sources cannot manufacture a capability.
+        and max(
+            (
+                len(shared_subject & segment)
+                for segment in authoritative_evidence_segments
+            ),
+            default=0,
+        ) >= 3
+        and any(
+            _OPERATIONAL_ACTION.search(clause)
+            and len(
+                creative_story_evidence_tokens(clause)
+                & shared_subject
+            ) >= 3
+            and len(
+                creative_story_evidence_tokens(clause)
+                - shared_subject
+            ) >= 2
+            for clause in action_clauses
+        )
+    )
+
+    if not physical_connected and not operational_connected:
         return None
-    # Counts describe grounded relationships, never quality words. They feed
-    # the existing score formulas without adding another engine or changing bars.
-    return len(observable_actions), len(shared_subject), len(idea & shared_subject)
+
+    actions = (
+        physical_actions
+        if physical_connected
+        else operational_actions
+    )
+
+    # These values feed the existing score formulas. Cap each relationship
+    # signal so repeating five business-function names cannot manufacture
+    # perfect scores.
+    return (
+        min(2, len(actions)),
+        min(2, len(shared_subject)),
+        min(2, len(idea & shared_subject)),
+    )
 
 
 def assess_world_class_creative(
@@ -489,6 +602,7 @@ def assess_world_class_creative(
     visual_metaphor: str,
     scroll_stopping_hook: str,
     story_mode: CreativeStoryMode = "offering_proof",
+    authoritative_evidence_segments: tuple[frozenset[str], ...] = (),
 ) -> WorldClassCreativeAssessment:
     """
     Deterministically reject attractive-but-generic advertising concepts.
@@ -603,6 +717,7 @@ def assess_world_class_creative(
             audience=audience, campaign_angle=campaign_angle,
             marketing_idea=marketing_idea, customer_care_reason=customer_care_reason,
             hero_subject=hero_subject, product_story=product_story,
+            authoritative_evidence_segments=authoritative_evidence_segments,
         )
         grounded_brand_story = evidence is not None
         if evidence is None:
@@ -625,8 +740,10 @@ def assess_world_class_creative(
 
     decorative_without_story = (
         decorative_count >= 2
-        and mechanism_count == 0
-        and proof_count == 0
+        and (
+            (mechanism_count == 0 and proof_count == 0)
+            or _contains_any(concept_text, _GENERIC_NETWORK_MARKERS)
+        )
     )
 
     business_specificity = _bounded(
@@ -876,7 +993,7 @@ Every concept must communicate, in one visual read:
 MANDATORY:
 
 - Build an actual advertising mechanism: tension, reveal, contrast, transition,
-  consequence, occasion, transformation, or another visually executable campaign idea.
+  consequence, occasion, transformation, or a grounded operational relationship.
 - The visual story must stop making sense if an unrelated company replaces the brand.
 - The hero must carry commercial meaning, not merely aesthetic polish.
 - Objects and environments must be causally relevant to grounded campaign context.
@@ -970,8 +1087,8 @@ or unsupported outcome.
 
 The raw visual must instead prove the grounded campaign idea through a credible
 campaign-specific visual mechanism such as tension, contrast, reveal, transition,
-occasion, consequence, or another visually meaningful brand-owned moment supported
-by the supplied direction.
+occasion, consequence, or a grounded operational relationship supported by the
+supplied direction.
 
 Every visible object must earn its place by supporting the grounded campaign story.
 

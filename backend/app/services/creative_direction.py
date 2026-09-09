@@ -65,6 +65,7 @@ from app.services.creative_world_class import (
     creative_story_evidence_tokens,
     assess_world_class_creative,
 )
+from app.services.creative_authority import AuthoritativeCreativeContext
 
 
 class CreativeConceptScorecard(DirectionSchema):
@@ -174,8 +175,7 @@ class CreativeConceptProposal(DirectionSchema):
 
 _BRAND_OFFER_CONCRETE_ARTIFACT = re.compile(
     r"\b(?:app|application|dashboard|user interface|ui|mock screen|software screen|"
-    r"package|packaging|workflow|integration[ -](?:hub|layer|pipeline|system)|"
-    r"fulfillment[ -](?:path|process|system))\b|"
+    r"package|packaging)\b|"
     r"\b(?:product|service|offering)[ -](?:environment|first|led|specific)\b",
     re.IGNORECASE,
 )
@@ -186,18 +186,18 @@ _BRAND_OFFER_INVENTED_ARTIFACT = re.compile(
     re.IGNORECASE,
 )
 _BRAND_OFFER_OFFERING_DEPICTION = re.compile(
-    r"(?:\b(?:show|depict|render|spotlight|demonstrate|represent|display|feature)\b"
-    r".{0,80}\b(?:product|service|offering|package|feature|integration|"
-    r"fulfillment(?: process| path)?)\b|"
-    r"\bsupported\b.{0,80}\b(?:hub|offering|platform|product|service|system)\b|"
-    r"\b(?:product|service|offering|feature|integration|fulfillment)\b.{0,80}"
+    r"(?:\b(?:show|depict|render|spotlight|demonstrate|represent|display)\b"
+    r".{0,80}\b(?:product|service|offering|package)\b|"
+    r"\bsupported\b.{0,80}\b(?:offering|product|service|package)\b|"
+    r"\b(?:product|service|offering|package)\b.{0,80}"
     r"\b(?:hero|story|moment|in use|in action|doing work|delivering|automates?|"
     r"coordinates?|orchestrates?)\b)",
     re.IGNORECASE,
 )
-_BRAND_OFFER_FEATURE_STORY = re.compile(
-    r"\b(?:app|application|product|service|software|system)\b.{0,80}"
-    r"\b(?:feature|features|workflow|workflows)\b",
+_BRAND_OFFER_AUTHORIZABLE_CAPABILITY = re.compile(
+    r"\b(?:workflow|workflows|integration|integrations|system|systems|software|"
+    r"platform|platforms|hub|hubs|feature|features|automation|automations|"
+    r"fulfillment|predictive|forecast|forecasts|forecasting)\b",
     re.IGNORECASE,
 )
 
@@ -212,22 +212,41 @@ _BRAND_OFFER_UNSUPPORTED_CLAIM = re.compile(
 )
 
 
-def _brand_offer_text_has_unsupported_offering_story(value: str) -> bool:
-    """Detect positive offering/UI stories that brand mode cannot authorize."""
-    return any(
+def _brand_offer_text_has_unsupported_offering_story(
+    value: str,
+    *,
+    authoritative_context: AuthoritativeCreativeContext | None = None,
+) -> bool:
+    """Detect unsupported depictions while allowing verified capabilities."""
+    if any(
         pattern.search(value)
         for pattern in (
             _BRAND_OFFER_CONCRETE_ARTIFACT,
             _BRAND_OFFER_INVENTED_ARTIFACT,
             _BRAND_OFFER_OFFERING_DEPICTION,
-            _BRAND_OFFER_FEATURE_STORY,
             _BRAND_OFFER_UNSUPPORTED_CLAIM,
         )
+    ):
+        return True
+
+    capability_tokens: set[str] = set()
+    for capability in _BRAND_OFFER_AUTHORIZABLE_CAPABILITY.finditer(value):
+        capability_tokens.update(
+            creative_story_evidence_tokens(capability.group())
+        )
+    if not capability_tokens:
+        return False
+
+    return (
+        authoritative_context is None
+        or not authoritative_context.supports_evidence_tokens(capability_tokens)
     )
 
 
 def _brand_offer_has_unsupported_offering_story(
     proposal: CreativeConceptProposal,
+    *,
+    authoritative_context: AuthoritativeCreativeContext | None = None,
 ) -> bool:
     """
     Fail closed on unsupported positive renderer semantics.
@@ -262,7 +281,10 @@ def _brand_offer_has_unsupported_offering_story(
         *proposal.inspiration_principles,
     )
     return any(
-        _brand_offer_text_has_unsupported_offering_story(value)
+        _brand_offer_text_has_unsupported_offering_story(
+            value,
+            authoritative_context=authoritative_context,
+        )
         for value in positive_values
     )
 
@@ -512,6 +534,7 @@ def build_creative_direction(
     context: PublicCreativeResearchContext,
     synthesis: CreativeDirectorSynthesis | None = None,
     story_mode: CreativeStoryMode = "offering_proof",
+    authoritative_context: AuthoritativeCreativeContext | None = None,
 ) -> CreativeDirectionPlan:
     if story_mode not in {"offering_proof", "brand_offer"}:
         raise ValueError("Creative story mode is invalid")
@@ -535,6 +558,7 @@ def build_creative_direction(
         research=research,
         context=context,
         story_mode=story_mode,
+        authoritative_context=authoritative_context,
     )
     candidates = tuple(
         CreativeConceptCandidate(
@@ -867,6 +891,7 @@ def build_visual_art_direction(
     accent_color: str | None,
     story_mode: CreativeStoryMode = "offering_proof",
     correction: str | None = None,
+    authoritative_context: AuthoritativeCreativeContext | None = None,
 ) -> str:
     if story_mode not in {"offering_proof", "brand_offer"}:
         raise ValueError("Creative story mode is invalid")
@@ -879,7 +904,10 @@ def build_visual_art_direction(
     concept = direction.selected_concept
     if (
         story_mode == "brand_offer"
-        and _brand_offer_has_unsupported_offering_story(concept)
+        and _brand_offer_has_unsupported_offering_story(
+            concept,
+            authoritative_context=authoritative_context,
+        )
     ):
         raise ValueError("Brand-offer direction contains an unsupported offering story")
 
@@ -1201,13 +1229,14 @@ def _world_class_concept_assessment(
     strategy: CreativeStrategyProposal,
     context: PublicCreativeResearchContext,
     story_mode: CreativeStoryMode = "offering_proof",
+    authoritative_context: AuthoritativeCreativeContext | None = None,
 ):
     """
     Evaluate one renderer-bound concept against the centralized commercial policy.
 
-    Only already-grounded, public-safe strategy fields are used here. This function
-    does not add new business claims, provider data, URLs, credentials, or private
-    research evidence.
+    Strategy fields provide the campaign shape; capability authority is supplied
+    separately as bounded Business Brain evidence. This function does not add new
+    business claims, provider data, URLs, credentials, or private research evidence.
     """
     business_context = " | ".join(
         (
@@ -1243,6 +1272,11 @@ def _world_class_concept_assessment(
         visual_metaphor=proposal.visual_metaphor,
         scroll_stopping_hook=proposal.scroll_stopping_hook,
         story_mode=story_mode,
+        authoritative_evidence_segments=(
+            authoritative_context.evidence_segments
+            if authoritative_context is not None
+            else ()
+        ),
     )
 
 
@@ -1290,6 +1324,7 @@ def _score_candidates(
     research: CreativeResearchBundle,
     context: PublicCreativeResearchContext,
     story_mode: CreativeStoryMode = "offering_proof",
+    authoritative_context: AuthoritativeCreativeContext | None = None,
 ) -> tuple[CreativeConceptScorecard, ...]:
     signatures = tuple(_concept_signature(proposal) for proposal in proposals)
     research_tokens = _tokens(
@@ -1409,7 +1444,10 @@ def _score_candidates(
         story_tokens = _tokens(product_story_text)
         unsupported_brand_story = (
             story_mode == "brand_offer"
-            and _brand_offer_has_unsupported_offering_story(proposal)
+            and _brand_offer_has_unsupported_offering_story(
+                proposal,
+                authoritative_context=authoritative_context,
+            )
         )
 
         world_class = _world_class_concept_assessment(
@@ -1417,6 +1455,7 @@ def _score_candidates(
             strategy=strategy,
             context=context,
             story_mode=story_mode,
+            authoritative_context=authoritative_context,
         )
 
         genericness_risk = max(

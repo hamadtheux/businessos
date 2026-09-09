@@ -1,7 +1,24 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from hashlib import sha256
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from uuid import UUID, uuid4
 
+import pytest
+
+from app.schemas.ai_context import (
+    AIContextBundle,
+    BusinessBrainContextSource,
+    BusinessMemoryContextSource,
+)
+from app.services.creative_authority import (
+    AuthoritativeCreativeContext,
+    assemble_authoritative_creative_context,
+    build_authoritative_creative_context,
+)
+from app.services.ai_context_policy import cmo_context_policy
 from app.services.creative_visual_review import build_visual_review_task
 from app.services.creative_world_class import (
     assess_world_class_creative,
@@ -493,3 +510,421 @@ def test_brand_offer_contracts_forbid_invention_without_requiring_an_offering() 
     assert "supported product" not in retry
     assert "product moment" not in retry
     assert "service moment" not in retry
+
+
+
+def _saas_authority(
+    *,
+    business_id: UUID,
+    content: str = (
+        "Acme AI coordinates AI-assisted marketing, sales, support, operations, "
+        "and reporting for small businesses."
+    ),
+) -> AuthoritativeCreativeContext:
+    return build_authoritative_creative_context(
+        _saas_brain_bundle(business_id=business_id, content=content),
+        business_id=business_id,
+    )
+
+
+def _saas_brain_bundle(*, business_id: UUID, content: str):
+    source = BusinessBrainContextSource(
+        business_id=business_id,
+        source_type="knowledge_entry",
+        source_id="knowledge:saas-capability",
+        title="Public platform capability",
+        content=content,
+        updated_at=datetime(2026, 8, 24, tzinfo=UTC),
+        content_hash=sha256(content.encode()).hexdigest(),
+    )
+    return AIContextBundle(
+        business_id=business_id,
+        purpose="marketing",
+        task="Assemble creative authority.",
+        sources=[source],
+        source_count=1,
+        business_brain_source_count=1,
+        memory_source_count=0,
+        revision="a" * 64,
+    )
+
+
+def _saas_authority_from_contents(
+    *,
+    business_id: UUID,
+    contents: tuple[str, ...],
+) -> AuthoritativeCreativeContext:
+    sources = [
+        BusinessBrainContextSource(
+            business_id=business_id,
+            source_type="knowledge_entry",
+            source_id=f"knowledge:saas-capability-{index}",
+            title=f"Capability segment {index}",
+            content=content,
+            updated_at=datetime(2026, 8, 24, tzinfo=UTC),
+            content_hash=sha256(content.encode()).hexdigest(),
+        )
+        for index, content in enumerate(contents)
+    ]
+    bundle = AIContextBundle(
+        business_id=business_id,
+        purpose="marketing",
+        task="Assemble creative authority.",
+        sources=sources,
+        source_count=len(sources),
+        business_brain_source_count=len(sources),
+        memory_source_count=0,
+        revision="e" * 64,
+    )
+    return build_authoritative_creative_context(bundle, business_id=business_id)
+
+
+def _saas_brand_offer_assessment(
+    *,
+    authoritative_context: AuthoritativeCreativeContext | None = None,
+    **overrides: str,
+):
+    values = {
+        "business_context": (
+            "Technology business serving small business owners."
+        ),
+        "campaign_goal": (
+            "Show one AI team helping the owner stay across marketing, sales, "
+            "support, operations, and reporting."
+        ),
+        "audience": (
+            "Small business owners managing marketing, sales, support, "
+            "operations, and reporting."
+        ),
+        "subject_focus": "An AI team for business.",
+        "campaign_angle": (
+            "Marketing, sales, support, operations, and reporting move as one "
+            "coordinated team around the owner."
+        ),
+        "marketing_idea": (
+            "Five business work streams for marketing, sales, support, operations, "
+            "and reporting approach one owner from separate directions while AI "
+            "agents coordinate and route them into one coherent rhythm."
+        ),
+        "customer_care_reason": (
+            "Owners care because marketing, sales, support, operations, and "
+            "reporting compete for attention during the same working day."
+        ),
+        "hero_subject": (
+            "One small-business owner at the center while five distinct work "
+            "streams for marketing, sales, support, operations, and reporting "
+            "converge from separate directions."
+        ),
+        "hero_relevance": (
+            "The five grounded business functions visibly converge around the "
+            "owner rather than appearing as unrelated decoration."
+        ),
+        "product_story": (
+            "Marketing and sales move in from one side while support and operations "
+            "pass from the other; AI agents coordinate and route the five work "
+            "streams so they converge into one aligned rhythm around the owner."
+        ),
+        "visual_metaphor": (
+            "Five separate business work streams converge into one coordinated "
+            "operating rhythm around the owner."
+        ),
+        "scroll_stopping_hook": (
+            "Five visibly separate business streams converge around one owner in "
+            "a single decisive visual moment."
+        ),
+        "story_mode": "brand_offer",
+    }
+    values.update(overrides)
+    return assess_world_class_creative(
+        **values,
+        authoritative_evidence_segments=(
+            authoritative_context.evidence_segments
+            if authoritative_context is not None
+            else ()
+        ),
+    )
+
+
+def test_brand_offer_accepts_grounded_saas_operational_relationship() -> None:
+    result = _saas_brand_offer_assessment(
+        authoritative_context=_saas_authority(business_id=uuid4()),
+    )
+
+    assert result.approved is True
+    assert result.product_service_mechanism >= 70
+    assert result.customer_causality >= 62
+    assert result.visual_proof >= 68
+    assert result.hard_failures == ()
+
+
+def test_generated_strategy_cannot_authorize_the_same_saas_capability() -> None:
+    business_id = uuid4()
+    authorized = _saas_brand_offer_assessment(
+        authoritative_context=_saas_authority(business_id=business_id),
+    )
+    unauthorized = _saas_brand_offer_assessment()
+
+    assert authorized.approved is True
+    assert unauthorized.approved is False
+    assert "no_business_specific_mechanism" in unauthorized.hard_failures
+
+
+def test_cross_tenant_brain_source_cannot_build_creative_authority() -> None:
+    owner_id = uuid4()
+    other_id = uuid4()
+    content = "Acme AI coordinates marketing, sales, support, operations, and reporting."
+    source = BusinessBrainContextSource(
+        business_id=other_id,
+        source_type="knowledge_entry",
+        source_id="knowledge:other-tenant",
+        title="Other tenant capability",
+        content=content,
+        updated_at=datetime(2026, 8, 24, tzinfo=UTC),
+        content_hash=sha256(content.encode()).hexdigest(),
+    )
+    bundle = AIContextBundle(
+        business_id=owner_id,
+        purpose="marketing",
+        task="Assemble creative authority.",
+        sources=[source],
+        source_count=1,
+        business_brain_source_count=1,
+        memory_source_count=0,
+        revision="b" * 64,
+    )
+
+    with pytest.raises(ValueError, match="cross-tenant"):
+        build_authoritative_creative_context(bundle, business_id=owner_id)
+
+
+def test_persistent_memory_alone_cannot_build_creative_authority() -> None:
+    business_id = uuid4()
+    memory = BusinessMemoryContextSource(
+        business_id=business_id,
+        memory_id=uuid4(),
+        memory_type="semantic",
+        content="The company uses predictive revenue forecasting.",
+        importance=5,
+        confidence="1.000",
+        updated_at=datetime(2026, 8, 24, tzinfo=UTC),
+        content_hash="c" * 64,
+    )
+    bundle = AIContextBundle(
+        business_id=business_id,
+        purpose="marketing",
+        task="Assemble creative authority.",
+        sources=[memory],
+        source_count=1,
+        business_brain_source_count=0,
+        memory_source_count=1,
+        revision="d" * 64,
+    )
+
+    with pytest.raises(ValueError, match="memory"):
+        build_authoritative_creative_context(bundle, business_id=business_id)
+
+
+def test_verified_capabilities_do_not_enable_fake_ui_or_unsupported_forecasting() -> None:
+    authority = _saas_authority(business_id=uuid4())
+    fake_ui = _saas_brand_offer_assessment(
+        authoritative_context=authority,
+        hero_subject="A fake dashboard interface showing marketing and sales.",
+        hero_relevance="The dashboard represents the platform.",
+        product_story="Render a fake dashboard interface that coordinates marketing and sales.",
+    )
+    unsupported = _saas_brand_offer_assessment(
+        authoritative_context=authority,
+        marketing_idea="Predictive revenue AI automatically forecasts next-quarter revenue.",
+        hero_subject="Predictive revenue forecasting for the business owner.",
+        hero_relevance="The forecasting capability is the visual hero.",
+        product_story="Predictive revenue forecasting routes next-quarter revenue decisions.",
+    )
+
+    assert fake_ui.approved is False
+    assert unsupported.approved is False
+
+
+def test_verified_non_ui_feature_can_ground_a_story_but_fake_dashboard_stays_blocked() -> None:
+    authority = _saas_authority(
+        business_id=uuid4(),
+        content=(
+            "Acme AI provides an automated feature that coordinates marketing, "
+            "sales and support workflows."
+        ),
+    )
+    verified = _saas_brand_offer_assessment(
+        authoritative_context=authority,
+        marketing_idea=(
+            "The verified feature coordinates marketing, sales and support "
+            "around one owner."
+        ),
+        hero_subject=(
+            "One owner watches the verified feature route marketing, sales and "
+            "support through one workflow."
+        ),
+        hero_relevance="The feature is shown through a non-interface operational handoff.",
+        product_story=(
+            "The feature routes marketing to sales while support converges into "
+            "one owner response through the workflow."
+        ),
+    )
+    fake_dashboard = _saas_brand_offer_assessment(
+        authoritative_context=authority,
+        hero_subject="A fake dashboard interface showing the verified feature.",
+        product_story=(
+            "Render a fake dashboard interface that shows the feature routing "
+            "marketing, sales and support."
+        ),
+    )
+
+    assert verified.approved is True
+    assert fake_dashboard.approved is False
+
+
+def test_negative_brain_evidence_does_not_authorize_positive_forecasting() -> None:
+    authority = _saas_authority(
+        business_id=uuid4(),
+        content="Acme does NOT provide predictive revenue forecasting.",
+    )
+    result = _saas_brand_offer_assessment(
+        authoritative_context=authority,
+        marketing_idea="Predictive revenue forecasting coordinates the business.",
+        hero_subject="Predictive revenue forecasting for the business owner.",
+        hero_relevance="The forecasting capability is the visual hero.",
+        product_story="Predictive revenue forecasting routes revenue decisions.",
+    )
+
+    assert result.approved is False
+
+
+def test_unrelated_brain_segments_cannot_be_combined_into_one_capability() -> None:
+    authority = _saas_authority_from_contents(
+        business_id=uuid4(),
+        contents=(
+            "Acme AI provides automation for marketing and sales.",
+            "Acme AI provides support workflows.",
+        ),
+    )
+    result = _saas_brand_offer_assessment(
+        authoritative_context=authority,
+        marketing_idea="An automation workflow coordinates marketing, sales and support.",
+        hero_subject="An automation workflow joins marketing, sales and support for one owner.",
+        product_story=(
+            "The automation workflow routes marketing to sales and support into "
+            "one coordinated response."
+        ),
+    )
+
+    assert result.approved is False
+
+
+def test_one_positive_brain_segment_can_authorize_a_matching_operational_story() -> None:
+    authority = _saas_authority(
+        business_id=uuid4(),
+        content="Acme AI provides automated marketing, sales and support workflows.",
+    )
+    result = _saas_brand_offer_assessment(authoritative_context=authority)
+
+    assert result.approved is True
+
+
+def test_creative_authority_uses_the_cmo_privacy_source_boundary() -> None:
+    healthcare = cmo_context_policy("clinic")
+    professional = cmo_context_policy("professional services")
+    real_estate = cmo_context_policy("real estate")
+
+    assert healthcare.include_memory is False
+    assert healthcare.brain_source_types == (
+        "business_profile", "branding", "appointment_type"
+    )
+    assert professional.include_memory is False
+    assert professional.brain_source_types == healthcare.brain_source_types
+    assert professional.privacy_instruction != healthcare.privacy_instruction
+    assert real_estate.brain_source_types == (
+        "business_profile", "branding", "knowledge_entry"
+    )
+
+
+@pytest.mark.asyncio
+async def test_authority_assembly_uses_business_brain_without_memory(monkeypatch) -> None:
+    import app.services.creative_authority as authority_service
+
+    business_id = uuid4()
+    bundle = _saas_brain_bundle(
+        business_id=business_id,
+        content=(
+            "Acme AI coordinates AI-assisted marketing, sales, support, "
+            "operations, and reporting for small businesses."
+        ),
+    )
+    assemble = AsyncMock(return_value=bundle)
+    monkeypatch.setattr(authority_service, "assemble_ai_context", assemble)
+
+    result = await assemble_authoritative_creative_context(
+        object(),
+        business_id=business_id,
+        business_type="technology",
+    )
+
+    request = assemble.await_args.args[2]
+    assert request.include_business_brain is True
+    assert request.include_memory is False
+    assert result.source_count == 1
+    assert "marketing" in result.evidence_tokens
+
+
+def test_brand_offer_capability_word_list_without_relationship_still_fails() -> None:
+    result = _saas_brand_offer_assessment(
+        marketing_idea=(
+            "AI agents, marketing, sales, support, operations and reporting for "
+            "modern business."
+        ),
+        customer_care_reason=(
+            "Owners care about marketing, sales, support, operations and reporting."
+        ),
+        hero_subject=(
+            "Marketing, sales, support, operations and reporting arranged around "
+            "a business owner."
+        ),
+        hero_relevance="The business functions appear around the owner.",
+        product_story=(
+            "Marketing, sales, support, operations and reporting appear together "
+            "around the owner."
+        ),
+        visual_metaphor="A clean arrangement of business functions.",
+        scroll_stopping_hook="A premium modern composition.",
+    )
+
+    assert result.approved is False
+    assert "weak_visual_proof" in result.hard_failures
+
+
+def test_brand_offer_rejects_generic_ai_network_even_with_grounded_terms() -> None:
+    result = _saas_brand_offer_assessment(
+        marketing_idea=(
+            "Marketing, sales, support, operations and reporting connect and flow "
+            "through a glowing digital network."
+        ),
+        customer_care_reason=(
+            "Owners care because marketing, sales, support, operations and "
+            "reporting all need attention."
+        ),
+        hero_subject=(
+            "A glowing digital network of floating nodes for marketing, sales, "
+            "support, operations and reporting."
+        ),
+        hero_relevance="The glowing network represents the business functions.",
+        product_story=(
+            "Marketing, sales, support, operations and reporting connect through "
+            "floating nodes and flow across a glowing digital network."
+        ),
+        visual_metaphor="A futuristic network of glowing nodes.",
+        scroll_stopping_hook="A glowing AI network with blue nodes.",
+    )
+
+    assert result.approved is False
+    assert (
+        "weak_visual_proof" in result.hard_failures
+        or "no_business_specific_mechanism" in result.hard_failures
+        or "decorative_abstraction_as_story" in result.hard_failures
+    )

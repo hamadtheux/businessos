@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from creative_pipeline_fixtures import brand_inputs, brand_plan, brand_strategy, brand_synthesis
+from test_creative_world_class import _saas_authority, _saas_brain_bundle
 from test_marketing_service import (
     BUSINESS_ID, USER_ID, _ScalarSession, _FailingCommitSession,
     _business_record, _creative_asset, _DurableCheckpointStorage,
@@ -24,11 +26,13 @@ from app.services.creative_provider import CreativeGenerationResult
 def runtime(monkeypatch):
     request = AsyncMock(return_value=object())
     execute = AsyncMock()
+    authority = AsyncMock(return_value=None)
     monkeypatch.setattr(marketing, "_build_cmo_execution_request", request)
     monkeypatch.setattr(marketing, "execute_ai_agent_typed_with_metadata", execute)
+    monkeypatch.setattr(marketing, "assemble_authoritative_creative_context", authority)
     monkeypatch.setattr(marketing.CreativeCompositor, "compose_candidates", lambda *args: (_composed_candidate("minimal_hero", color=(100,120,140)),))
     monkeypatch.setattr(marketing, "assess_creative_quality", lambda *args, **kwargs: SimpleNamespace(approved_for_delivery=True, approved_for_semantic_review=True, failure_kind=None, overall_score=90))
-    return SimpleNamespace(execute=execute, request=request)
+    return SimpleNamespace(execute=execute, request=request, authority=authority)
 
 
 def execution(*, strong=True, alternative=False):
@@ -49,11 +53,15 @@ def providers(reviews=None):
 
 async def run(asset, image, review, *, storage=None, session=None):
     return await marketing.run_queued_creative_asset_generation(
-        session or _ScalarSession([asset,_business_record(),None,asset]), business_id=BUSINESS_ID,
+        session or _PipelineSession([asset,_business_record(),None,asset]), business_id=BUSINESS_ID,
         creative_asset_id=asset.id, provider=image, storage=storage or _DurableCheckpointStorage(),
         director_provider=SimpleNamespace(provider_name="fake_director"), visual_review_provider=review,
         require_semantic_review=True,
     )
+
+
+class _PipelineSession(_ScalarSession, AsyncSession):
+    """In-memory session that exercises the production AsyncSession boundary."""
 
 
 def concept_failure():
@@ -76,6 +84,7 @@ async def test_weak_initial_strong_text_repair_buys_only_after_second_director(r
     result = await run(asset,image,review)
     assert result.generation_status == "ready"
     assert runtime.execute.await_count == 2
+    runtime.authority.assert_awaited_once()
     assert image.generate_draft.await_count == 1
     task = runtime.request.await_args.args[2]
     assert "SERVER REPAIR" not in task and len(task) <= 4000
@@ -335,3 +344,326 @@ def test_grounded_scene_does_not_need_quality_vocabulary_to_pass():
     })
     plan=build_creative_direction(strategy=strategy,context=context,research=research,story_mode="brand_offer",synthesis=synthesis.model_copy(update={"candidates":tuple(proposals)}))
     assert creative_direction_meets_quality_floor(plan)
+
+
+
+def _saas_pipeline_strategy():
+    return brand_strategy().model_copy(
+        update={
+            "marketing_goal": (
+                "Show small business owners how one AI team can help them stay "
+                "across marketing, sales, support, operations, and reporting."
+            ),
+            "target_audience": (
+                "Small business owners managing marketing, sales, support, "
+                "operations, and reporting."
+            ),
+            "audience_insight": (
+                "Marketing, sales, support, operations, and reporting compete "
+                "for the owner's attention throughout the same working day."
+            ),
+            "campaign_angle": (
+                "Marketing, sales, support, operations, and reporting move as "
+                "one coordinated team around the owner."
+            ),
+            "headline": "Your AI Team for Business",
+            "supporting_message": (
+                "Bring marketing, sales, support, operations, and reporting "
+                "together with AI agents working with you. Run Smarter."
+            ),
+            "cta": "Learn More",
+            "visual_concept": (
+                "Five grounded business work streams converge around one owner."
+            ),
+            "subject_focus": (
+                "One small-business owner and five grounded business functions."
+            ),
+            "prohibited_claims": (
+                "No invented outcomes.",
+                "No invented interfaces.",
+                "No unsupported product capabilities.",
+            ),
+        }
+    )
+
+
+def _saas_pipeline_synthesis(*, strong: bool):
+    synthesis = brand_synthesis(strong=False)
+    candidates = list(synthesis.candidates)
+
+    generic_variants = (
+        {
+            "concept_name": "Generic AI network",
+            "marketing_idea": (
+                "A futuristic digital network suggests connected business."
+            ),
+            "customer_care_reason": (
+                "Business owners want modern connected technology."
+            ),
+            "hero_subject": (
+                "Floating glowing nodes on a dark blue gradient."
+            ),
+            "hero_relevance": "The network suggests modern technology.",
+            "product_story": (
+                "Glowing nodes float through a digital network."
+            ),
+            "visual_metaphor": "A glowing digital network.",
+            "scroll_stopping_hook": "Blue glowing nodes.",
+        },
+        {
+            "concept_name": "Premium productivity atmosphere",
+            "marketing_idea": (
+                "A clean premium workspace suggests smarter work."
+            ),
+            "customer_care_reason": (
+                "Business owners want more focus."
+            ),
+            "hero_subject": (
+                "A premium desk with laptop, plant, notebook and coffee."
+            ),
+            "hero_relevance": "The workspace represents productivity.",
+            "product_story": (
+                "A calm workspace creates a modern productivity mood."
+            ),
+            "visual_metaphor": "A clean workspace.",
+            "scroll_stopping_hook": "Premium negative space.",
+        },
+        {
+            "concept_name": "Abstract AI wave",
+            "marketing_idea": (
+                "A futuristic wave communicates AI momentum."
+            ),
+            "customer_care_reason": (
+                "Owners want their business to feel modern."
+            ),
+            "hero_subject": (
+                "A glowing blue wave with floating circles."
+            ),
+            "hero_relevance": "The wave represents technology.",
+            "product_story": (
+                "Abstract waves and circles imply connected intelligence."
+            ),
+            "visual_metaphor": "A futuristic digital wave.",
+            "scroll_stopping_hook": "A bright glowing wave.",
+        },
+    )
+
+    for index, updates in enumerate(generic_variants):
+        candidates[index] = candidates[index].model_copy(update=updates)
+
+    if strong:
+        candidates[0] = candidates[0].model_copy(
+            update={
+                "concept_name": "One AI team, five business streams",
+                "marketing_idea": (
+                    "Five grounded business work streams for marketing, sales, "
+                    "support, operations, and reporting approach one owner from "
+                    "separate directions while AI agents coordinate and route "
+                    "them into one coherent rhythm."
+                ),
+                "customer_care_reason": (
+                    "Owners care because marketing, sales, support, operations, "
+                    "and reporting compete for attention during the same day."
+                ),
+                "hero_subject": (
+                    "One small-business owner at center while five distinct work "
+                    "streams for marketing, sales, support, operations, and "
+                    "reporting converge from separate directions."
+                ),
+                "hero_relevance": (
+                    "The grounded business functions visibly converge around the "
+                    "owner instead of appearing as unrelated decoration."
+                ),
+                "product_story": (
+                    "Marketing and sales move in from one side while support and "
+                    "operations pass from the other; AI agents coordinate and "
+                    "route the five work streams so they converge into one aligned "
+                    "rhythm around the owner."
+                ),
+                "visual_metaphor": (
+                    "Five separate business work streams converge into one "
+                    "coordinated rhythm around the owner."
+                ),
+                "scroll_stopping_hook": (
+                    "Five visibly separate business streams converge around one "
+                    "owner in a single decisive moment."
+                ),
+            }
+        )
+
+    return synthesis.model_copy(update={"candidates": tuple(candidates)})
+
+
+def _saas_pipeline_execution(*, strong: bool):
+    return SimpleNamespace(
+        output=_saas_pipeline_synthesis(strong=strong),
+        provider_metadata=AIAgentProviderMetadata(),
+    )
+
+
+def _automation_pipeline_execution():
+    synthesis = _saas_pipeline_synthesis(strong=True)
+    candidates = list(synthesis.candidates)
+    candidates[0] = candidates[0].model_copy(
+        update={
+            "concept_name": "One automation workflow, one owner",
+            "marketing_idea": (
+                "An automation workflow coordinates marketing, sales and support "
+                "around one owner."
+            ),
+            "hero_subject": (
+                "One small-business owner watches an automation workflow route "
+                "marketing, sales and support."
+            ),
+            "hero_relevance": (
+                "The workflow is shown through a non-interface operational "
+                "handoff around the owner."
+            ),
+            "product_story": (
+                "The automation workflow routes marketing to sales and support "
+                "converges into one owner response; marketing, sales and support "
+                "move as one coordinated operating rhythm."
+            ),
+            "visual_metaphor": (
+                "An automation workflow turns separate marketing, sales and "
+                "support paths into one coordinated operating rhythm."
+            ),
+            "scroll_stopping_hook": (
+                "Separate marketing, sales and support paths converge around one "
+                "owner in a single decisive visual moment."
+            ),
+        }
+    )
+    return SimpleNamespace(
+        output=synthesis.model_copy(update={"candidates": tuple(candidates)}),
+        provider_metadata=AIAgentProviderMetadata(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_saas_brand_weak_then_strong_repair_reaches_one_image(runtime):
+    runtime.authority.return_value = _saas_authority(business_id=BUSINESS_ID)
+    runtime.execute.side_effect = [
+        _saas_pipeline_execution(strong=False),
+        _saas_pipeline_execution(strong=True),
+    ]
+
+    asset = asset_for_job()
+    asset.visual_direction = _saas_pipeline_strategy().model_dump_json()
+    image, review = providers()
+
+    result = await run(asset, image, review)
+
+    assert result.generation_status == "ready"
+    assert runtime.execute.await_count == 2
+    runtime.authority.assert_awaited_once()
+    assert image.generate_draft.await_count == 1
+    assert review.review.await_count >= 1
+    assert "Acme AI coordinates" not in json.dumps(asset.creative_metadata)
+
+
+@pytest.mark.asyncio
+async def test_saas_brand_strong_initial_reaches_one_image(runtime):
+    runtime.authority.return_value = _saas_authority(business_id=BUSINESS_ID)
+    runtime.execute.return_value = _saas_pipeline_execution(strong=True)
+
+    asset = asset_for_job()
+    asset.visual_direction = _saas_pipeline_strategy().model_dump_json()
+    image, review = providers()
+
+    result = await run(asset, image, review)
+
+    assert result.generation_status == "ready"
+    assert runtime.execute.await_count == 1
+    runtime.authority.assert_awaited_once()
+    assert image.generate_draft.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_same_saas_direction_without_authoritative_brain_buys_zero_images(runtime):
+    runtime.execute.side_effect = [
+        _saas_pipeline_execution(strong=True),
+        _saas_pipeline_execution(strong=True),
+    ]
+
+    asset = asset_for_job()
+    asset.visual_direction = _saas_pipeline_strategy().model_dump_json()
+    image, review = providers()
+
+    result = await run(asset, image, review)
+
+    assert result.generation_status == "failed"
+    assert runtime.execute.await_count == 2
+    image.generate_draft.assert_not_awaited()
+    review.review.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_saas_brand_two_weak_directions_buy_zero_images(runtime):
+    runtime.execute.side_effect = [
+        _saas_pipeline_execution(strong=False),
+        _saas_pipeline_execution(strong=False),
+    ]
+
+    asset = asset_for_job()
+    asset.visual_direction = _saas_pipeline_strategy().model_dump_json()
+    image, review = providers()
+
+    result = await run(asset, image, review)
+
+    assert result.generation_status == "failed"
+    assert runtime.execute.await_count == 2
+    image.generate_draft.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_real_authority_survives_scoring_to_renderer_and_fake_image_once(
+    runtime,
+    monkeypatch,
+):
+    import app.services.creative_authority as authority_service
+
+    monkeypatch.setattr(
+        marketing,
+        "assemble_authoritative_creative_context",
+        authority_service.assemble_authoritative_creative_context,
+    )
+    assemble = AsyncMock(
+        return_value=_saas_brain_bundle(
+            business_id=BUSINESS_ID,
+            content=(
+                "Acme AI provides automation workflows that coordinate "
+                "marketing, sales and support."
+            ),
+        )
+    )
+    monkeypatch.setattr(authority_service, "assemble_ai_context", assemble)
+    runtime.execute.return_value = _automation_pipeline_execution()
+
+    asset = asset_for_job()
+    asset.visual_direction = _saas_pipeline_strategy().model_dump_json()
+    image, review = providers()
+
+    result = await run(asset, image, review)
+
+    assert result.generation_status == "ready"
+    assemble.assert_awaited_once()
+    assert image.generate_draft.await_count == 1
+    instructions = image.generate_draft.await_args.args[0].instructions
+    assert "automation workflow" in instructions.casefold()
+    assert "Acme AI provides automation workflows that coordinate" not in instructions
+
+
+@pytest.mark.asyncio
+async def test_same_automation_direction_without_authority_fails_before_image(runtime):
+    runtime.execute.return_value = _automation_pipeline_execution()
+
+    asset = asset_for_job()
+    asset.visual_direction = _saas_pipeline_strategy().model_dump_json()
+    image, review = providers()
+
+    result = await run(asset, image, review)
+
+    assert result.generation_status == "failed"
+    image.generate_draft.assert_not_awaited()
+    review.review.assert_not_awaited()
