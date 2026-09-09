@@ -3502,13 +3502,30 @@ async def _creative_direction_with_fallback(
                 extra={"director_call_number": call_index + 1},
             )
             return direction, execution.provider_metadata
+        quality_fields = _creative_direction_quality_log_fields(direction)
         logger.info(
-            "director_repair_failed_quality"
-            if repair
-            else "director_initial_failed_quality",
+            (
+                "%s director_call_number=%d "
+                "overall=%d business=%d mechanism=%d idea=%d visual=%d "
+                "commercial=%d generic=%d replaceable=%d"
+            ),
+            (
+                "director_repair_failed_quality"
+                if repair
+                else "director_initial_failed_quality"
+            ),
+            call_index + 1,
+            quality_fields["selected_overall_score"],
+            quality_fields["business_specificity"],
+            quality_fields["product_service_mechanism"],
+            quality_fields["marketing_idea_strength"],
+            quality_fields["visual_proof"],
+            quality_fields["commercial_readiness"],
+            quality_fields["genericness_risk"],
+            quality_fields["replaceable_brand_risk"],
             extra={
                 "director_call_number": call_index + 1,
-                **_creative_direction_quality_log_fields(direction),
+                **quality_fields,
             },
         )
         state["rejected"] = repair
