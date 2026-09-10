@@ -107,6 +107,21 @@ def _png() -> bytes:
     return output.getvalue()
 
 
+
+
+def _typed_package_execution(execution: SimpleNamespace) -> SimpleNamespace:
+    from app.schemas.marketing import ContentPackageProposal
+
+    return SimpleNamespace(
+        context_revision=execution.context_revision,
+        business_brain_source_count=execution.business_brain_source_count,
+        memory_source_count=execution.memory_source_count,
+        output=ContentPackageProposal.model_validate_json(
+            execution.output.summary
+        ),
+    )
+
+
 class CreatePublishFlowTests(unittest.IsolatedAsyncioTestCase):
     def test_maximum_create_publish_input_is_bounded_before_agent_runtime(self) -> None:
         data = ContentPackageGenerateRequest(
@@ -186,8 +201,8 @@ class CreatePublishFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         session = _Session()
         with patch(
-            "app.services.marketing._execute_cmo",
-            new=AsyncMock(return_value=execution),
+            "app.services.marketing._execute_content_package",
+            new=AsyncMock(return_value=_typed_package_execution(execution)),
         ) as runtime:
             package = await generate_content_package(
                 session,
@@ -278,8 +293,8 @@ class CreatePublishFlowTests(unittest.IsolatedAsyncioTestCase):
                 )
                 session = _Session()
                 with patch(
-                    "app.services.marketing._execute_cmo",
-                    new=AsyncMock(return_value=execution),
+                    "app.services.marketing._execute_content_package",
+                    new=AsyncMock(return_value=_typed_package_execution(execution)),
                 ) as runtime:
                     with self.assertRaises(MarketingAIError):
                         await generate_content_package(
@@ -299,7 +314,7 @@ class CreatePublishFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_manual_mode_preserves_user_copy_without_ai(self) -> None:
         authored = "We will close at 4 PM on Friday.\nThank you for planning ahead."
         session = _Session()
-        with patch("app.services.marketing._execute_cmo", new=AsyncMock()) as runtime:
+        with patch("app.services.marketing._execute_content_package", new=AsyncMock()) as runtime:
             package = await create_manual_content_package(
                 session,
                 business_id=BUSINESS_ID,

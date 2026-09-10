@@ -2108,11 +2108,12 @@ def _build_create_publish_task(
         "needs natural post copy and restrained hashtags. LinkedIn needs a professional "
         "hook and restrained hashtags. TikTok needs a short hook/caption and hashtags. "
         "YouTube needs a title, description, and keywords. Omit irrelevant optional "
-        "fields rather than filling them artificially. Return recommendations and "
-        "proposed_actions as empty lists. Put exactly one JSON object in summary matching "
-        "ContentPackageProposal with canonical_message, headline, creative_concept, "
-        "visual_direction, and variants. Return each requested platform exactly once. "
-        "Nothing may be approved, scheduled, sent, or published."
+        "fields rather than filling them artificially. Return exactly one "
+        "ContentPackageProposal through the required typed schema with canonical_message, "
+        "headline, creative_concept, visual_direction, and variants. Return each requested "
+        "platform exactly once. Do not return recommendations or proposed actions; this "
+        "typed generation is content-only. Nothing may be approved, scheduled, sent, "
+        "or published."
     )
 
     if len(task) > _CREATE_PUBLISH_TASK_MAX_LENGTH:
@@ -2122,6 +2123,55 @@ def _build_create_publish_task(
 
     return task
 
+
+async def _execute_content_package(
+    session: AsyncSession,
+    business_id: UUID,
+    task: str,
+    provider: AIAgentProvider,
+):
+    """
+    Execute Create & Publish directly against its typed public schema.
+
+    The generic agent envelope must never be used as a JSON transport inside
+    `summary`. The trusted runtime still owns Business Brain assembly, tenant
+    isolation, privacy policy and provider metadata.
+    """
+    try:
+        request = await _build_cmo_execution_request(
+            session,
+            business_id,
+            task,
+        )
+    except ValidationError:
+        logger.info(
+            "create_publish_generation_rejected reason=request_invalid"
+        )
+        raise MarketingAIError from None
+
+    try:
+        return await execute_ai_agent_typed_with_metadata(
+            session,
+            business_id,
+            request,
+            provider,
+            ContentPackageProposal,
+        )
+    except AIAgentResponseError:
+        logger.info(
+            "create_publish_generation_rejected reason=typed_response_invalid"
+        )
+        raise MarketingAIError from None
+    except AIAgentProviderError:
+        logger.info(
+            "create_publish_generation_rejected reason=provider_failed"
+        )
+        raise MarketingAIError from None
+    except AIAgentError:
+        logger.info(
+            "create_publish_generation_rejected reason=runtime_failed"
+        )
+        raise MarketingAIError from None
 
 async def generate_content_package(
     session: AsyncSession,
@@ -2137,19 +2187,28 @@ async def generate_content_package(
         media_asset_id=data.media_asset_id,
     )
     task = _build_create_publish_task(data, media)
-    execution = await _execute_cmo(session, business_id, task, provider)
-    try:
-        proposal = ContentPackageProposal.model_validate_json(
-            execution.output.summary
-        )
-    except ValidationError:
-        raise MarketingAIError from None
-    if execution.output.recommendations or execution.output.proposed_actions:
-        raise MarketingAIError
+    execution = await _execute_content_package(
+        session,
+        business_id,
+        task,
+        provider,
+    )
+    proposal = execution.output
     returned_platforms = [variant.platform for variant in proposal.variants]
     if returned_platforms != data.platforms and set(returned_platforms) != set(data.platforms):
+        logger.info(
+            "create_publish_generation_rejected reason=platform_mismatch",
+            extra={
+                "requested_platform_count": len(data.platforms),
+                "returned_platform_count": len(returned_platforms),
+            },
+        )
         raise MarketingAIError
     if len(returned_platforms) != len(set(returned_platforms)):
+        logger.info(
+            "create_publish_generation_rejected reason=duplicate_platform",
+            extra={"returned_platform_count": len(returned_platforms)},
+        )
         raise MarketingAIError
 
     cta_capabilities = await _trusted_cta_capabilities(
@@ -2182,15 +2241,31 @@ async def generate_content_package(
             if platform == "youtube"
             else variant.caption or variant.description
         )
-        if not body or _contains_creative_instruction_copy(
+        if not body:
+            logger.info(
+                "create_publish_generation_rejected reason=body_missing",
+                extra={"platform": platform},
+            )
+            raise MarketingAIError
+        if _contains_creative_instruction_copy(
             variant.title,
             body,
             cta,
-        ) or _contains_unclassified_promotional_claim(
+        ):
+            logger.info(
+                "create_publish_generation_rejected reason=instruction_copy",
+                extra={"platform": platform},
+            )
+            raise MarketingAIError
+        if _contains_unclassified_promotional_claim(
             variant.title or proposal.headline,
             body,
             cta,
         ):
+            logger.info(
+                "create_publish_generation_rejected reason=promotional_claim",
+                extra={"platform": platform},
+            )
             raise MarketingAIError
         platform_fields = {
             "platform": platform,
