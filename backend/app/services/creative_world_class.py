@@ -427,6 +427,16 @@ _DIRECTION_LANGUAGE = frozenset("""
     flow flows flowed flowing
     move moves moved moving
     pass passes passed passing
+    arrange arranges arranged arranging
+    check checks checked checking
+    collect collects collected collecting
+    gather gathers gathered gathering
+    group groups grouped grouping
+    handle handles handled handling
+    place places placed placing
+    review reviews reviewed reviewing
+    sort sorts sorted sorting
+    write writes writing wrote written
 """.split())
 
 # Observable actions, rather than promises such as "transforms the campaign".
@@ -443,7 +453,11 @@ _SCENE_ACTION = re.compile(
     r"reach(?:es|ed|ing)?|cross(?:es|ed|ing)?|pass(?:es|ed|ing)?|"
     r"touch(?:es|ed|ing)?|meet(?:s|ing)?|separat(?:e|es|ed|ing)|"
     r"replac(?:e|es|ed|ing)|fill(?:s|ed|ing)?|empty|empties|"
-    r"stop(?:s|ped|ping)?|scatter(?:s|ed|ing)?|squeez(?:e|es|ed|ing))\b",
+    r"stop(?:s|ped|ping)?|scatter(?:s|ed|ing)?|squeez(?:e|es|ed|ing)|"
+    r"arrang(?:e|es|ed|ing)|check(?:s|ed|ing)?|collect(?:s|ed|ing)?|"
+    r"gather(?:s|ed|ing)?|group(?:s|ed|ing)?|handl(?:e|es|ed|ing)|"
+    r"plac(?:e|es|ed|ing)|review(?:s|ed|ing)?|sort(?:s|ed|ing)?|"
+    r"writ(?:e|es|ing)|wrote|written)\b",
     re.IGNORECASE,
 )
 

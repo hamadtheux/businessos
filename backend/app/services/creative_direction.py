@@ -91,6 +91,32 @@ class CreativeConceptScorecard(DirectionSchema):
     genericness_risk: int = Field(ge=0, le=100)
     replaceable_brand_risk: int = Field(ge=0, le=100)
     overall_score: int = Field(ge=0, le=100)
+    hard_eligible: bool = False
+    hard_failure_codes: tuple[str, ...] = Field(default=(), max_length=8)
+
+
+class OwnerCreativeIntent(DirectionSchema):
+    """Bounded owner-authored creative direction, never factual authority."""
+
+    visual_direction: str | None = Field(default=None, max_length=1200)
+    visual_exclusions: tuple[str, ...] = Field(default=(), max_length=8)
+    locked_headline: str | None = Field(default=None, max_length=180)
+    locked_supporting_copy: str | None = Field(default=None, max_length=600)
+    locked_cta: str | None = Field(default=None, max_length=300)
+
+    @field_validator("visual_exclusions")
+    @classmethod
+    def bounded_unique_exclusions(
+        cls,
+        values: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        normalized = tuple(" ".join(value.split()) for value in values)
+        if (
+            any(not value or len(value) > 180 for value in normalized)
+            or len({value.casefold() for value in normalized}) != len(normalized)
+        ):
+            raise ValueError("owner visual exclusions must be bounded and unique")
+        return normalized
 
 
 class CreativeConceptProposal(DirectionSchema):
@@ -172,6 +198,103 @@ class CreativeConceptProposal(DirectionSchema):
         ):
             raise ValueError("creative principles must be bounded, unique, and abstract")
         return normalized
+
+
+_HARD_PHYSICAL_ACTION = re.compile(
+    r"\b(?:arrang(?:e|es|ed|ing)|balanc(?:e|es|ed|ing)|carry|carries|carried|"
+    r"carrying|check(?:s|ed|ing)?|clos(?:e|es|ed|ing)|collect(?:s|ed|ing)?|"
+    r"gather(?:s|ed|ing)?|group(?:s|ed|ing)?|handl(?:e|es|ed|ing)|"
+    r"hold(?:s|ing)?|held|lift(?:s|ed|ing)?|open(?:s|ed|ing)?|"
+    r"plac(?:e|es|ed|ing)|pull(?:s|ed|ing)?|push(?:es|ed|ing)?|"
+    r"reach(?:es|ed|ing)?|review(?:s|ed|ing)?|sort(?:s|ed|ing)?|"
+    r"stack(?:s|ed|ing)?|writ(?:e|es|ing)|wrote|written)\b",
+    re.IGNORECASE,
+)
+_HARD_OPERATIONAL_ACTION = re.compile(
+    r"\b(?:assign(?:s|ed|ing)?|connect(?:s|ed|ing)?|coordinat(?:e|es|ed|ing)|"
+    r"distribut(?:e|es|ed|ing)|handoff(?:s)?|organiz(?:e|es|ed|ing)|"
+    r"prioritiz(?:e|es|ed|ing)|respond(?:s|ed|ing)?|rout(?:e|es|ed|ing)|"
+    r"sequenc(?:e|es|ed|ing)|synchroniz(?:e|es|ed|ing)|track(?:s|ed|ing)?)\b",
+    re.IGNORECASE,
+)
+_HARD_VISIBLE_RELATIONSHIP = re.compile(
+    r"\b(?:after|as|because|becomes?|before|consequence|from\b.{0,80}\bto|"
+    r"into|so that|through|turns?|while|without)\b|(?:->|→)",
+    re.IGNORECASE,
+)
+_PROHIBITED_RENDERER_REPRESENTATION = re.compile(
+    r"\b(?:fake|fabricated|fictional|invented|mock)\b.{0,60}"
+    r"\b(?:app|dashboard|interface|product|service|ui)\b|"
+    r"\b(?:holographic interface|fake dashboard|fake ui)\b",
+    re.IGNORECASE,
+)
+
+
+def _candidate_hard_failure_codes(
+    proposal: CreativeConceptProposal,
+    *,
+    dimensions: dict[str, int],
+    world_class: object,
+    story_mode: CreativeStoryMode,
+    authoritative_context: AuthoritativeCreativeContext | None,
+) -> tuple[str, ...]:
+    """Decide whether one concept rationally merits a bounded media call."""
+    positive_text = " ".join(
+        str(value)
+        for key, value in proposal.model_dump().items()
+        if key not in {"avoid_patterns", "originality_notes"}
+    )
+    visual_story = " ".join(
+        (
+            proposal.marketing_idea,
+            proposal.customer_care_reason,
+            proposal.hero_subject,
+            proposal.hero_relevance,
+            proposal.product_story,
+            proposal.scroll_stopping_hook,
+        )
+    )
+    physical_action = bool(_HARD_PHYSICAL_ACTION.search(visual_story))
+    operational_action = bool(_HARD_OPERATIONAL_ACTION.search(visual_story))
+    generic_visual = detect_generic_visual_shorthand(positive_text)
+    failures: list[str] = []
+
+    if (
+        dimensions["pr_safety"] == 0
+        or _BRAND_OFFER_UNSUPPORTED_CLAIM.search(positive_text)
+    ):
+        failures.append("unsupported_business_claim")
+    if _PROHIBITED_RENDERER_REPRESENTATION.search(positive_text):
+        failures.append("prohibited_fake_representation")
+    if generic_visual.hard_failure or dimensions["genericness_risk"] >= 72:
+        failures.append("generic_visual_shorthand")
+    if dimensions["replaceable_brand_risk"] >= 72:
+        failures.append("replaceable_brand_concept")
+    if dimensions["business_specific_relevance"] < 42:
+        failures.append("insufficient_business_grounding")
+    if dimensions["product_relevance"] < 38:
+        failures.append("missing_grounded_mechanism")
+    if dimensions["composition_feasibility"] < 46:
+        failures.append("composition_not_feasible")
+    if not physical_action and not operational_action:
+        failures.append("unexecutable_visual_story")
+    if (
+        story_mode == "brand_offer"
+        and operational_action
+        and not physical_action
+        and (
+            authoritative_context is None
+            or authoritative_context.source_count == 0
+        )
+    ):
+        failures.append("insufficient_authoritative_business_information")
+    if (
+        not _HARD_VISIBLE_RELATIONSHIP.search(visual_story)
+        and getattr(world_class, "customer_causality", 0) < 42
+    ):
+        failures.append("missing_visible_consequence")
+
+    return tuple(dict.fromkeys(failures))[:8]
 
 
 _BRAND_OFFER_CONCRETE_ARTIFACT = re.compile(
@@ -347,7 +470,11 @@ class CreativeDirectionPlan(DirectionSchema):
     def selected_concept_is_ranked_winner(self) -> "CreativeDirectionPlan":
         winner = max(
             self.candidates,
-            key=lambda value: (value.scorecard.overall_score, value.concept_name),
+            key=lambda value: (
+                value.scorecard.hard_eligible,
+                value.scorecard.overall_score,
+                value.concept_name,
+            ),
         )
         if winner != self.selected_concept:
             raise ValueError("selected concept must be the highest-scoring candidate")
@@ -585,6 +712,7 @@ def build_creative_direction(
     selected = max(
         candidates,
         key=lambda candidate: (
+            candidate.scorecard.hard_eligible,
             candidate.scorecard.overall_score,
             candidate.concept_name,
         ),
@@ -596,6 +724,206 @@ def build_creative_direction(
         used_live_research=not research.degraded and research.reference_count > 0,
         used_ai_synthesis=synthesis is not None,
     )
+
+
+def _bounded_rescue_text(value: str, maximum: int) -> str:
+    normalized = " ".join(value.split())
+    if len(normalized) <= maximum:
+        return normalized
+    return normalized[: maximum - 1].rstrip(" ,.;:-") + "…"
+
+
+def build_grounded_creative_rescue(
+    *,
+    strategy: CreativeStrategyProposal,
+    research: CreativeResearchBundle,
+    context: PublicCreativeResearchContext,
+    story_mode: CreativeStoryMode = "offering_proof",
+    authoritative_context: AuthoritativeCreativeContext | None = None,
+    owner_intent: OwnerCreativeIntent | None = None,
+) -> CreativeDirectionPlan:
+    """Build one conservative server-owned scene without another model call."""
+    if story_mode not in {"offering_proof", "brand_offer"}:
+        raise ValueError("Creative story mode is invalid")
+
+    owner_visual = owner_intent.visual_direction if owner_intent is not None else None
+    exclusions = tuple(
+        dict.fromkeys(
+            (
+                *(owner_intent.visual_exclusions if owner_intent is not None else ()),
+                "generic AI or SaaS shorthand",
+                "glowing hubs, neon networks, or floating icons",
+                "fake dashboards or interfaces",
+                "generic premium desk scenes",
+                "invented business capabilities or outcomes",
+                "rendered copy or fake brand marks",
+            )
+        )
+    )[:6]
+
+    if story_mode == "brand_offer":
+        strategy_scene = " ".join(
+            (
+                strategy.target_audience,
+                strategy.audience_insight,
+                strategy.campaign_angle,
+                owner_visual or "",
+            )
+        )
+        has_authority = (
+            authoritative_context is not None
+            and authoritative_context.source_count > 0
+        )
+        if not has_authority and not _HARD_PHYSICAL_ACTION.search(strategy_scene):
+            raise ValueError("Grounded brand rescue lacks authoritative or physical context")
+
+        target = _brand_offer_safe_text(
+            strategy.target_audience,
+            fallback=f"the intended {context.industry} audience",
+        )
+        angle = _brand_offer_safe_text(
+            strategy.campaign_angle,
+            fallback=f"the grounded {context.campaign_objective} campaign",
+        )
+        insight = _brand_offer_safe_text(
+            strategy.audience_insight,
+            fallback=f"the visible pressure experienced by {target}",
+        )
+        actor = f"one real person from {target}"
+        marketing_idea = (
+            f"A human tension-to-resolution contrast: {actor} gathers scattered "
+            f"tangible work cues connected to {angle}, then turns them into one "
+            "calm, controlled sequence."
+        )
+        customer_care_reason = (
+            f"{target} care because {insight}; the change from scattered work to "
+            "a controlled sequence makes that pressure immediately visible."
+        )
+        hero_subject = (
+            f"{actor} in a believable {context.industry} working environment, "
+            "gathering scattered paper records and physical work cues by hand."
+        )
+        hero_relevance = (
+            f"The person and work cues directly represent {target} and the grounded "
+            f"campaign tension in {angle}."
+        )
+        product_story = (
+            f"{actor} gathers scattered tangible work cues for {angle}, sorts the "
+            "items into related groups, and places the groups into one controlled "
+            "sequence; the visible shift from scattered to ordered is the consequence."
+        )
+        visual_metaphor = (
+            "A real pair of hands turning scattered work into one composed physical "
+            "rhythm, shown as an editorial before-to-after moment."
+        )
+        brand_expression = (
+            "Use restrained brand color in ordinary physical materials and preserve "
+            "the real identity for the deterministic overlay."
+        )
+    else:
+        subject = strategy.subject_focus
+        actor = f"one real customer beside {subject}"
+        marketing_idea = (
+            f"A grounded choice-and-consequence moment: {actor} reaches toward the "
+            "supported hero while clearing competing visual clutter from the decision."
+        )
+        customer_care_reason = (
+            f"The audience can connect {subject} to {strategy.audience_insight} through "
+            "one immediate physical decision rather than an abstract promise."
+        )
+        hero_subject = (
+            f"{subject} as the single recognizable hero while a real customer reaches "
+            "toward it in a credible category setting."
+        )
+        hero_relevance = (
+            f"The hero is the supported campaign subject, and the customer's physical "
+            f"choice makes {strategy.campaign_angle} visible."
+        )
+        product_story = (
+            f"A customer reaches toward {subject}, lifts one grounded category cue, "
+            "and clears competing clutter aside; the action turns consideration into "
+            "one visible, credible choice."
+        )
+        visual_metaphor = (
+            "One clear physical choice emerging from visual competition, with the "
+            "supported subject carrying the commercial meaning."
+        )
+        brand_expression = (
+            "Use restrained brand color and preserve the real identity for the "
+            "deterministic overlay."
+        )
+
+    proposal = CreativeConceptProposal(
+        concept_name="Grounded human sequence",
+        marketing_idea=_bounded_rescue_text(marketing_idea, 300),
+        customer_care_reason=_bounded_rescue_text(customer_care_reason, 300),
+        strategic_reason=_bounded_rescue_text(
+            "Use an immediately photographable human action and visible consequence "
+            "that stays within the validated campaign context.",
+            300,
+        ),
+        # The shared V2 ImageExecutionPlan focal-point contract is 180 chars.
+        # Keep rescue output inside that downstream bound at construction time.
+        hero_subject=_bounded_rescue_text(hero_subject, 180),
+        hero_relevance=_bounded_rescue_text(hero_relevance, 300),
+        product_story=_bounded_rescue_text(product_story, 400),
+        scroll_stopping_hook=(
+            "The decisive instant when scattered physical work becomes one ordered "
+            "sequence under the hero's hands."
+        ),
+        visual_metaphor=_bounded_rescue_text(visual_metaphor, 300),
+        layout_intent=(
+            "Editorial asymmetric composition with the human action as one clear hero "
+            "and a protected low-detail copy column."
+        ),
+        focal_area="human action anchored opposite the protected copy column",
+        text_zone="quiet, uncluttered, low-detail column protected from all objects",
+        offer_treatment="compact supporting badge outside the hero action",
+        cta_treatment="compact high-contrast filled CTA in the protected copy column",
+        depth="credible foreground work cues with restrained environmental depth",
+        image_style=_bounded_rescue_text(
+            f"{strategy.mood}; human editorial commercial photography",
+            220,
+        ),
+        camera_direction="eye-level editorial framing with a decisive view of the hands",
+        lighting="controlled natural directional light with believable material detail",
+        mood="human, calm, premium, credible, and commercially direct",
+        visual_density="controlled medium density",
+        background_complexity="restrained detail outside the protected copy column",
+        brand_expression=_bounded_rescue_text(brand_expression, 300),
+        inspiration_principles=(
+            "human tension followed by visible resolution",
+            "one decisive physical action",
+            "protected deterministic copy space",
+        ),
+        avoid_patterns=exclusions,
+        originality_notes=(
+            "Server-owned grounded rescue using only campaign context; no source "
+            "artwork, unsupported capability, interface, or generated copy."
+        ),
+    )
+    scorecard = _score_candidates(
+        (proposal,),
+        strategy=strategy,
+        research=research,
+        context=context,
+        story_mode=story_mode,
+        authoritative_context=authoritative_context,
+    )[0]
+    candidate = CreativeConceptCandidate(
+        **proposal.model_dump(),
+        scorecard=scorecard,
+    )
+    direction = CreativeDirectionPlan(
+        candidates=(candidate,),
+        selected_concept=candidate,
+        research_fingerprint=research.research_fingerprint,
+        used_live_research=False,
+        used_ai_synthesis=False,
+    )
+    if not direction.selected_concept.scorecard.hard_eligible:
+        raise ValueError("Grounded creative rescue failed hard eligibility")
+    return direction
 
 
 def revalidate_selected_creative_concept(
@@ -678,6 +1006,7 @@ def build_creative_director_task(
     context: PublicCreativeResearchContext,
     story_mode: CreativeStoryMode = "offering_proof",
     repair: bool = False,
+    owner_intent: OwnerCreativeIntent | None = None,
 ) -> str:
     """
     Build one bounded Creative Director task without blind truncation.
@@ -771,6 +1100,19 @@ def build_creative_director_task(
         )[:10]
     ) or "none"
 
+    owner_intent_context = ""
+    if owner_intent is not None and (
+        owner_intent.visual_direction or owner_intent.visual_exclusions
+    ):
+        owner_intent_context = (
+            "Creative direction only; this is not factual or capability authority. "
+            f"Visual story and style: {owner_intent.visual_direction or 'none'}. "
+            "Explicit visual exclusions: "
+            f"{'; '.join(owner_intent.visual_exclusions) or 'none'}. "
+            "The exact headline, supporting copy, and CTA in the trusted strategy "
+            "are locked deterministic overlays; do not rewrite or draw them."
+        )
+
     mandatory_prefix = (
         "Act as a senior advertising Creative Director. Produce exactly three "
         "materially different executable concepts. They must differ in hero idea, "
@@ -835,22 +1177,33 @@ def build_creative_director_task(
 
     remaining = max_task_length - len(fixed_task)
 
-    dynamic_sources: tuple[tuple[str, str, float], ...] = (
-        (
-            "\n\nABSTRACT RESEARCH SIGNALS ONLY:\n",
-            research_principles,
-            0.38,
-        ),
-        (
-            "\nAvoid: ",
-            avoid_patterns,
-            0.20,
-        ),
-        (
-            "\n\nINTERNAL FALLBACK GUIDANCE:\n",
-            pattern_lines,
-            0.42,
-        ),
+    dynamic_sources = tuple(
+        item
+        for item in (
+            (
+                "\n\nOWNER CREATIVE INTENT:\n",
+                owner_intent_context,
+                0.42,
+            )
+            if owner_intent_context
+            else None,
+            (
+                "\n\nABSTRACT RESEARCH SIGNALS ONLY:\n",
+                research_principles,
+                0.24 if owner_intent_context else 0.38,
+            ),
+            (
+                "\nAvoid: ",
+                avoid_patterns,
+                0.12 if owner_intent_context else 0.20,
+            ),
+            (
+                "\n\nINTERNAL FALLBACK GUIDANCE:\n",
+                pattern_lines,
+                0.22 if owner_intent_context else 0.42,
+            ),
+        )
+        if item is not None
     )
 
     label_total = sum(
@@ -1730,9 +2083,19 @@ def _score_candidates(
             overall = min(overall, 49)
         elif genericness_risk >= 65 or replaceable_brand_risk >= 72:
             overall = min(overall, 58)
-        results.append(
-            CreativeConceptScorecard(**dimensions, overall_score=overall)
+        hard_failure_codes = _candidate_hard_failure_codes(
+            proposal,
+            dimensions=dimensions,
+            world_class=world_class,
+            story_mode=story_mode,
+            authoritative_context=authoritative_context,
         )
+        results.append(CreativeConceptScorecard(
+            **dimensions,
+            overall_score=overall,
+            hard_eligible=not hard_failure_codes,
+            hard_failure_codes=hard_failure_codes,
+        ))
     return tuple(results)
 
 
@@ -1750,6 +2113,44 @@ def creative_direction_meets_quality_floor(
         and score.genericness_risk < 65
         and score.replaceable_brand_risk < 72
     )
+
+
+def creative_direction_meets_hard_eligibility(
+    direction: CreativeDirectionPlan,
+) -> bool:
+    """Return whether the selected server-scored concept may buy media."""
+    return direction.selected_concept.scorecard.hard_eligible
+
+
+def creative_direction_hard_failure_codes(
+    direction: CreativeDirectionPlan,
+) -> tuple[str, ...]:
+    return direction.selected_concept.scorecard.hard_failure_codes
+
+
+def creative_direction_soft_deficiencies(
+    direction: CreativeDirectionPlan,
+) -> tuple[str, ...]:
+    """Bounded quality conclusions for the one structured Director repair."""
+    score = direction.selected_concept.scorecard
+    deficiencies: list[str] = []
+    if score.marketing_idea_strength < 55:
+        deficiencies.append("idea_strength_low")
+    if score.visual_storytelling < 55:
+        deficiencies.append("visual_storytelling_low")
+    if score.commercial_sophistication < 55:
+        deficiencies.append("commercial_mechanism_low")
+    if score.product_relevance < 55:
+        deficiencies.append("mechanism_clarity_low")
+    if score.business_specific_relevance < 55:
+        deficiencies.append("business_grounding_low")
+    if score.composition_feasibility < 60:
+        deficiencies.append("composition_feasibility_low")
+    if score.genericness_risk >= 65:
+        deficiencies.append("genericness_high")
+    if score.replaceable_brand_risk >= 72:
+        deficiencies.append("replaceability_high")
+    return tuple(deficiencies[:8])
 
 
 def _pattern_fit(

@@ -106,7 +106,7 @@ def test_valid_initial_task_has_identical_repair_budget_and_facts(boundary):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("strong_repair", [False, True])
-async def test_long_campaign_repair_dispatches_through_actual_runtime(
+async def test_long_campaign_soft_or_strong_repair_dispatches_through_actual_runtime(
     runtime, monkeypatch, caplog, strong_repair,
 ):
     strategy = long_strategy()
@@ -156,11 +156,12 @@ async def test_long_campaign_repair_dispatches_through_actual_runtime(
     )
     assert dispatch.await_count == 2
     assert provider.generate_typed_with_metadata.await_count == 2
-    assert image.generate_draft.await_count == (1 if strong_repair else 0)
-    assert result.generation_status == ("ready" if strong_repair else "failed")
+    assert image.generate_draft.await_count == 1
+    assert result.generation_status == "ready"
     context_text = dispatch.await_args.kwargs["server_context"]
     assert len(context_text) <= 8000
     repair = json.loads(context_text)
+    assert repair["deficiencies"]
     assert set(repair["rejected_proposal"]) == {"hero", "story"}
     assert len(repair["rejected_proposal"]["hero"]) <= 500
     assert len(repair["rejected_proposal"]["story"]) <= 400
@@ -174,15 +175,7 @@ async def test_long_campaign_repair_dispatches_through_actual_runtime(
     assert "director_repair_task_invalid" not in caplog.messages
     assert strategy.audience_insight not in caplog.text
     if not strong_repair:
-        await marketing.run_queued_creative_asset_generation(
-            _ScalarSession([asset, _business_record(), None, asset]),
-            business_id=BUSINESS_ID, creative_asset_id=asset.id,
-            provider=image, storage=_DurableCheckpointStorage(),
-            director_provider=provider, visual_review_provider=review,
-            require_semantic_review=True,
-        )
-        assert dispatch.await_count == 2
-        image.generate_draft.assert_not_awaited()
+        assert "creative_soft_quality_below_target_proceeding_to_render" in caplog.messages
 
 
 REAL_BUILD_REQUEST = marketing._build_cmo_execution_request

@@ -25,9 +25,11 @@ from app.services.creative_direction import (  # noqa: E402
     _ranked_patterns,
     CreativeConceptProposal,
     CreativeDirectorSynthesis,
+    OwnerCreativeIntent,
     build_creative_director_task,
     build_creative_direction,
     build_visual_art_direction,
+    creative_direction_meets_hard_eligibility,
     creative_direction_meets_quality_floor,
 )
 from app.services.creative_research import (  # noqa: E402
@@ -207,6 +209,28 @@ class CreativeDirectionTests(TestCase):
         self.assertNotIn("make this exact", task.casefold())
         self.assertIn("exactly three", task.casefold())
         self.assertIn("abstract", task.casefold())
+
+    def test_director_task_preserves_bounded_owner_visual_intent_without_authority(self) -> None:
+        task = build_creative_director_task(
+            strategy=_strategy(),
+            research=self._research(),
+            context=_context(),
+            owner_intent=OwnerCreativeIntent(
+                visual_direction=(
+                    "Show one real owner sorting scattered daily work into one "
+                    "controlled rhythm with human editorial photography."
+                ),
+                visual_exclusions=("glowing AI hub", "fake dashboards"),
+                locked_headline="Use one clear rhythm",
+                locked_cta="Run Smarter",
+            ),
+        )
+        self.assertLessEqual(len(task), 4000)
+        self.assertIn("OWNER CREATIVE INTENT", task)
+        self.assertIn("not factual or capability authority", task)
+        self.assertIn("Show one real owner sorting scattered daily work", task)
+        self.assertIn("glowing AI hub", task)
+        self.assertIn("locked deterministic overlays", task)
 
     def test_director_task_budget_preserves_authoritative_values_and_final_contract(self) -> None:
         strategy = _strategy()
@@ -703,7 +727,7 @@ class CreativeDirectorRuntimeTests(IsolatedAsyncioTestCase):
             update={"selected_concept": weak_selected}
         )
 
-    async def test_weak_deterministic_fallback_cannot_bypass_any_core_floor(self) -> None:
+    async def test_soft_dimensions_do_not_block_hard_eligible_deterministic_rescue(self) -> None:
         for field in (
             "business_specific_relevance",
             "product_relevance",
@@ -712,14 +736,11 @@ class CreativeDirectorRuntimeTests(IsolatedAsyncioTestCase):
         ):
             with self.subTest(field=field):
                 context, research, weak = self._weak_direction(field)
-                with (
-                    patch(
-                        "app.services.marketing.build_creative_direction",
-                        return_value=weak,
-                    ),
-                    self.assertRaises(MarketingAIError),
+                with patch(
+                    "app.services.marketing.build_creative_direction",
+                    return_value=weak,
                 ):
-                    await _creative_direction_with_fallback(
+                    direction, _ = await _creative_direction_with_fallback(
                         object(),
                         business_id=uuid4(),
                         strategy=_strategy(),
@@ -728,8 +749,9 @@ class CreativeDirectorRuntimeTests(IsolatedAsyncioTestCase):
                         provider=None,
                         max_output_tokens=4_000,
                     )
+                self.assertTrue(creative_direction_meets_hard_eligibility(direction))
 
-    async def test_provider_failure_fallback_is_quality_gated(self) -> None:
+    async def test_provider_failure_uses_hard_gated_grounded_rescue(self) -> None:
         context, research, weak = self._weak_direction("product_relevance")
         with (
             patch(
@@ -744,9 +766,8 @@ class CreativeDirectorRuntimeTests(IsolatedAsyncioTestCase):
                 "app.services.marketing.build_creative_direction",
                 return_value=weak,
             ),
-            self.assertRaises(MarketingAIError),
         ):
-            await _creative_direction_with_fallback(
+            direction, _ = await _creative_direction_with_fallback(
                 object(),
                 business_id=uuid4(),
                 strategy=_strategy(),
@@ -755,8 +776,9 @@ class CreativeDirectorRuntimeTests(IsolatedAsyncioTestCase):
                 provider=SimpleNamespace(provider_name="test_director"),
                 max_output_tokens=4_000,
             )
+        self.assertTrue(creative_direction_meets_hard_eligibility(direction))
 
-    async def test_low_quality_ai_fallback_is_also_quality_gated(self) -> None:
+    async def test_soft_weak_ai_direction_proceeds_after_bounded_repair(self) -> None:
         context, research, weak = self._weak_direction("visual_storytelling")
         execution = SimpleNamespace(
             output=SimpleNamespace(),
@@ -775,9 +797,8 @@ class CreativeDirectorRuntimeTests(IsolatedAsyncioTestCase):
                 "app.services.marketing.build_creative_direction",
                 side_effect=[weak, weak],
             ),
-            self.assertRaises(MarketingAIError),
         ):
-            await _creative_direction_with_fallback(
+            direction, _ = await _creative_direction_with_fallback(
                 object(),
                 business_id=uuid4(),
                 strategy=_strategy(),
@@ -786,6 +807,8 @@ class CreativeDirectorRuntimeTests(IsolatedAsyncioTestCase):
                 provider=SimpleNamespace(provider_name="test_director"),
                 max_output_tokens=4_000,
             )
+        self.assertTrue(creative_direction_meets_hard_eligibility(direction))
+        self.assertFalse(creative_direction_meets_quality_floor(direction))
 
     async def test_one_typed_director_call_drives_server_scored_selection(self) -> None:
         context, research, synthesis = self._inputs()

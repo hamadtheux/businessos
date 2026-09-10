@@ -48,7 +48,9 @@ from app.services.marketing import (  # noqa: E402
     _execute_creative_strategy,
     _creative_story_mode,
     _creative_variation_direction,
+    _normalize_creative_display_cta,
     _normalize_generated_cta,
+    _parse_owner_creative_intent,
     _raw_visual_regeneration_correction,
     _supporting_copy_for_composition,
     _page,
@@ -420,6 +422,44 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
             ),
             "Book Now",
         )
+
+    def test_owner_display_cta_preserves_safe_campaign_language(self) -> None:
+        self.assertEqual(
+            _normalize_creative_display_cta("Run Smarter"),
+            "Run Smarter",
+        )
+        # Fulfillment-like labels remain subject to the existing capability gate.
+        self.assertEqual(
+            _normalize_creative_display_cta("Shop Now"),
+            "Learn More",
+        )
+
+    def test_owner_intent_extracts_only_explicit_copy_locks(self) -> None:
+        intent = _parse_owner_creative_intent(
+            """Headline:
+Run Your Business With One Clear Rhythm
+Supporting copy: Bring marketing, sales, support, and operations into one connected way of working.
+CTA: Run Smarter
+Owner visual direction:
+Show a real owner sorting scattered work into one controlled rhythm.
+Explicitly avoid:
+- glowing AI hub
+- fake dashboards
+"""
+        )
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(
+            intent.locked_headline,
+            "Run Your Business With One Clear Rhythm",
+        )
+        self.assertEqual(
+            intent.locked_supporting_copy,
+            "Bring marketing, sales, support, and operations into one connected way of working.",
+        )
+        self.assertEqual(intent.locked_cta, "Run Smarter")
+        self.assertIn("glowing AI hub", intent.visual_exclusions)
+        self.assertNotIn("Run Smarter", intent.visual_direction or "")
 
     def test_supporting_copy_deduplication_preserves_exact_primary_values(self) -> None:
         headline = "50% Off"
@@ -980,6 +1020,51 @@ class MarketingServiceTests(unittest.IsolatedAsyncioTestCase):
             " ".join(strategy["headline"].casefold().split()),
             " ".join(authorized_offer.casefold().split()),
         )
+
+    async def test_creative_brief_preserves_explicit_safe_copy_and_display_cta(self) -> None:
+        headline = "Run Your Business With One Clear Rhythm"
+        supporting = (
+            "Bring marketing, sales, support, and operations into one connected "
+            "way of working."
+        )
+        instructions = f"""Headline:
+{headline}
+Supporting copy:
+{supporting}
+CTA: Run Smarter
+Owner visual direction:
+Show a real business owner sorting scattered responsibilities into one calm rhythm.
+Explicitly avoid:
+- glowing AI hub
+- fake dashboards
+"""
+        execution = SimpleNamespace(
+            provider_metadata=SimpleNamespace(provider_request_id="req-copy-lock"),
+            output=CreativeStrategyProposal.model_validate(_creative_strategy()),
+        )
+        session = _ScalarSession([])
+
+        with patch(
+            "app.services.marketing._execute_creative_strategy",
+            new=AsyncMock(return_value=execution),
+        ):
+            asset = await create_creative_brief(
+                session,
+                business_id=BUSINESS_ID,
+                actor_user_id=USER_ID,
+                data=CreativeBriefCreate(
+                    asset_type="social_square",
+                    instructions=instructions,
+                    aspect_ratio="1:1",
+                ),
+                provider=SimpleNamespace(),
+            )
+
+        strategy = json.loads(asset.visual_direction)
+        self.assertEqual(strategy["headline"], headline)
+        self.assertEqual(strategy["supporting_message"], supporting)
+        self.assertEqual(strategy["cta"], "Run Smarter")
+        self.assertEqual(asset.instructions, instructions.strip())
 
     async def test_creative_intelligence_turns_weak_request_into_structured_strategy(self) -> None:
         execution = SimpleNamespace(

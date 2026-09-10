@@ -24,6 +24,7 @@ from app.services.creative_direction import (
     CreativeDirectorSynthesis,
     CreativeDirectionCheckpoint,
     build_creative_direction,
+    creative_direction_meets_hard_eligibility,
     creative_direction_meets_quality_floor,
 )
 from app.services.creative_provider import CreativeGenerationResult
@@ -465,6 +466,185 @@ def concept_failure():
         repair_instructions="PRIVATE_CRITIC_PROSE must never reach repair request"))
 
 
+_PRODUCTION_HEADLINE = "Run Your Business With One Clear Rhythm"
+_PRODUCTION_SUPPORTING = (
+    "Bring marketing, sales, support, and operations into one connected way of "
+    "working."
+)
+_PRODUCTION_CTA = "Run Smarter"
+_PRODUCTION_OWNER_INTENT = f"""Headline:
+{_PRODUCTION_HEADLINE}
+Supporting copy:
+{_PRODUCTION_SUPPORTING}
+CTA:
+{_PRODUCTION_CTA}
+
+Owner visual direction:
+Show a real business owner in a believable working environment managing customer
+messages, an order, follow-up work, marketing work, and reporting. Capture the
+moment scattered responsibilities become one controlled rhythm. Human premium
+editorial commercial photography.
+
+Explicitly avoid:
+- glowing AI brain
+- glowing AI hub
+- neon network
+- floating department icons
+- holograms
+- robots
+- fake dashboards
+- generic futuristic blue technology
+"""
+
+
+def _production_strategy():
+    return _saas_pipeline_strategy().model_copy(update={
+        "marketing_goal": (
+            "Show small business owners a calmer way to handle customer messages, "
+            "orders, follow-up, marketing, and reporting."
+        ),
+        "target_audience": (
+            "Small business owners handling customer messages, orders, follow-up, "
+            "marketing, and reporting."
+        ),
+        "audience_insight": (
+            "Several real responsibilities compete for the owner's attention in "
+            "the same working day."
+        ),
+        "campaign_angle": (
+            "Scattered customer messages, orders, follow-up, marketing, and "
+            "reporting become one controlled working rhythm around the owner."
+        ),
+        "headline": _PRODUCTION_HEADLINE,
+        "supporting_message": _PRODUCTION_SUPPORTING,
+        "cta": _PRODUCTION_CTA,
+        "visual_concept": (
+            "A real business owner physically organizing five recognizable work "
+            "responsibilities in a believable working environment."
+        ),
+        "subject_focus": (
+            "One real business owner with customer messages, an order, follow-up, "
+            "marketing work, and reporting."
+        ),
+        "mood": "Human premium editorial commercial photography.",
+        "lighting": "Believable soft directional daylight.",
+        "negative_space": "Protected quiet copy column with no objects.",
+    })
+
+
+def _production_synthesis(kind: str) -> CreativeDirectorSynthesis:
+    synthesis = _saas_pipeline_synthesis(strong=False)
+    candidates = list(synthesis.candidates)
+    if kind == "initial_weak":
+        values = {
+            "concept_name": "Competing work at noon",
+            "marketing_idea": (
+                "A real business owner holds mixed daily work while competing "
+                "responsibilities press into the same moment."
+            ),
+            "customer_care_reason": (
+                "Small business owners care because customer work and business duties "
+                "compete for attention during one working day."
+            ),
+            "hero_subject": (
+                "A real small-business owner holding mixed customer and business "
+                "papers in a believable working environment."
+            ),
+            "hero_relevance": (
+                "The owner and ordinary papers make daily divided attention visible."
+            ),
+            "product_story": (
+                "The owner holds mixed customer papers while an order and unfinished "
+                "marketing work sit nearby; the visible consequence is divided attention."
+            ),
+            "visual_metaphor": "Several ordinary papers competing for one owner's hands.",
+            "scroll_stopping_hook": (
+                "One owner caught while several real duties demand attention."
+            ),
+        }
+    elif kind == "repair_soft":
+        values = {
+            "concept_name": "The controlled working rhythm",
+            "marketing_idea": (
+                "A human before-to-after sequence shows a real owner turning customer "
+                "messages, an order, follow-up, marketing, and reporting into one "
+                "calm working rhythm."
+            ),
+            "customer_care_reason": (
+                "Owners care because the shift from scattered responsibilities to "
+                "visible order makes the working day feel manageable."
+            ),
+            "hero_subject": (
+                "A real small-business owner arranging five physical work cards for "
+                "customer messages, an order, follow-up, marketing, and reporting."
+            ),
+            "hero_relevance": (
+                "The owner's hands and recognizable work cards belong to the exact "
+                "daily responsibilities named by the campaign."
+            ),
+            "product_story": (
+                "The owner arranges five physical work cards into one calm sequence; "
+                "customer messages, an order, follow-up, marketing, and reporting sit "
+                "in a visibly controlled order in the same working environment."
+            ),
+            "visual_metaphor": (
+                "A visible editorial shift from scattered work to one controlled "
+                "human rhythm."
+            ),
+            "scroll_stopping_hook": (
+                "The decisive instant five scattered responsibilities align under "
+                "one owner's hand."
+            ),
+        }
+    elif kind == "strong":
+        values = {
+            "concept_name": "One owner, five responsibilities, one rhythm",
+            "marketing_idea": (
+                "A before-and-after human demonstration: one owner gathers customer "
+                "messages and orders, then sorts follow-up, marketing, and reporting "
+                "into one controlled rhythm."
+            ),
+            "customer_care_reason": (
+                "Owners care because customer messages, orders, follow-up, marketing, "
+                "and reporting compete for attention; the physical sequence makes a "
+                "calmer working day visible."
+            ),
+            "hero_subject": (
+                "A real small-business owner gathering customer messages and orders "
+                "while sorting follow-up, marketing, and reporting cards."
+            ),
+            "hero_relevance": (
+                "Every physical cue corresponds to one responsibility named by the "
+                "campaign and converges under the owner's control."
+            ),
+            "product_story": (
+                "A real small-business owner gathers customer messages and orders, "
+                "sorts follow-up and marketing into related groups, and places a "
+                "reporting card into one controlled sequence; scattered work becomes "
+                "visibly ordered."
+            ),
+            "visual_metaphor": (
+                "Five scattered responsibilities become one physical rhythm under "
+                "the owner's hands."
+            ),
+            "scroll_stopping_hook": (
+                "A decisive overhead editorial moment as five work streams align into "
+                "one sequence."
+            ),
+        }
+    else:
+        raise ValueError("unknown production synthesis kind")
+    candidates[0] = candidates[0].model_copy(update=values)
+    return synthesis.model_copy(update={"candidates": tuple(candidates)})
+
+
+def _production_execution(kind: str):
+    return SimpleNamespace(
+        output=_production_synthesis(kind),
+        provider_metadata=AIAgentProviderMetadata(),
+    )
+
+
 @pytest.mark.asyncio
 async def test_weak_initial_strong_text_repair_buys_only_after_second_director(runtime):
     runtime.execute.side_effect = [execution(strong=False), execution()]
@@ -489,17 +669,169 @@ async def test_weak_initial_strong_text_repair_buys_only_after_second_director(r
 
 
 @pytest.mark.asyncio
-async def test_two_weak_directions_fail_before_image_and_survive_worker_reentry(runtime):
+async def test_production_campaign_strong_initial_uses_one_director_and_one_image(
+    runtime,
+):
+    runtime.authority.return_value = _saas_authority(business_id=BUSINESS_ID)
+    runtime.execute.return_value = _production_execution("strong")
+    asset = asset_for_job()
+    asset.visual_direction = _production_strategy().model_dump_json()
+    asset.instructions = _PRODUCTION_OWNER_INTENT
+    image, review = providers()
+
+    result = await run(asset, image, review)
+
+    assert result.generation_status == "ready"
+    assert runtime.execute.await_count == 1
+    assert image.generate_draft.await_count == 1
+    assert review.review.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_production_campaign_weak_then_strong_uses_two_directors_one_image(
+    runtime,
+):
+    runtime.authority.return_value = _saas_authority(business_id=BUSINESS_ID)
+    runtime.execute.side_effect = [
+        _production_execution("initial_weak"),
+        _production_execution("strong"),
+    ]
+    asset = asset_for_job()
+    asset.visual_direction = _production_strategy().model_dump_json()
+    asset.instructions = _PRODUCTION_OWNER_INTENT
+    image, review = providers()
+
+    result = await run(asset, image, review)
+
+    assert result.generation_status == "ready"
+    assert runtime.execute.await_count == 2
+    assert image.generate_draft.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_production_soft_weak_hard_eligible_repair_reaches_v2_ready(
+    real_runtime,
+    monkeypatch,
+    caplog,
+):
+    caplog.set_level("INFO", logger="aibos.marketing")
+    authority = _saas_authority(business_id=BUSINESS_ID)
+    real_runtime.authority.return_value = authority
+    real_runtime.execute.side_effect = [
+        _production_execution("initial_weak"),
+        _production_execution("repair_soft"),
+    ]
+    asset = asset_for_job()
+    asset.visual_direction = _production_strategy().model_dump_json()
+    asset.instructions = _PRODUCTION_OWNER_INTENT
+    image, review = providers()
+    storage = _DurableCheckpointStorage()
+    captured_inputs = []
+    original_compose = marketing.CreativeCompositor.compose_candidates
+
+    def capture_and_compose(compositor, composition_input):
+        captured_inputs.append(composition_input)
+        return original_compose(compositor, composition_input)
+
+    monkeypatch.setattr(
+        marketing.CreativeCompositor,
+        "compose_candidates",
+        capture_and_compose,
+    )
+
+    context = marketing.derive_public_research_context(
+        business_type=_business_record().business_type,
+        channel="instagram",
+        asset_type=asset.asset_type,
+        strategy_text=(
+            f"{asset.instructions} {_production_strategy().marketing_goal} "
+            f"{_production_strategy().campaign_angle}"
+        ),
+        visual_text=(
+            f"{_production_strategy().visual_concept} "
+            f"{_production_strategy().mood} "
+            f"{_production_strategy().brand_treatment}"
+        ),
+    )
+    research = marketing.degraded_research_bundle(
+        marketing.build_research_request(context, max_results=12),
+        provider="internal_patterns",
+    )
+    repaired = build_creative_direction(
+        strategy=_production_strategy(),
+        research=research,
+        context=context,
+        story_mode="brand_offer",
+        authoritative_context=authority,
+        synthesis=_production_synthesis("repair_soft"),
+    )
+    assert creative_direction_meets_hard_eligibility(repaired)
+    assert not creative_direction_meets_quality_floor(repaired)
+
+    result = await run(asset, image, review, storage=storage)
+
+    assert result.generation_status == "ready"
+    assert real_runtime.execute.await_count == 2
+    assert image.generate_draft.await_count == 1
+    assert review.review.await_count == 1
+    assert any("/raw/" in key for key in storage.objects)
+    assert captured_inputs
+    composition_input = captured_inputs[0]
+    assert composition_input.composition_plan is not None
+    assert composition_input.headline == _PRODUCTION_HEADLINE
+    assert composition_input.supporting_copy == _PRODUCTION_SUPPORTING
+    assert composition_input.cta == _PRODUCTION_CTA
+    provider_request = image.generate_draft.await_args.args[0]
+    assert "CREATIVE ENGINE V2" in provider_request.instructions
+    assert _PRODUCTION_HEADLINE not in provider_request.instructions
+    critic_request = review.review.await_args.args[0]
+    assert critic_request.expected_headline == _PRODUCTION_HEADLINE
+    assert critic_request.expected_cta == _PRODUCTION_CTA
+    assert "creative_research_degraded_continuing" in caplog.text
+    assert "creative_soft_quality_below_target_proceeding_to_render" in caplog.text
+    first_task = real_runtime.request.await_args_list[0].args[2]
+    assert "OWNER CREATIVE INTENT" in first_task
+    repair_context = json.loads(
+        real_runtime.execute.await_args_list[1].kwargs["server_context"]
+    )
+    assert repair_context["deficiencies"]
+    assert "one visible action" in repair_context["instruction"]
+
+
+@pytest.mark.asyncio
+async def test_two_hard_invalid_director_results_use_zero_call_grounded_rescue(
+    runtime,
+):
+    runtime.authority.return_value = _saas_authority(business_id=BUSINESS_ID)
+    runtime.execute.side_effect = [
+        _saas_pipeline_execution(strong=False),
+        _saas_pipeline_execution(strong=False),
+    ]
+    asset = asset_for_job()
+    asset.visual_direction = _production_strategy().model_dump_json()
+    asset.instructions = _PRODUCTION_OWNER_INTENT
+    image, review = providers()
+
+    result = await run(asset, image, review)
+
+    assert result.generation_status == "ready"
+    assert runtime.execute.await_count == 2
+    assert image.generate_draft.await_count == 1
+    assert review.review.await_count == 1
+    checkpoint = asset.creative_metadata["director_state"]["plans"]["1"]
+    assert checkpoint["selected_concept"]["concept_name"] == "Grounded human sequence"
+
+
+@pytest.mark.asyncio
+async def test_two_soft_weak_hard_eligible_directions_reach_one_image(runtime):
     runtime.execute.side_effect = [execution(strong=False), execution(strong=False)]
     asset = asset_for_job()
     image, review = providers()
-    for _ in range(3):
-        result = await run(asset,image,review)
-        assert result.generation_status == "failed"
-        assert result.creative_metadata["image_generation_failure_stage"] == "direction_quality"
+    result = await run(asset,image,review)
+    assert result.generation_status == "ready"
     assert runtime.execute.await_count == 2
-    image.generate_draft.assert_not_awaited()
-    review.review.assert_not_awaited()
+    assert image.generate_draft.await_count == 1
+    assert review.review.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -512,23 +844,25 @@ async def test_concept_failure_requires_materially_new_validated_direction(runti
     assert runtime.execute.await_count == 2
     assert "PRIVATE_CRITIC_PROSE" not in runtime.request.await_args.args[2]
     assert "PRIVATE_CRITIC_PROSE" not in runtime.execute.await_args.kwargs["server_context"]
-    assert image.generate_draft.await_count == (2 if repair == "different" else 1)
-    assert result.generation_status == ("ready" if repair == "different" else "failed")
+    assert image.generate_draft.await_count == 2
+    assert result.generation_status == "ready"
+    first, second = image.generate_draft.await_args_list
     if repair == "different":
-        first, second = image.generate_draft.await_args_list
         assert "Opening time balancing act" in first.args[0].instructions
         assert "The paper sunrise" in second.args[0].instructions
+    else:
+        assert first.args[0].instructions != second.args[0].instructions
 
 
 @pytest.mark.asyncio
-async def test_semantic_failure_after_text_repair_has_no_third_director_or_second_image(runtime):
+async def test_semantic_failure_after_text_repair_has_no_third_director_and_stays_bounded(runtime):
     runtime.execute.side_effect = [execution(strong=False), execution()]
     asset = asset_for_job()
     image, review = providers([concept_failure()])
     result = await run(asset,image,review)
     assert result.generation_status == "failed"
     assert runtime.execute.await_count == 2
-    assert image.generate_draft.await_count == 1
+    assert image.generate_draft.await_count == 2
 
 
 @pytest.mark.asyncio
