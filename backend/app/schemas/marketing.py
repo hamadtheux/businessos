@@ -538,6 +538,23 @@ class VideoCreativeStrategy(MarketingSchema):
     recommendations: list[str] = Field(default_factory=list, max_length=20)
     proposed_actions: list[AIAgentProposedAction] = Field(default_factory=list, max_length=20)
 
+    # Shared Creative Engine identity. These are compact adapter fields, not a
+    # second video concept/scoring system; the detailed intent remains transient
+    # and is never copied into creative_metadata.
+    creative_territory_key: str | None = Field(default=None, max_length=80)
+    creative_concept_name: str | None = Field(default=None, max_length=100)
+    campaign_mechanism: str | None = Field(default=None, max_length=300)
+    composition_family: Literal[
+        "full_bleed_hero",
+        "editorial_split",
+        "subject_overlap",
+        "centered_campaign_poster",
+        "asymmetric_magazine",
+        "premium_minimal",
+        "brand_offer_spotlight",
+        "typographic_led",
+    ] | None = None
+
     @model_validator(mode="after")
     def validate_timeline(self) -> "VideoCreativeStrategy":
         if sum(scene.duration_seconds for scene in self.scenes) != self.duration_seconds:

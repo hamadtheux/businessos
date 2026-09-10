@@ -668,11 +668,24 @@ class CreativeVideoServiceTests(IsolatedAsyncioTestCase):
         self.assertIsNone(result.storage_reference)
         self.assertEqual(len(provider.requests), 1)
         self.assertEqual(provider.requests[0].business_id, BUSINESS_ID)
+        request = provider.requests[0]
+        self.assertIsNotNone(request.execution_plan_json)
+        payload = request.external_payload()
+        identity = payload["creative_identity"]
+        execution_plan = payload["execution_plan"]
+        self.assertEqual(identity["territory_key"], request.creative_territory_key)
+        self.assertEqual(identity["concept_name"], request.creative_concept_name)
+        self.assertEqual(identity["campaign_mechanism"], request.campaign_mechanism)
+        self.assertEqual(
+            identity["composition_family"],
+            execution_plan["composition_family"],
+        )
+        self.assertEqual(len(execution_plan["scene_plan"]), 5)
         self.assertEqual(
             result.creative_metadata["submission_idempotency_key"],
-            provider.requests[0].idempotency_key,
+            request.idempotency_key,
         )
-        self.assertNotIn("business_id", provider.requests[0].external_payload())
+        self.assertNotIn("business_id", payload)
 
         repeated = await start_video_generation(
             session,

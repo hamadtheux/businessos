@@ -28,6 +28,7 @@ VisualHardFailure = Literal[
     "commercially_weak",
     "unnatural_headline_wrapping",
     "generic_template_output",
+    "ai_cliche_visual",
     "weak_brand_cta",
     "excessive_dead_panel_space",
 ]
@@ -82,6 +83,9 @@ class CreativeVisualReview(BaseModel):
     campaign_alignment: int = Field(ge=0, le=100)
     visual_polish: int = Field(ge=0, le=100)
     generic_template_risk: int = Field(ge=0, le=100)
+    # Distinguishes the familiar AI/SaaS visual grammar from general
+    # replaceable-brand risk. The actual final PNG is still the evidence.
+    ai_cliche_risk: int = Field(default=0, ge=0, le=100)
     accidental_generated_text: bool
     duplicated_message: bool
     excessive_whitespace: bool
@@ -95,6 +99,7 @@ class CreativeVisualReview(BaseModel):
     commercially_weak: bool
     unnatural_headline_wrapping: bool
     generic_template_output: bool
+    ai_cliche_visual: bool = False
     weak_brand_cta: bool
     excessive_dead_panel_space: bool
     hard_failures: tuple[VisualHardFailure, ...] = Field(
@@ -117,6 +122,7 @@ class CreativeVisualReview(BaseModel):
             or self.no_product_service_story
             or self.commercially_weak
             or self.generic_template_output
+            or self.ai_cliche_visual
         )
         layout_failure = (
             self.duplicated_message
@@ -142,6 +148,7 @@ class CreativeVisualReview(BaseModel):
                 ("commercially_weak", self.commercially_weak),
                 ("unnatural_headline_wrapping", self.unnatural_headline_wrapping),
                 ("generic_template_output", self.generic_template_output),
+                ("ai_cliche_visual", self.ai_cliche_visual),
                 ("weak_brand_cta", self.weak_brand_cta),
                 ("excessive_dead_panel_space", self.excessive_dead_panel_space),
             )
@@ -174,7 +181,11 @@ class CreativeVisualReview(BaseModel):
         if self.approved:
             if raw_failure or layout_failure or self.repair_class != "none":
                 raise ValueError("approved review cannot contain a repair condition")
-            if dimension_floor < 68 or self.generic_template_risk > 48:
+            if (
+                dimension_floor < 68
+                or self.generic_template_risk > 48
+                or self.ai_cliche_risk > 48
+            ):
                 raise ValueError("approved review does not meet semantic quality floor")
         else:
             if self.repair_class == "none":
@@ -313,10 +324,13 @@ def semantic_review_has_concept_failure(review: CreativeVisualReview) -> bool:
         "commercially_weak", "generic_template_output",
         "irrelevant_visual", "irrelevant_decorative_art",
         "decorative_abstraction_dominates", "no_product_service_story",
+        "ai_cliche_visual",
     })) or (
         not review.approved and (
             review.product_relevance < 60 or review.visual_storytelling < 60
-            or review.business_specific_relevance < 60 or review.generic_template_risk > 48
+            or review.business_specific_relevance < 60
+            or review.generic_template_risk > 48
+            or review.ai_cliche_risk > 48
         )
     )
 
@@ -388,8 +402,8 @@ def build_visual_review_task(
         "Score every typed semantic dimension independently. The existing server "
         "requires at least 68 on every important dimension and separately enforces "
         "the runtime aggregate threshold. Never inflate a weak dimension merely to "
-        "make the candidate pass. Generic-template risk must remain at or below the "
-        "server-owned allowable ceiling.\n\n"
+        "make the candidate pass. Generic-template risk and ai_cliche_risk must remain "
+        "at or below the server-owned allowable ceiling.\n\n"
 
         "FOUR NON-NEGOTIABLE REVIEW LAYERS:\n"
         "1. COMMERCIAL IDEA — Is there an actual advertising idea, mechanism, "
@@ -441,12 +455,12 @@ def build_visual_review_task(
         "mode, set "
         "decorative_abstraction_dominates=true and commercially_weak=true.\n"
 
-        "- GENERIC AI/SAAS FANTASY FAILURE: Do not automatically reward floating "
-        "dashboards, holographic interfaces, glowing data panels, robots, brains, "
-        "neural networks, or generic futuristic AI imagery. If those elements do "
-        "not credibly demonstrate the supplied concept and active-mode story, treat "
-        "them as "
-        "generic template output or irrelevant visual storytelling.\n"
+        "- GENERIC AI/SAAS FANTASY: Judge the rendered PNG, not only the prompt. "
+        "Dominant brains/orbs/hubs, neon networks, floating nodes/icons, "
+        "holographic panels, generic dashboards, robots, or meaningless data "
+        "effects set ai_cliche_visual=true, ai_cliche_risk above 48, "
+        "generic_template_output=true, and raw_visual repair unless they visibly "
+        "demonstrate the supplied campaign mechanism.\n"
 
         "- VISUAL-PROOF FAILURE: In offering_proof mode, require understandable "
         "product/service cause-and-effect. In brand_offer mode, require a meaningful "

@@ -66,6 +66,7 @@ from app.services.creative_world_class import (
     assess_world_class_creative,
 )
 from app.services.creative_authority import AuthoritativeCreativeContext
+from app.services.creative_engine import detect_generic_visual_shorthand
 
 
 class CreativeConceptScorecard(DirectionSchema):
@@ -1524,6 +1525,7 @@ def _score_candidates(
             _genericness_risk(product_story_text, story_mode=story_mode),
             world_class.stock_lifestyle_risk,
             world_class.decorative_abstraction_risk,
+            detect_generic_visual_shorthand(product_story_text).score,
         )
 
         replaceable_brand_risk = max(
@@ -1938,7 +1940,10 @@ def _genericness_risk(
     meaningful_count = sum(
         _contains_any(value, (marker,)) for marker in meaningful_markers
     )
-    return _bounded_score(24 + decorative_count * 15 - meaningful_count * 7)
+    return max(
+        _bounded_score(24 + decorative_count * 15 - meaningful_count * 7),
+        detect_generic_visual_shorthand(value).score,
+    )
 
 
 def _replaceable_brand_risk(

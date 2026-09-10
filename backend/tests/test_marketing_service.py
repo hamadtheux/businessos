@@ -271,6 +271,8 @@ def _visual_review(**updates: object) -> CreativeVisualReview:
         "commercially_weak": False,
         "unnatural_headline_wrapping": False,
         "generic_template_output": False,
+        "ai_cliche_risk": 0,
+        "ai_cliche_visual": False,
         "weak_brand_cta": False,
         "excessive_dead_panel_space": False,
         "hard_failures": (),
@@ -295,6 +297,7 @@ def _visual_review(**updates: object) -> CreativeVisualReview:
                 "commercially_weak",
             "unnatural_headline_wrapping",
             "generic_template_output",
+            "ai_cliche_visual",
             "weak_brand_cta",
             "excessive_dead_panel_space",
         )

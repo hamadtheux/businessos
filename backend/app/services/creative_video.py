@@ -8,6 +8,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from app.schemas.marketing import MAX_VIDEO_STRATEGY_BYTES, VideoCreativeStrategy
+from app.services.creative_engine import VideoExecutionPlan
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +30,11 @@ class VideoGenerationRequest:
     duration_seconds: int
     aspect_ratio: str
     idempotency_key: str
+    creative_territory_key: str | None = None
+    creative_concept_name: str | None = None
+    campaign_mechanism: str | None = None
+    composition_family: str | None = None
+    execution_plan_json: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -56,15 +62,47 @@ class VideoGenerationRequest:
             raise ValueError("Video idempotency key is invalid") from None
         if normalized_key != self.idempotency_key:
             raise ValueError("Video idempotency key must be a canonical UUID")
+        identity = (
+            self.creative_territory_key,
+            self.creative_concept_name,
+            self.campaign_mechanism,
+            self.composition_family,
+        )
+        if any(value is not None and not value.strip() for value in identity):
+            raise ValueError("Video creative identity fields cannot be blank")
+        if self.execution_plan_json is not None:
+            if len(self.execution_plan_json.encode("utf-8")) > 8_000:
+                raise ValueError("Video execution plan is too large")
+            try:
+                execution_plan = VideoExecutionPlan.model_validate_json(
+                    self.execution_plan_json
+                )
+            except (TypeError, ValueError, ValidationError):
+                raise ValueError("Video execution plan is invalid") from None
+            if (
+                self.composition_family is None
+                or execution_plan.composition_family != self.composition_family
+                or any(value is None for value in identity[:3])
+            ):
+                raise ValueError("Video execution plan identity is incomplete")
 
     def external_payload(self) -> dict[str, object]:
         """Return the explicit allowlisted payload safe for an external provider."""
-        return {
+        payload: dict[str, object] = {
             "strategy": json.loads(self.strategy_json),
             "duration_seconds": self.duration_seconds,
             "aspect_ratio": self.aspect_ratio,
             "idempotency_key": self.idempotency_key,
         }
+        if self.execution_plan_json is not None:
+            payload["creative_identity"] = {
+                "territory_key": self.creative_territory_key,
+                "concept_name": self.creative_concept_name,
+                "campaign_mechanism": self.campaign_mechanism,
+                "composition_family": self.composition_family,
+            }
+            payload["execution_plan"] = json.loads(self.execution_plan_json)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)

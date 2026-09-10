@@ -42,6 +42,28 @@ def runtime(monkeypatch):
     return SimpleNamespace(execute=execute, request=request, authority=authority)
 
 
+@pytest.fixture
+def real_runtime(monkeypatch):
+    """Same provider doubles, with the real deterministic compositor enabled."""
+    request = AsyncMock(return_value=object())
+    execute = AsyncMock()
+    authority = AsyncMock(return_value=None)
+    monkeypatch.setattr(marketing, "_build_cmo_execution_request", request)
+    monkeypatch.setattr(marketing, "execute_ai_agent_typed_with_metadata", execute)
+    monkeypatch.setattr(marketing, "assemble_authoritative_creative_context", authority)
+    monkeypatch.setattr(
+        marketing,
+        "assess_creative_quality",
+        lambda *args, **kwargs: SimpleNamespace(
+            approved_for_delivery=True,
+            approved_for_semantic_review=True,
+            failure_kind=None,
+            overall_score=90,
+        ),
+    )
+    return SimpleNamespace(execute=execute, request=request, authority=authority)
+
+
 def execution(*, strong=True, alternative=False):
     return SimpleNamespace(output=brand_synthesis(strong=strong, alternative=alternative), provider_metadata=AIAgentProviderMetadata())
 
@@ -126,6 +148,95 @@ async def test_compact_checkpoint_is_persisted_without_scorecards(runtime):
     assert checkpoint["checkpoint_version"] == 1
     assert "scorecard" not in checkpoint
     assert marketing._creative_metadata_byte_size(asset.creative_metadata) <= marketing._CREATIVE_METADATA_APP_MAX_BYTES
+
+
+@pytest.mark.asyncio
+async def test_good_v2_pipeline_uses_prompt_plan_and_one_image_call(real_runtime, monkeypatch):
+    real_runtime.execute.return_value = execution()
+    asset = asset_for_job()
+    image, review = providers()
+    captured_inputs = []
+    original_compose_candidates = marketing.CreativeCompositor.compose_candidates
+
+    def capture_and_compose(compositor, composition_input):
+        captured_inputs.append(composition_input)
+        return original_compose_candidates(compositor, composition_input)
+
+    monkeypatch.setattr(
+        marketing.CreativeCompositor,
+        "compose_candidates",
+        capture_and_compose,
+    )
+    storage = _DurableCheckpointStorage()
+
+    result = await run(asset, image, review, storage=storage)
+
+    assert result.generation_status == "ready"
+    assert image.generate_draft.await_count == 1
+    assert review.review.await_count == 1
+    assert captured_inputs
+    composition_input = captured_inputs[0]
+    assert composition_input.composition_plan is not None
+    plan = composition_input.composition_plan
+    request = image.generate_draft.await_args.args[0]
+    assert f"COMPOSITION FAMILY: {plan.family}" in request.instructions
+    assert (
+        f"x={plan.focal_subject_region.x:.2f}, "
+        f"y={plan.focal_subject_region.y:.2f}"
+    ) in request.instructions
+    assert "HEADLINE SAFE ZONE: normalized region" in request.instructions
+    assert "CROP SAFETY:" in request.instructions
+    assert "ART DIRECTION:" in request.instructions
+    assert "floating app icons" in request.instructions.casefold()
+    assert len(request.instructions) <= 5_000
+    assert any(
+        candidate.selected_layout == plan.family
+        for candidate in original_compose_candidates(
+            marketing.CreativeCompositor(),
+            composition_input,
+        )
+    )
+    assert any("/raw/" in key for key in storage.objects)
+
+
+@pytest.mark.asyncio
+async def test_blue_ai_hub_end_to_end_review_never_reaches_ready(real_runtime):
+    real_runtime.authority.return_value = _saas_authority(business_id=BUSINESS_ID)
+    real_runtime.execute.return_value = _saas_pipeline_execution(strong=True)
+    asset = asset_for_job()
+    asset.visual_direction = _saas_pipeline_strategy().model_dump_json()
+    image, _review = providers()
+    critic = _visual_result(
+        _visual_review(
+            approved=False,
+            repair_class="raw_visual",
+            generic_template_output=True,
+            ai_cliche_visual=True,
+            ai_cliche_risk=92,
+            repair_instructions="Regenerate the generic AI hub visual.",
+        )
+    )
+    review = SimpleNamespace(
+        provider_name="fake_vision",
+        review=AsyncMock(return_value=critic),
+    )
+
+    result = await marketing.run_queued_creative_asset_generation(
+        _PipelineSession([asset, _business_record(), None, asset]),
+        business_id=BUSINESS_ID,
+        creative_asset_id=asset.id,
+        provider=image,
+        storage=_DurableCheckpointStorage(),
+        director_provider=SimpleNamespace(provider_name="fake_director"),
+        visual_review_provider=review,
+        max_image_attempts=1,
+        require_semantic_review=True,
+    )
+
+    assert result.generation_status == "failed"
+    assert image.generate_draft.await_count == 1
+    reviewed_request = review.review.await_args.args[0]
+    assert reviewed_request.final_png
 
 
 @pytest.mark.asyncio

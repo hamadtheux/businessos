@@ -24,6 +24,10 @@ from app.services.creative_layout import (
     choose_text_side,
     side_quiet_score,
 )
+from app.services.creative_engine import (
+    CreativeCompositionPlan,
+    composition_plan_is_valid,
+)
 
 
 LayoutFamily = Literal[
@@ -32,7 +36,30 @@ LayoutFamily = Literal[
     "minimal_hero",
     "framed_campaign",
     "vertical_story",
+    # Creative Engine V2 semantic families. Legacy families above remain valid
+    # for persisted diagnostics and existing callers.
+    "full_bleed_hero",
+    "subject_overlap",
+    "centered_campaign_poster",
+    "asymmetric_magazine",
+    "premium_minimal",
+    "brand_offer_spotlight",
+    "typographic_led",
 ]
+
+_V2_COMPOSITION_FAMILIES = frozenset(
+    {
+        "full_bleed_hero",
+        "editorial_split",
+        "subject_overlap",
+        "centered_campaign_poster",
+        "asymmetric_magazine",
+        "premium_minimal",
+        "brand_offer_spotlight",
+        "typographic_led",
+    }
+)
+
 TextSide = Literal["left", "right"]
 LogoTreatment = Literal["none", "contrast_plate"]
 
@@ -109,6 +136,10 @@ class CreativeCompositionInput:
     visual_density: str = "medium"
     focal_area: str = ""
     brand_expression: str = ""
+    # Transient V2 intent. It is supplied by the shared Creative Engine and is
+    # never persisted in creative_metadata.
+    composition_family: str | None = None
+    composition_plan: CreativeCompositionPlan | None = None
 
     def __post_init__(self) -> None:
         if not self.raw_visual or len(self.raw_visual) > MAX_RAW_VISUAL_BYTES:
@@ -131,6 +162,24 @@ class CreativeCompositionInput:
         _bounded_text(self.business_name, "business name", 180)
         if self.logo_content is not None and len(self.logo_content) > MAX_LOGO_BYTES:
             raise CreativeCompositionError("Logo size is invalid")
+        if self.composition_family is not None and self.composition_family not in {
+            *_V2_COMPOSITION_FAMILIES,
+            "cinematic_overlay",
+            "minimal_hero",
+            "framed_campaign",
+            "vertical_story",
+        }:
+            raise CreativeCompositionError("Composition family is unsupported")
+        if self.composition_plan is not None:
+            if not composition_plan_is_valid(self.composition_plan):
+                raise CreativeCompositionError("Composition plan is invalid")
+            if (
+                self.composition_family is not None
+                and self.composition_family != self.composition_plan.family
+            ):
+                raise CreativeCompositionError(
+                    "Composition family does not match the composition plan"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +210,7 @@ class CreativeQualityReport:
     offer_contrast_ratio: float | None
     cta_fill_color: str | None
     target_dimensions: tuple[int, int]
+    image_bounds: Box
     visual_complexity: float
     saliency_region: str
     saliency_concentration: float
@@ -233,7 +283,17 @@ class CreativeCompositor:
 
     def compose(self, value: CreativeCompositionInput) -> CreativeCompositionResult:
         """Return the strongest successful candidate for backward compatibility."""
-        return self.compose_candidates(value)[0]
+        candidates = self.compose_candidates(value)
+        requested_family = (
+            value.composition_plan.family
+            if value.composition_plan is not None
+            else value.composition_family
+        )
+        if requested_family is not None:
+            for candidate in candidates:
+                if candidate.selected_layout == requested_family:
+                    return candidate
+        return candidates[0]
 
     def compose_candidates(
         self,
@@ -340,6 +400,7 @@ class CreativeCompositor:
             text_side,
             value,
         )
+        _validate_layout_plan(plan, width=width, height=height, value=value)
         canvas = Image.new("RGB", (width, height), palette.canvas)
         focal = _focal_center(value.negative_space, value.composition_direction)
         fitted = ImageOps.fit(
@@ -623,6 +684,7 @@ class CreativeCompositor:
                 else None
             ),
             target_dimensions=(width, height),
+            image_bounds=plan.image_box,
             visual_complexity=analysis.overall_complexity,
             saliency_region=analysis.saliency_region,
             saliency_concentration=analysis.saliency_concentration,
@@ -1294,6 +1356,10 @@ def _select_layout(
     value: CreativeCompositionInput,
     source: Image.Image,
 ) -> LayoutFamily:
+    if value.composition_plan is not None:
+        return value.composition_plan.family
+    if value.composition_family in _V2_COMPOSITION_FAMILIES:
+        return value.composition_family  # type: ignore[return-value]
     ratio = value.target_width / value.target_height
     supporting_length = len(value.supporting_copy or "")
     direction = f"{value.composition_direction} {value.negative_space}".casefold()
@@ -1321,6 +1387,18 @@ def _layout_candidates(
         "editorial_split",
         "cinematic_overlay",
     ]
+    if value.composition_family is not None or value.composition_plan is not None:
+        fallbacks.extend(
+            (
+                "full_bleed_hero",
+                "asymmetric_magazine",
+                "centered_campaign_poster",
+                "premium_minimal",
+                "subject_overlap",
+                "typographic_led",
+                "brand_offer_spotlight",
+            )
+        )
     if value.target_height > value.target_width:
         fallbacks.insert(1, "vertical_story")
     return tuple(dict.fromkeys(fallbacks))
@@ -1349,13 +1427,20 @@ def _score_layout_candidate(
     if family == "vertical_story":
         score += 8 if ratio <= 0.72 else -8
 
-    if family == "editorial_split":
+    if family in {"editorial_split", "asymmetric_magazine"}:
         score += 8 if ratio >= 1.35 else 2
 
-    if family == "framed_campaign":
+    if family in {"framed_campaign", "brand_offer_spotlight"}:
         score += 6 if len(value.supporting_copy or "") > 220 else 1
 
-    if family in {"minimal_hero", "cinematic_overlay", "vertical_story"}:
+    if family in {
+        "minimal_hero",
+        "cinematic_overlay",
+        "vertical_story",
+        "full_bleed_hero",
+        "subject_overlap",
+        "premium_minimal",
+    }:
         score += quiet_score * 10
         score -= analysis.overall_complexity * 4
 
@@ -1373,13 +1458,20 @@ def _score_layout_candidate(
             # failure.
             score += 18
 
-    if family == "minimal_hero" and (
+    if family in {"minimal_hero", "premium_minimal"} and (
         len(value.headline) > 90 or len(value.supporting_copy or "") > 240
     ):
         score -= 12
 
-    if value.offer and family in {"editorial_split", "framed_campaign"}:
+    if value.offer and family in {
+        "editorial_split",
+        "framed_campaign",
+        "brand_offer_spotlight",
+    }:
         score += 2
+
+    if family == "typographic_led":
+        score += 4 if len(value.headline) >= 32 else 1
 
     return round(max(0.0, min(100.0, score)), 3)
 
@@ -1540,7 +1632,13 @@ def _platform_layout_fit(
     if value.asset_type == "story_reel" or value.channel == "tiktok":
         return family == "vertical_story" or ratio <= 0.72
     if value.asset_type in {"landscape_ad", "display_banner"}:
-        return family in {"editorial_split", "cinematic_overlay"}
+        return family in {
+            "editorial_split",
+            "cinematic_overlay",
+            "full_bleed_hero",
+            "subject_overlap",
+            "asymmetric_magazine",
+        }
     return ratio >= 0.72
 
 
@@ -1607,6 +1705,337 @@ def _copy_horizontal_bounds(
     return margin, margin + copy_width
 
 
+def _layout_plan_from_v2(
+    family: LayoutFamily,
+    width: int,
+    height: int,
+    margin: int,
+    safe_top: int,
+    safe_bottom: int,
+    palette: _BrandPalette,
+    has_cta: bool,
+    has_offer: bool,
+    text_side: TextSide,
+    value: CreativeCompositionInput,
+) -> _LayoutPlan:
+    safe_box = (margin, safe_top, width - margin, height - safe_bottom)
+    if value.composition_plan is not None and value.composition_plan.family == family:
+        composition = value.composition_plan
+        focal_box = _normalized_region_box(
+            composition.focal_subject_region,
+            width=width,
+            height=height,
+            safe_box=(0, 0, width, height),
+            label="focal subject",
+            minimum_width=40,
+            minimum_height=40,
+        )
+        brand_box = _normalized_region_box(
+            composition.brand_zone,
+            width=width,
+            height=height,
+            safe_box=safe_box,
+            label="brand",
+            minimum_width=32,
+            minimum_height=18,
+        )
+        headline_box = _normalized_region_box(
+            composition.headline_safe_zone,
+            width=width,
+            height=height,
+            safe_box=safe_box,
+            label="headline",
+            minimum_width=72,
+            minimum_height=24,
+        )
+        supporting_box = _normalized_region_box(
+            composition.supporting_copy_zone,
+            width=width,
+            height=height,
+            safe_box=safe_box,
+            label="supporting copy",
+            minimum_width=72,
+            minimum_height=24,
+        )
+        cta_box = _normalized_region_box(
+            composition.cta_zone,
+            width=width,
+            height=height,
+            safe_box=safe_box,
+            label="CTA",
+            minimum_width=56,
+            minimum_height=22,
+        ) if has_cta else None
+    else:
+        focal_box, brand_box, headline_box, supporting_box, cta_box = (
+            _default_v2_regions(family, safe_box, has_cta)
+        )
+
+    offer_box: Box | None = None
+    if has_offer:
+        offer_box, headline_box = _partition_headline_box(headline_box)
+
+    copy_boxes = [brand_box, headline_box, supporting_box]
+    if cta_box is not None:
+        copy_boxes.append(cta_box)
+    if offer_box is not None:
+        copy_boxes.append(offer_box)
+    copy_union = _union_boxes(tuple(copy_boxes))
+    if family in {"full_bleed_hero", "subject_overlap"}:
+        image_box = (0, 0, width, height)
+    elif family == "editorial_split":
+        text_left = copy_union[2] <= focal_box[0] or (
+            (copy_union[0] + copy_union[2]) / 2
+            < (focal_box[0] + focal_box[2]) / 2
+        )
+        boundary = (
+            max(copy_union[2] + margin // 2, round(width * 0.40))
+            if text_left
+            else min(copy_union[0] - margin // 2, round(width * 0.60))
+        )
+        boundary = max(round(width * 0.30), min(round(width * 0.70), boundary))
+        image_box = (boundary, 0, width, height) if text_left else (0, 0, boundary, height)
+        copy_union = (0, 0, boundary, height) if text_left else (boundary, 0, width, height)
+    elif family == "centered_campaign_poster":
+        image_box = _expand_box(focal_box, round(width * 0.08), round(height * 0.02), width, height)
+    elif family == "asymmetric_magazine":
+        image_box = _expand_box(focal_box, round(width * 0.05), round(height * 0.03), width, height)
+    elif family == "premium_minimal":
+        image_box = _expand_box(focal_box, round(width * 0.03), round(height * 0.03), width, height)
+    elif family == "brand_offer_spotlight":
+        image_box = _expand_box(focal_box, round(width * 0.10), round(height * 0.06), width, height)
+    elif family == "typographic_led":
+        image_box = _expand_box(focal_box, round(width * 0.03), round(height * 0.03), width, height)
+    else:  # pragma: no cover - guarded by the V2 family set
+        raise CreativeCompositionError("Unsupported V2 composition family")
+
+    overlay = family in {"full_bleed_hero", "subject_overlap"}
+    panel_color = None if overlay else palette.canvas
+    text_color = None if overlay else palette.canvas_text
+    if overlay:
+        text_surface = _expand_box(copy_union, round(width * 0.04), round(height * 0.02), width, height)
+    else:
+        text_surface = copy_union
+    return _LayoutPlan(
+        family=family,
+        image_box=image_box,
+        brand_box=brand_box,
+        headline_box=headline_box,
+        supporting_box=supporting_box,
+        offer_box=offer_box,
+        cta_box=cta_box,
+        text_surface=text_surface,
+        overlay=overlay,
+        panel_color=panel_color,
+        text_color=text_color,
+    )
+
+
+def _default_v2_regions(
+    family: LayoutFamily,
+    safe_box: Box,
+    has_cta: bool,
+) -> tuple[Box, Box, Box, Box, Box | None]:
+    """Provide safe fallback geometry for callers using only a family name."""
+    regions: dict[str, tuple[float, float, float, float]] = {
+        "full_bleed_hero": (0.54, 0.12, 0.40, 0.70),
+        "editorial_split": (0.50, 0.06, 0.42, 0.84),
+        "subject_overlap": (0.30, 0.10, 0.58, 0.74),
+        "centered_campaign_poster": (0.22, 0.05, 0.56, 0.47),
+        "asymmetric_magazine": (0.48, 0.16, 0.43, 0.66),
+        "premium_minimal": (0.62, 0.20, 0.25, 0.50),
+        "brand_offer_spotlight": (0.24, 0.16, 0.52, 0.50),
+        "typographic_led": (0.30, 0.58, 0.40, 0.24),
+    }
+    focal = _fraction_box(safe_box, *regions[family])
+    if family == "centered_campaign_poster":
+        headline = _fraction_box(safe_box, 0.12, 0.61, 0.76, 0.17)
+        supporting = _fraction_box(safe_box, 0.18, 0.81, 0.64, 0.07)
+        cta = _fraction_box(safe_box, 0.34, 0.90, 0.32, 0.06) if has_cta else None
+    elif family == "typographic_led":
+        headline = _fraction_box(safe_box, 0.08, 0.08, 0.84, 0.34)
+        supporting = _fraction_box(safe_box, 0.14, 0.48, 0.72, 0.09)
+        cta = _fraction_box(safe_box, 0.37, 0.86, 0.26, 0.08) if has_cta else None
+    elif family == "brand_offer_spotlight":
+        headline = _fraction_box(safe_box, 0.08, 0.06, 0.38, 0.15)
+        supporting = _fraction_box(safe_box, 0.08, 0.75, 0.36, 0.10)
+        cta = _fraction_box(safe_box, 0.64, 0.80, 0.26, 0.10) if has_cta else None
+    elif family == "premium_minimal":
+        headline = _fraction_box(safe_box, 0.08, 0.18, 0.34, 0.19)
+        supporting = _fraction_box(safe_box, 0.08, 0.45, 0.28, 0.12)
+        cta = _fraction_box(safe_box, 0.08, 0.69, 0.25, 0.09) if has_cta else None
+    elif family == "asymmetric_magazine":
+        headline = _fraction_box(safe_box, 0.06, 0.06, 0.34, 0.25)
+        supporting = _fraction_box(safe_box, 0.09, 0.55, 0.30, 0.14)
+        cta = _fraction_box(safe_box, 0.09, 0.75, 0.24, 0.09) if has_cta else None
+    elif family == "subject_overlap":
+        headline = _fraction_box(safe_box, 0.06, 0.16, 0.43, 0.25)
+        supporting = _fraction_box(safe_box, 0.06, 0.47, 0.34, 0.14)
+        cta = _fraction_box(safe_box, 0.06, 0.68, 0.28, 0.10) if has_cta else None
+    else:
+        headline = _fraction_box(safe_box, 0.06, 0.12, 0.40, 0.27)
+        supporting = _fraction_box(safe_box, 0.06, 0.46, 0.35, 0.16)
+        cta = _fraction_box(safe_box, 0.06, 0.71, 0.27, 0.10) if has_cta else None
+    brand = _fraction_box(safe_box, 0.06, 0.02, 0.30, 0.07)
+    return focal, brand, headline, supporting, cta
+
+
+def _fraction_box(
+    safe_box: Box,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+) -> Box:
+    safe_width = safe_box[2] - safe_box[0]
+    safe_height = safe_box[3] - safe_box[1]
+    return (
+        safe_box[0] + round(safe_width * x),
+        safe_box[1] + round(safe_height * y),
+        safe_box[0] + round(safe_width * (x + width)),
+        safe_box[1] + round(safe_height * (y + height)),
+    )
+
+
+def _normalized_region_box(
+    region: object,
+    *,
+    width: int,
+    height: int,
+    safe_box: Box,
+    label: str,
+    minimum_width: int,
+    minimum_height: int,
+) -> Box:
+    left = round(float(getattr(region, "x")) * width)
+    top = round(float(getattr(region, "y")) * height)
+    right = round(float(getattr(region, "x") + getattr(region, "width")) * width)
+    bottom = round(float(getattr(region, "y") + getattr(region, "height")) * height)
+    box = (left, top, right, bottom)
+    if (
+        right - left < minimum_width
+        or bottom - top < minimum_height
+        or left < safe_box[0]
+        or top < safe_box[1]
+        or right > safe_box[2]
+        or bottom > safe_box[3]
+    ):
+        raise CreativeCompositionError(f"{label} region is outside deterministic safe canvas")
+    return box
+
+
+def _partition_headline_box(headline_box: Box) -> tuple[Box, Box]:
+    box_height = headline_box[3] - headline_box[1]
+    offer_height = max(18, round(box_height * 0.18))
+    gap = max(5, round(box_height * 0.04))
+    headline_top = headline_box[1] + offer_height + gap
+    if headline_top + 20 > headline_box[3]:
+        raise CreativeCompositionError("Headline safe zone cannot fit offer and headline")
+    return (
+        (headline_box[0], headline_box[1], headline_box[2], headline_box[1] + offer_height),
+        (headline_box[0], headline_top, headline_box[2], headline_box[3]),
+    )
+
+
+def _union_boxes(boxes: tuple[Box, ...]) -> Box:
+    if not boxes:
+        raise CreativeCompositionError("Composition has no usable text region")
+    return (
+        min(box[0] for box in boxes),
+        min(box[1] for box in boxes),
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    )
+
+
+def _expand_box(box: Box, x_padding: int, y_padding: int, width: int, height: int) -> Box:
+    return (
+        max(0, box[0] - x_padding),
+        max(0, box[1] - y_padding),
+        min(width, box[2] + x_padding),
+        min(height, box[3] + y_padding),
+    )
+
+
+def _validate_layout_plan(
+    plan: _LayoutPlan,
+    *,
+    width: int,
+    height: int,
+    value: CreativeCompositionInput,
+) -> None:
+    canvas = (0, 0, width, height)
+    for label, box in (
+        ("image", plan.image_box),
+        ("brand", plan.brand_box),
+        ("headline", plan.headline_box),
+        ("supporting copy", plan.supporting_box),
+        ("text surface", plan.text_surface),
+    ):
+        if (
+            box[0] < canvas[0]
+            or box[1] < canvas[1]
+            or box[2] > canvas[2]
+            or box[3] > canvas[3]
+            or box[2] <= box[0]
+            or box[3] <= box[1]
+        ):
+            raise CreativeCompositionError(f"{label} bounds are outside the canvas")
+    if plan.cta_box is not None and _box_area(plan.cta_box) <= 0:
+        raise CreativeCompositionError("CTA region is unusable")
+    if plan.offer_box is not None and _box_area(plan.offer_box) <= 0:
+        raise CreativeCompositionError("Offer region is unusable")
+    composition = value.composition_plan
+    if composition is None or composition.family != plan.family:
+        return
+    margin, safe_top, safe_bottom = _safe_margins(value)
+    safe_box = (margin, safe_top, width - margin, height - safe_bottom)
+    for label, box in (
+        ("brand", plan.brand_box),
+        ("headline", plan.headline_box),
+        ("supporting copy", plan.supporting_box),
+    ):
+        if (
+            box[0] < safe_box[0]
+            or box[1] < safe_box[1]
+            or box[2] > safe_box[2]
+            or box[3] > safe_box[3]
+        ):
+            raise CreativeCompositionError(f"{label} bounds leave the safe canvas")
+    if plan.cta_box is not None and (
+        plan.cta_box[0] < safe_box[0]
+        or plan.cta_box[1] < safe_box[1]
+        or plan.cta_box[2] > safe_box[2]
+        or plan.cta_box[3] > safe_box[3]
+    ):
+        raise CreativeCompositionError("CTA bounds leave the safe canvas")
+    focal = _normalized_region_box(
+        composition.focal_subject_region,
+        width=width,
+        height=height,
+        safe_box=canvas,
+        label="focal subject",
+        minimum_width=1,
+        minimum_height=1,
+    )
+    copy_boxes = [plan.brand_box, plan.headline_box, plan.supporting_box]
+    if plan.cta_box is not None:
+        copy_boxes.append(plan.cta_box)
+    if plan.offer_box is not None:
+        copy_boxes.append(plan.offer_box)
+    if composition.subject_overlap_allowed and plan.family != "subject_overlap":
+        raise CreativeCompositionError("Only subject_overlap may permit focal copy overlap")
+    if any(_regions_overlap_box(box, focal) for box in copy_boxes):
+        raise CreativeCompositionError("Focal subject overlaps a protected copy zone")
+
+
+def _regions_overlap_box(first: Box, second: Box) -> bool:
+    return (
+        min(first[2], second[2]) > max(first[0], second[0])
+        and min(first[3], second[3]) > max(first[1], second[1])
+    )
+
+
 def _layout_plan(
     family: LayoutFamily,
     width: int,
@@ -1620,6 +2049,26 @@ def _layout_plan(
     text_side: TextSide,
     value: CreativeCompositionInput,
 ) -> _LayoutPlan:
+    # Keep the legacy geometry for unannotated callers.  ``editorial_split``
+    # is also a V2 family name, but the V2 geometry is selected only when the
+    # caller supplies explicit V2 intent or a normalized composition plan.
+    if family in _V2_COMPOSITION_FAMILIES and (
+        value.composition_family is not None
+        or value.composition_plan is not None
+    ):
+        return _layout_plan_from_v2(
+            family,
+            width,
+            height,
+            margin,
+            safe_top,
+            safe_bottom,
+            palette,
+            has_cta,
+            has_offer,
+            text_side,
+            value,
+        )
     safe_left, safe_right = margin, width - margin
     safe_end = height - safe_bottom
     copy_fraction = _adaptive_copy_fraction(value)
@@ -1755,7 +2204,7 @@ def _layout_plan(
         height,
     )
     return _LayoutPlan(
-        family="cinematic_overlay",
+        family=family,
         image_box=(0, 0, width, height),
         brand_box=(left, safe_top, right, safe_top + round(available * 0.10)),
         offer_box=(
@@ -1816,7 +2265,7 @@ def _draw_layout_frame(
     if plan.panel_color is not None:
         draw.rectangle(plan.text_surface, fill=plan.panel_color)
 
-    if plan.family == "framed_campaign":
+    if plan.family in {"framed_campaign", "brand_offer_spotlight"}:
         draw.rectangle(
             (0, 0, width, height),
             outline=palette.border,
@@ -1827,7 +2276,7 @@ def _draw_layout_frame(
             outline=palette.accent,
             width=max(3, margin // 10),
         )
-    elif plan.family == "editorial_split":
+    elif plan.family in {"editorial_split", "asymmetric_magazine"}:
         edge = (
             plan.text_surface[2]
             if plan.text_surface[0] == 0
@@ -1836,6 +2285,26 @@ def _draw_layout_frame(
         draw.rectangle(
             (edge - 3, 0, edge + 3, height),
             fill=palette.border,
+        )
+    elif plan.family == "centered_campaign_poster":
+        draw.rectangle(
+            plan.image_box,
+            outline=palette.accent,
+            width=max(3, margin // 10),
+        )
+    elif plan.family == "subject_overlap":
+        # A controlled boundary cue makes the permitted subject/copy crossing
+        # intentional without placing a panel over the hero.
+        draw.line(
+            (plan.headline_box[2], plan.headline_box[1], plan.headline_box[2], plan.headline_box[3]),
+            fill=(*palette.accent, 180),
+            width=max(2, margin // 12),
+        )
+    elif plan.family == "typographic_led":
+        draw.line(
+            (plan.headline_box[0], plan.headline_box[3], plan.headline_box[2], plan.headline_box[3]),
+            fill=palette.accent,
+            width=max(2, margin // 12),
         )
 
 
@@ -1909,7 +2378,12 @@ def _apply_native_gradient(
         + round((maximum_alpha - minimum_alpha) * value / 255)
     )
     mask = horizontal
-    if family in {"cinematic_overlay", "vertical_story"}:
+    if family in {
+        "cinematic_overlay",
+        "vertical_story",
+        "full_bleed_hero",
+        "subject_overlap",
+    }:
         vertical = Image.linear_gradient("L").resize(
             (width, height),
             Image.Resampling.BILINEAR,

@@ -65,6 +65,14 @@ from app.services.creative_compositor import (
     CreativeCompositor,
     resolve_final_dimensions,
 )
+from app.services.creative_engine import (
+    CreativeMasterPlan,
+    build_creative_master_plan,
+    build_image_execution_plan,
+    build_master_plan_from_video_strategy,
+    build_video_execution_plan,
+    route_creative_failure,
+)
 from app.services.creative_direction import (
     CreativeConceptProposal,
     CreativeDirectorTaskBudgetError,
@@ -2792,6 +2800,7 @@ def _video_strategy_metadata(
     strategy: VideoCreativeStrategy,
     *,
     phase: str,
+    master_plan: CreativeMasterPlan | None = None,
 ) -> dict[str, object]:
     """Build the versioned, bounded JSONB envelope for a video strategy."""
     metadata: dict[str, object] = {
@@ -2800,6 +2809,16 @@ def _video_strategy_metadata(
         "phase": phase,
         "video_strategy": strategy.canonical_payload(),
     }
+    if master_plan is not None:
+        # Only compact identity is durable. The complete shared plan and shot
+        # expansion stay transient so the 12 KB application ceiling remains
+        # meaningful and legacy checkpoints remain recoverable.
+        metadata["shared_creative_identity"] = {
+            "territory_key": master_plan.territory_key,
+            "concept_name": master_plan.concept_name,
+            "campaign_mechanism": master_plan.campaign_mechanism[:240],
+            "composition_family": master_plan.composition.family,
+        }
     serialized = json.dumps(
         metadata,
         ensure_ascii=False,
@@ -2985,6 +3004,29 @@ async def create_video_creative_strategy(
         strategy = VideoCreativeStrategy.model_validate(strategy.model_dump())
     except ValidationError:
         raise MarketingAIError from None
+    try:
+        shared_master_plan = build_master_plan_from_video_strategy(
+            strategy=strategy,
+            instructions=data.instructions,
+            aspect_ratio=data.aspect_ratio,
+        )
+        # Validate the media adapter from the same shared identity. The current
+        # provider-neutral strategy is retained as the public contract, while
+        # these compact fields make the shared creative identity explicit.
+        build_video_execution_plan(
+            shared_master_plan,
+            duration_seconds=data.duration_seconds,
+        )
+        strategy = strategy.model_copy(
+            update={
+                "creative_territory_key": shared_master_plan.territory_key,
+                "creative_concept_name": shared_master_plan.concept_name,
+                "campaign_mechanism": shared_master_plan.campaign_mechanism,
+                "composition_family": shared_master_plan.composition.family,
+            }
+        )
+    except (TypeError, ValueError, ValidationError):
+        raise MarketingAIError from None
     asset_type = {
         "9:16": "video_vertical",
         "16:9": "video_landscape",
@@ -3014,6 +3056,7 @@ async def create_video_creative_strategy(
         creative_metadata=_video_strategy_metadata(
             strategy,
             phase="planning_complete",
+            master_plan=shared_master_plan,
         ),
     )
     session.add(value)
@@ -3068,6 +3111,39 @@ async def start_video_generation(
         raise MarketingStateError
     try:
         strategy = _video_strategy_from_asset(value)
+        shared_master_plan = build_master_plan_from_video_strategy(
+            strategy=strategy,
+            instructions=(
+                value.instructions
+                or value.visual_direction
+                or "the validated campaign story"
+            ),
+            aspect_ratio=value.aspect_ratio or "",
+        )
+        video_execution_plan = build_video_execution_plan(
+            shared_master_plan,
+            duration_seconds=value.duration_seconds or 0,
+        )
+        if (
+            strategy.composition_family is not None
+            and strategy.composition_family != shared_master_plan.composition.family
+        ):
+            raise MarketingValidationError
+        if (
+            strategy.creative_territory_key is not None
+            and strategy.creative_territory_key != shared_master_plan.territory_key
+        ):
+            raise MarketingValidationError
+        if (
+            strategy.creative_concept_name is not None
+            and strategy.creative_concept_name != shared_master_plan.concept_name
+        ):
+            raise MarketingValidationError
+        if (
+            strategy.campaign_mechanism is not None
+            and strategy.campaign_mechanism != shared_master_plan.campaign_mechanism
+        ):
+            raise MarketingValidationError
         idempotency_key = str(
             uuid5(
                 _VIDEO_IDEMPOTENCY_NAMESPACE,
@@ -3081,6 +3157,11 @@ async def start_video_generation(
             duration_seconds=value.duration_seconds or 0,
             aspect_ratio=value.aspect_ratio or "",
             idempotency_key=idempotency_key,
+            creative_territory_key=shared_master_plan.territory_key,
+            creative_concept_name=shared_master_plan.concept_name,
+            campaign_mechanism=shared_master_plan.campaign_mechanism,
+            composition_family=shared_master_plan.composition.family,
+            execution_plan_json=video_execution_plan.model_dump_json(),
         )
     except (MarketingValidationError, ValueError):
         raise MarketingValidationError from None
@@ -3156,6 +3237,7 @@ def _creative_visual_generation_instructions(
     story_mode: CreativeStoryMode = "offering_proof",
     correction: str | None = None,
     authoritative_context: AuthoritativeCreativeContext | None = None,
+    master_plan: CreativeMasterPlan | None = None,
 ) -> str:
     """
     Produce one bounded, renderer-safe raw-visual prompt.
@@ -3170,6 +3252,12 @@ def _creative_visual_generation_instructions(
     """
 
     max_provider_instructions = 5_000
+
+    resolved_master_plan = master_plan or build_creative_master_plan(
+        strategy=strategy,
+        direction=direction,
+        aspect_ratio=aspect_ratio,
+    )
 
     base_direction = build_visual_art_direction(
         strategy=strategy,
@@ -3232,7 +3320,7 @@ def _creative_visual_generation_instructions(
             f"{normalized_correction}"
         )
 
-    fixed_sections = tuple(
+    policy_sections = tuple(
         section
         for section in (
             world_class_raw_visual_contract(story_mode).strip(),
@@ -3243,6 +3331,26 @@ def _creative_visual_generation_instructions(
         if section
     )
 
+    policy_tail = "\n\n".join(policy_sections)
+
+    # The V2 still prompt is the primary art-direction contract. Reserve space
+    # for the existing server-owned direction as well as the non-negotiable
+    # safety/palette sections before asking the prompt builder to bound it.
+    v2_prompt_budget = (
+        max_provider_instructions
+        - len(policy_tail)
+        - (5 * len("\n\n"))
+        - 500
+    )
+    if v2_prompt_budget < 800:
+        raise ValueError(
+            "Mandatory raw-visual policy leaves insufficient V2 prompt budget"
+        )
+    image_execution = build_image_execution_plan(
+        resolved_master_plan,
+        max_prompt_chars=min(5_000, v2_prompt_budget),
+    )
+    fixed_sections = (image_execution.still_prompt.strip(),) + policy_sections
     fixed_tail = "\n\n".join(fixed_sections)
 
     # One separator is required between the dynamic art direction and the
@@ -3253,7 +3361,7 @@ def _creative_visual_generation_instructions(
         - len("\n\n")
     )
 
-    if base_budget < 800:
+    if base_budget < 500:
         # Never solve policy growth by silently deleting the actual campaign idea.
         raise ValueError(
             "Mandatory raw-visual policy leaves insufficient renderer prompt budget"
@@ -4476,6 +4584,12 @@ async def _generate_creative_asset_value(
                 status="repairing",
                 commit=persist_progress,
             )
+        master_plan = build_creative_master_plan(
+            strategy=strategy,
+            direction=direction,
+            aspect_ratio=(value.aspect_ratio or f"{target_width}:{target_height}"),
+            territory_key=direction.selected_concept.concept_name,
+        )
         instructions = _creative_visual_generation_instructions(
             strategy,
             direction,
@@ -4488,6 +4602,7 @@ async def _generate_creative_asset_value(
             story_mode=creative_story_mode,
             correction=correction,
             authoritative_context=authoritative_context,
+            master_plan=master_plan,
         )
         result: CreativeGenerationResult | None = None
         checkpoint_key: str | None = None
@@ -4661,6 +4776,8 @@ async def _generate_creative_asset_value(
                 visual_density=direction.selected_concept.visual_density,
                 focal_area=direction.selected_concept.focal_area,
                 brand_expression=direction.selected_concept.brand_expression,
+                composition_family=master_plan.composition.family,
+                composition_plan=master_plan.composition,
             )
             compositor = CreativeCompositor(
                 max_candidates=max_composition_attempts,
@@ -4737,7 +4854,14 @@ async def _generate_creative_asset_value(
             all_failed_from_raw_visual = bool(candidate_failure_kinds) and all(
                 kind == "raw_visual" for kind in candidate_failure_kinds
             )
-            if all_failed_from_raw_visual and image_attempt < max_image_attempts:
+            deterministic_decision = route_creative_failure(
+                raw_media_failure=all_failed_from_raw_visual,
+                composition_failure=not all_failed_from_raw_visual,
+            )
+            if (
+                deterministic_decision.action == "regenerate_media"
+                and image_attempt < max_image_attempts
+            ):
                 correction = _raw_visual_regeneration_correction(
                     story_mode=creative_story_mode,
                 )
@@ -4832,7 +4956,8 @@ async def _generate_creative_asset_value(
                 channel=research_context.channel,
                 concept_name=direction.selected_concept.concept_name,
                 concept_expectations=_visual_review_concept_expectations(
-                    direction
+                    direction,
+                    master_plan=master_plan,
                 ),
                 expected_headline=strategy.headline,
                 expected_offer=strategy.offer,
@@ -4929,10 +5054,28 @@ async def _generate_creative_asset_value(
                 # Continue locally without converting the miss into a raw-image
                 # repair or allowing this reviewed candidate to degrade later.
                 continue
-            if semantic_review_has_concept_failure(review):
+            repair_decision = route_creative_failure(
+                concept_failure=semantic_review_has_concept_failure(review),
+                raw_media_failure=review.repair_class == "raw_visual",
+                composition_failure=review.repair_class == "layout",
+                branding_typography_failure=review.repair_class == "layout",
+                codes=review.hard_failures,
+            )
+            logger.info(
+                "creative_repair_routed action=%s failure_class=%s media_spend=%s",
+                repair_decision.action,
+                repair_decision.failure_class,
+                repair_decision.media_spend_allowed,
+                extra={
+                    "repair_action": repair_decision.action,
+                    "failure_class": repair_decision.failure_class,
+                    "media_spend_allowed": repair_decision.media_spend_allowed,
+                },
+            )
+            if repair_decision.action == "reselect_concept":
                 critic_concept_failure = True
                 break
-            if review.repair_class == "raw_visual":
+            if repair_decision.action == "regenerate_media":
                 critic_raw_failure = True
                 correction = _raw_visual_regeneration_correction(
                     review,
@@ -5114,6 +5257,8 @@ async def _generate_creative_asset_value(
 
 def _visual_review_concept_expectations(
     direction: CreativeDirectionPlan,
+    *,
+    master_plan: CreativeMasterPlan | None = None,
 ) -> str:
     """
     Give the semantic critic the commercial logic it must visually verify.
@@ -5134,6 +5279,12 @@ def _visual_review_concept_expectations(
         ("Mechanism", concept.product_story, 118),
         ("Hook", concept.scroll_stopping_hook, 76),
     )
+
+    if master_plan is not None:
+        fields += (
+            ("Composition", master_plan.composition.family, 48),
+            ("Negative space", master_plan.composition.negative_space_strategy, 84),
+        )
 
     parts: list[str] = []
 
