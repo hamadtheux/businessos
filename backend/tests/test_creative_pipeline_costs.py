@@ -18,6 +18,7 @@ from test_marketing_service import (
 )
 from app.agents.provider import AIAgentProviderMetadata
 from app.exceptions.marketing import MarketingAIError, MarketingNotFoundError, MarketingPersistenceError
+from app.schemas.marketing import CreativePlan
 from app.services import marketing
 from app.services.creative_direction import (
     CreativeConceptProposal,
@@ -67,6 +68,34 @@ def real_runtime(monkeypatch):
 
 def execution(*, strong=True, alternative=False):
     return SimpleNamespace(output=brand_synthesis(strong=strong, alternative=alternative), provider_metadata=AIAgentProviderMetadata())
+
+
+def simple_creative_plan() -> CreativePlan:
+    strategy = brand_strategy()
+    return CreativePlan(
+        headline=strategy.headline,
+        supporting_copy=strategy.supporting_message,
+        caption="A grounded editorial moment for owners.",
+        cta=strategy.cta,
+        concept_name="The opening-time balancing act",
+        creative_idea="Make a familiar opening-time tension visible through one human action.",
+        audience_reason_to_care="Shopkeepers recognize the pressure of opening while handling daily work.",
+        visual_story=(
+            "A shopkeeper balances receipts while lifting the opening shutter, so the "
+            "uneven arms make the morning pressure visible."
+        ),
+        hero_subject="A real shopkeeper at the storefront with receipts and the opening shutter",
+        hero_action="Balances receipts while lifting the opening shutter",
+        visible_consequence="The uneven arms make the opening-time pressure visible.",
+        art_direction="Contemporary editorial photography in soft directional morning light.",
+        image_style="Grounded editorial photography",
+        composition_intent="Hero at the storefront with a clear right-side copy corridor.",
+        negative_space_intent="Keep the right third quiet for deterministic copy and logo.",
+        image_prompt="A real shopkeeper balancing receipts while lifting a storefront shutter.",
+        visual_exclusions=("glowing AI brain", "fake dashboard", "floating app icons"),
+        brand_treatment=strategy.brand_treatment,
+        recommended_channel="instagram",
+    )
 
 
 def asset_for_job():
@@ -198,6 +227,25 @@ async def test_good_v2_pipeline_uses_prompt_plan_and_one_image_call(real_runtime
         )
     )
     assert any("/raw/" in key for key in storage.objects)
+
+
+@pytest.mark.asyncio
+async def test_simple_user_creative_plan_reaches_v2_ready_with_one_planner_and_image(
+    real_runtime,
+):
+    real_runtime.execute.return_value = SimpleNamespace(
+        output=simple_creative_plan(),
+        provider_metadata=AIAgentProviderMetadata(),
+    )
+    asset = asset_for_job()
+    image, review = providers()
+
+    result = await run(asset, image, review, storage=_DurableCheckpointStorage())
+
+    assert result.generation_status == "ready"
+    assert real_runtime.execute.await_count == 1
+    assert image.generate_draft.await_count == 1
+    assert review.review.await_count == 1
 
 
 @pytest.mark.asyncio

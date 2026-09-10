@@ -17,6 +17,7 @@ from pydantic import (
 
 
 Reference = Annotated[str, Field(min_length=1, max_length=255)]
+MediaReference = Annotated[str, Field(min_length=1, max_length=4096)]
 ShortText = Annotated[str, Field(min_length=1, max_length=200)]
 MessageText = Annotated[str, Field(min_length=1, max_length=10_000)]
 Money = Annotated[
@@ -96,7 +97,8 @@ class SendCustomerMessagePayload(ActionPayload):
 class PublishSocialPostPayload(ActionPayload):
     platform: SocialPlatform
     content: MessageText
-    media_refs: list[Reference] = Field(default_factory=list, max_length=10)
+    media_refs: list[MediaReference] = Field(default_factory=list, max_length=10)
+    media_type: Literal["image", "video"] | None = None
 
     @field_validator("media_refs")
     @classmethod
@@ -104,6 +106,12 @@ class PublishSocialPostPayload(ActionPayload):
         if len(value) != len(set(value)):
             raise ValueError("media_refs cannot contain duplicates")
         return value
+
+    @model_validator(mode="after")
+    def validate_media_contract(self) -> "PublishSocialPostPayload":
+        if not self.media_refs and self.media_type is not None:
+            raise ValueError("media_type requires media_refs")
+        return self
 
 
 class CampaignAudience(ActionPayload):

@@ -211,6 +211,34 @@ class CreativePresentationTests(unittest.TestCase):
             self.assertEqual(response.storage_reference, storage.public_url(key))
             self.assertEqual(asset.storage_reference, storage.public_url(key))
 
+    def test_tenant_owned_import_gets_signed_presentation_url(self) -> None:
+        storage = _PresentationStorage()
+        asset = _asset()
+        asset.source_type = "import"
+        asset.storage_reference = (
+            "https://media.example.test/"
+            f"businesses/{BUSINESS_ID}/marketing/uploads/{asset.id}/source.png"
+        )
+
+        response = materialize_creative_asset_response(
+            asset,
+            business_id=BUSINESS_ID,
+            storage=storage,  # type: ignore[arg-type]
+            signed_url_ttl_seconds=900,
+        )
+
+        self.assertIn("X-Amz-Expires=900", response.storage_reference or "")
+        self.assertEqual(
+            storage.presented,
+            [
+                (
+                    f"businesses/{BUSINESS_ID}/marketing/uploads/"
+                    f"{asset.id}/source.png",
+                    900,
+                )
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

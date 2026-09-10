@@ -48,7 +48,7 @@ from app.services.automation_intelligence import (  # noqa: E402
 )
 from app.services.marketing_actions import (  # noqa: E402
     _connector_state,
-    _ready_instagram_media_refs,
+    _ready_social_media_asset,
     prepare_content_publish_action,
 )
 from app.services.marketing_automation import (  # noqa: E402
@@ -254,38 +254,75 @@ class AutomationIntelligenceTests(unittest.IsolatedAsyncioTestCase):
                 requested_by_user_id=uuid4(), channel="instagram",
             )
 
-    async def test_instagram_media_lookup_is_tenant_scoped_and_https_only(self) -> None:
+    async def test_social_media_lookup_is_tenant_scoped_and_package_aware(self) -> None:
         business_id = uuid4()
         content_id = uuid4()
-        session = _CreativeSession([
-            SimpleNamespace(storage_reference="https://user:secret@media.example/a.png"),
-            SimpleNamespace(storage_reference="http://media.example/b.png"),
-            SimpleNamespace(storage_reference="https://media.example/final.png"),
-        ])
+        root_id = uuid4()
+        media = SimpleNamespace(
+            id=uuid4(),
+            media_type="image",
+            storage_reference="https://media.example/final.png",
+        )
+        content = SimpleNamespace(
+            id=content_id,
+            root_content_id=root_id,
+            proposal_key=None,
+        )
+        session = _Session([media])
 
-        refs = await _ready_instagram_media_refs(
+        selected = await _ready_social_media_asset(
             session,
             business_id=business_id,
-            content_id=content_id,
+            content=content,
         )
 
-        self.assertEqual(refs, ["https://media.example/final.png"])
-        compiled = session.statement.compile(dialect=postgresql.dialect())
-        self.assertEqual(compiled.params["business_id_1"], business_id)
-        self.assertEqual(compiled.params["content_id_1"], content_id)
+        self.assertIs(selected, media)
+        compiled = session.scalar_statements[-1].compile(
+            dialect=postgresql.dialect()
+        )
+        self.assertIn(business_id, compiled.params.values())
+        self.assertIn(root_id, compiled.params.values())
         self.assertIn("generation_status", str(compiled))
         self.assertIn("source_type", str(compiled))
 
-    async def test_instagram_publish_proposal_includes_only_final_media(self) -> None:
+        package_id = uuid4()
+        package_content = SimpleNamespace(
+            id=uuid4(),
+            root_content_id=uuid4(),
+            proposal_key=f"create-publish:{package_id}:facebook",
+        )
+        package_session = _Session([None, package_content, media])
+
+        selected = await _ready_social_media_asset(
+            package_session,
+            business_id=business_id,
+            content=package_content,
+        )
+
+        self.assertIs(selected, media)
+        package_compiled = package_session.scalar_statements[-1].compile(
+            dialect=postgresql.dialect()
+        )
+        self.assertIn(
+            f"create-publish:{package_id}:",
+            package_compiled.params.values(),
+        )
+
+    async def test_instagram_publish_proposal_uses_stable_asset_handle(self) -> None:
         business_id = uuid4()
+        media_id = uuid4()
         content = SimpleNamespace(
             id=uuid4(),
+            root_content_id=uuid4(),
+            proposal_key=f"create-publish:{uuid4()}:instagram",
+            platform_fields={"platform": "instagram"},
             status="approved",
             channel="instagram",
             body="Reviewed copy",
             cta="Shop now",
             title="Product launch",
         )
+        media = SimpleNamespace(id=media_id, media_type="image")
         captured: dict[str, object] = {}
 
         async def materialize(*_args, **kwargs):
@@ -302,8 +339,8 @@ class AutomationIntelligenceTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=None),
             ),
             patch(
-                "app.services.marketing_actions._ready_instagram_media_refs",
-                new=AsyncMock(return_value=["https://media.example/final.png"]),
+                "app.services.marketing_actions._ready_social_media_asset",
+                new=AsyncMock(return_value=media),
             ),
             patch(
                 "app.services.marketing_actions._materialize_governed_proposal",
@@ -323,9 +360,13 @@ class AutomationIntelligenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(action.requires_approval)
         self.assertEqual(
             action.action_payload.media_refs,
-            ["https://media.example/final.png"],
+            [f"creative_asset:{media_id}"],
         )
-        self.assertEqual(action.action_payload.content, "Reviewed copy\n\nShop now")
+        self.assertEqual(action.action_payload.media_type, "image")
+        self.assertEqual(
+            action.action_payload.content,
+            "Reviewed copy\n\nShop now",
+        )
 
     async def test_external_execution_requires_connection_and_real_write_provider(self) -> None:
         business_id = uuid4()

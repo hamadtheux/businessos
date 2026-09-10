@@ -61,6 +61,42 @@ type ContentInput = {
   language?: string;
 };
 
+export type CreatePublishPlatform =
+  | "instagram"
+  | "facebook"
+  | "linkedin"
+  | "tiktok"
+  | "youtube";
+
+export type ContentPackage = {
+  package_id: string;
+  canonical_message: string;
+  contents: MarketingContent[];
+};
+
+export type GenerateContentPackageInput = {
+  goal: string;
+  platforms: CreatePublishPlatform[];
+  media_asset_id?: string | null;
+  audience?: string | null;
+  tone?: string | null;
+  objective?: string | null;
+  visual_preference?: string | null;
+  language?: string;
+};
+
+export type ManualContentPackageInput = {
+  post_text: string;
+  platforms: CreatePublishPlatform[];
+  title?: string | null;
+  cta?: string | null;
+  hashtags?: string[];
+  keywords?: string[];
+  alt_text?: string | null;
+  media_asset_id?: string | null;
+  language?: string;
+};
+
 export type CampaignPreflight = {
   ready: boolean;
   provider: "google" | "meta";
@@ -351,7 +387,12 @@ export function createMarketingApi(client: ApiClient) {
       edit: (
         id: string,
         contentId: string,
-        data: { title: string; body: string; cta?: string | null },
+        data: {
+          title: string;
+          body: string;
+          cta?: string | null;
+          platform_fields?: MarketingContent["platform_fields"];
+        },
       ) =>
         client.request<MarketingContent>(
           marketingPath(id, `/content/${contentId}/versions`),
@@ -371,6 +412,26 @@ export function createMarketingApi(client: ApiClient) {
           marketingPath(id, `/content/${contentId}/prepare-publish`),
           { method: "POST", json: { channel: channel ?? null } },
         ),
+      packages: {
+        generate: (id: string, data: GenerateContentPackageInput) =>
+          client.request<ContentPackage>(
+            marketingPath(id, "/content/packages/generate"),
+            { method: "POST", json: data },
+          ),
+        createManual: (id: string, data: ManualContentPackageInput) =>
+          client.request<ContentPackage>(
+            marketingPath(id, "/content/packages/manual"),
+            { method: "POST", json: data },
+          ),
+        get: (id: string, packageId: string, signal?: AbortSignal) =>
+          client.request<ContentPackage>(
+            marketingPath(
+              id,
+              `/content/packages/${encodeURIComponent(packageId)}`,
+            ),
+            { signal },
+          ),
+      },
     },
     creative: {
       get: (id: string, creativeAssetId: string, signal?: AbortSignal) =>
@@ -386,10 +447,12 @@ export function createMarketingApi(client: ApiClient) {
         campaignId?: string,
         contentId?: string,
         signal?: AbortSignal,
+        rootContentId?: string,
       ) => {
         const params = new URLSearchParams();
         if (campaignId) params.set("campaign_id", campaignId);
         if (contentId) params.set("content_id", contentId);
+        if (rootContentId) params.set("root_content_id", rootContentId);
         return client.request<CreativeAsset[]>(
           marketingPath(id, `/creative-assets?${params}`),
           { signal },
@@ -465,6 +528,25 @@ export function createMarketingApi(client: ApiClient) {
           ),
           { method: "POST" },
         ),
+      upload: (
+        id: string,
+        file: File,
+        durationSeconds?: number,
+        contentId?: string,
+      ) => {
+        const form = new FormData();
+        form.append("file", file, file.name);
+        if (durationSeconds) {
+          form.append("duration_seconds", String(durationSeconds));
+        }
+        if (contentId) {
+          form.append("content_id", contentId);
+        }
+        return client.request<CreativeAsset>(
+          marketingPath(id, "/creative-assets/upload"),
+          { method: "POST", body: form },
+        );
+      },
     },
     calendar: {
       list: (

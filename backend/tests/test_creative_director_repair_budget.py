@@ -14,7 +14,7 @@ from test_marketing_service import BUSINESS_ID, _ScalarSession, _business_record
 from test_ai_agent_runtime import _context_bundle
 from app.agents import runtime as agent_runtime
 from app.agents.provider import AIAgentTypedProviderResult
-from app.schemas.marketing import CreativeStrategyProposal
+from app.schemas.marketing import CreativePlan, CreativeStrategyProposal
 from app.services import marketing
 from app.services.creative_direction import (
     CreativeDirectorTaskBudgetError, build_creative_director_task,
@@ -70,6 +70,31 @@ def long_strategy() -> CreativeStrategyProposal:
         ],
     )
     return CreativeStrategyProposal.model_validate(values)
+
+
+def _plan_from_legacy_execution(value) -> CreativePlan:
+    candidate = value.output.candidates[0]
+    return CreativePlan(
+        headline="Made for the moment",
+        supporting_copy="See the daily balancing act.",
+        caption="A grounded editorial moment.",
+        cta="Explore now",
+        concept_name=candidate.concept_name,
+        creative_idea=candidate.marketing_idea,
+        audience_reason_to_care=candidate.customer_care_reason,
+        visual_story=candidate.product_story,
+        hero_subject=candidate.hero_subject,
+        hero_action="Balances receipts while lifting the opening shutter",
+        visible_consequence=candidate.scroll_stopping_hook,
+        art_direction="Contemporary editorial photography with soft morning light.",
+        image_style="Grounded editorial photography",
+        composition_intent=candidate.layout_intent,
+        negative_space_intent=candidate.text_zone,
+        image_prompt="A real shopkeeper balancing receipts while lifting a shutter.",
+        visual_exclusions=("glowing AI brain", "fake dashboard"),
+        brand_treatment="Restrained blue palette and controlled brand identity.",
+        recommended_channel="instagram",
+    )
 
 
 @pytest.mark.parametrize("boundary", [False, True])
@@ -131,7 +156,10 @@ async def test_long_campaign_soft_or_strong_repair_dispatches_through_actual_run
             assert request.task.count("This is the only text repair") == 1
             assert "concept_quality_failed" in request.task
         value = executions[len(provider_requests) - 1]
-        return AIAgentTypedProviderResult(output=value.output, metadata=value.provider_metadata)
+        return AIAgentTypedProviderResult(
+            output=_plan_from_legacy_execution(value),
+            metadata=value.provider_metadata,
+        )
 
     provider = SimpleNamespace(
         provider_name="fake_director", generate=AsyncMock(),

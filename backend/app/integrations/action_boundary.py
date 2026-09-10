@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import re
+from urllib.parse import urlsplit
 from types import MappingProxyType
 from typing import Final, Mapping
 from uuid import UUID
@@ -17,13 +19,18 @@ from app.models.integration import IntegrationConnection
 from app.models.customer import Customer
 from app.models.conversation import Conversation, ConversationMessage
 from app.models.automation_intelligence import MarketingActionProposal
-from app.models.marketing import Campaign
+from app.models.marketing import Campaign, CreativeAsset, MarketingContent
 from app.integrations.action_adapters import (
     ConnectorActionAdapterRegistry,
     connector_action_adapters,
 )
 from app.integrations.registry import require_connector
-from app.schemas.ai_action_payload import ActionPayloadType
+from app.schemas.ai_action_payload import (
+    ActionPayloadType,
+    PublishSocialPostPayload,
+)
+from app.storage.base import ObjectStorage, StorageError
+from app.storage.factory import get_object_storage
 from app.services.action_execution_attempt import (
     revalidate_action_execution_attempt_for_dispatch,
 )
@@ -83,6 +90,7 @@ async def prepare_connector_dispatch_context(
     connection_id: UUID | None = None,
     adapters: ConnectorActionAdapterRegistry = connector_action_adapters,
     configuration: Settings = settings,
+    storage: ObjectStorage | None = None,
 ) -> ConnectorDispatchContext:
     """Resolve a tenant-owned, provider-capable dispatch using database truth."""
     require_external_connector_writes_enabled(
@@ -141,6 +149,12 @@ async def prepare_connector_dispatch_context(
         or connection.connector_type not in allowed_connectors
         or capability not in connector_definition.future_write_capabilities
         or not connection.credential_reference
+        or (
+            attempt.action_type == "publish_social_post"
+            and not set(connector_definition.oauth_write_scopes).issubset(
+                set(connection.scopes_granted or [])
+            )
+        )
         or not adapters.supports(connection.connector_type, attempt.action_type)
     ):
         raise IntegrationStateError("connector_dispatch_not_authorized")
@@ -154,13 +168,23 @@ async def prepare_connector_dispatch_context(
         }
         for resource in connection.selected_resources[:20]
     )
+    dispatch_payload = payload
+    if attempt.action_type == "publish_social_post":
+        dispatch_payload = await _materialize_publish_media_payload(
+            session,
+            business_id=business_id,
+            action_id=action.id,
+            payload=payload,
+            storage=storage,
+        )
+
     delivery_target = await _resolve_delivery_target(
         session,
         business_id=business_id,
         connector_type=connection.connector_type,
         connection_id=connection.id,
         action_type=attempt.action_type,
-        payload=payload,
+        payload=dispatch_payload,
     )
     if attempt.action_type in {"create_google_ads_campaign", "create_meta_campaign"}:
         proposal = await session.scalar(select(MarketingActionProposal).where(
@@ -188,8 +212,213 @@ async def prepare_connector_dispatch_context(
         idempotency_key=attempt.idempotency_key,
         credential_reference=connection.credential_reference,
         selected_resources=selected_resources,
-        payload=payload,
+        payload=dispatch_payload,
         delivery_target=delivery_target,
+    )
+
+
+_PUBLISH_MEDIA_HANDLE_PREFIX = "creative_asset:"
+_PUBLISH_MEDIA_TTL_SECONDS = 3600
+_CREATE_PUBLISH_PACKAGE_KEY = re.compile(
+    r"^create-publish:([0-9a-f-]{36}):"
+    r"(instagram|facebook|linkedin|tiktok|youtube)(?::v\\d+)?$",
+    flags=re.IGNORECASE,
+)
+
+
+async def _materialize_publish_media_payload(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    action_id: UUID,
+    payload: ActionPayloadType,
+    storage: ObjectStorage | None,
+) -> ActionPayloadType:
+    """Turn an approved stable media handle into a transient signed provider URL."""
+    if not isinstance(payload, PublishSocialPostPayload):
+        raise IntegrationStateError("publish_payload_invalid")
+
+    if not payload.media_refs:
+        return payload
+
+    if len(payload.media_refs) != 1 or payload.media_type not in {"image", "video"}:
+        raise IntegrationStateError("publish_media_contract_invalid")
+
+    handle = payload.media_refs[0]
+    if not handle.startswith(_PUBLISH_MEDIA_HANDLE_PREFIX):
+        raise IntegrationStateError("publish_media_handle_invalid")
+
+    try:
+        asset_id = UUID(handle.removeprefix(_PUBLISH_MEDIA_HANDLE_PREFIX))
+    except ValueError:
+        raise IntegrationStateError("publish_media_handle_invalid") from None
+
+    proposal = await session.scalar(
+        select(MarketingActionProposal).where(
+            MarketingActionProposal.business_id == business_id,
+            MarketingActionProposal.ai_action_id == action_id,
+            MarketingActionProposal.entity_type == "content",
+        )
+    )
+    if proposal is None or proposal.channel != payload.platform:
+        raise IntegrationStateError("publish_media_proposal_invalid")
+
+    content = await session.scalar(
+        select(MarketingContent).where(
+            MarketingContent.business_id == business_id,
+            MarketingContent.id == proposal.entity_id,
+        )
+    )
+    if content is None:
+        raise IntegrationStateError("publish_content_not_found")
+
+    asset = await session.scalar(
+        select(CreativeAsset).where(
+            CreativeAsset.business_id == business_id,
+            CreativeAsset.id == asset_id,
+            CreativeAsset.generation_status == "ready",
+            CreativeAsset.source_type.in_({"future_provider", "import"}),
+            CreativeAsset.storage_reference.is_not(None),
+        )
+    )
+    if (
+        asset is None
+        or asset.business_id != business_id
+        or asset.media_type != payload.media_type
+        or asset.content_id is None
+    ):
+        raise IntegrationStateError("publish_media_asset_invalid")
+
+    if not await _publish_asset_belongs_to_content(
+        session,
+        business_id=business_id,
+        content=content,
+        asset=asset,
+    ):
+        raise IntegrationStateError("publish_media_content_conflict")
+
+    durable_reference = asset.storage_reference
+    if not isinstance(durable_reference, str) or not durable_reference:
+        raise IntegrationStateError("publish_media_reference_invalid")
+
+    object_storage = storage or get_object_storage()
+    try:
+        object_key = object_storage.object_key_from_reference(durable_reference)
+    except (StorageError, ValueError):
+        raise IntegrationStateError("publish_media_reference_invalid") from None
+
+    if not _trusted_publish_media_object_key(
+        business_id=business_id,
+        asset=asset,
+        object_key=object_key,
+    ):
+        raise IntegrationStateError("publish_media_reference_invalid")
+
+    try:
+        signed_url = object_storage.presentation_url(
+            object_key,
+            expires_in_seconds=_PUBLISH_MEDIA_TTL_SECONDS,
+        )
+    except (StorageError, ValueError):
+        raise IntegrationStateError("publish_media_unavailable") from None
+
+    if not _safe_dispatch_media_url(signed_url):
+        raise IntegrationStateError("publish_media_unavailable")
+
+    # Important: this object is transient. The persisted AIAction and its
+    # approval/hash continue to contain only creative_asset:<uuid>.
+    return PublishSocialPostPayload(
+        platform=payload.platform,
+        content=payload.content,
+        media_refs=[signed_url],
+        media_type=payload.media_type,
+    )
+
+
+async def _publish_asset_belongs_to_content(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    content: MarketingContent,
+    asset: CreativeAsset,
+) -> bool:
+    if asset.content_id == content.id:
+        return True
+
+    package_match = _CREATE_PUBLISH_PACKAGE_KEY.fullmatch(
+        content.proposal_key or ""
+    )
+    if package_match is not None:
+        package_prefix = f"create-publish:{package_match.group(1)}:"
+        sibling_id = await session.scalar(
+            select(MarketingContent.id).where(
+                MarketingContent.business_id == business_id,
+                MarketingContent.id == asset.content_id,
+                MarketingContent.proposal_key.startswith(package_prefix),
+            )
+        )
+        return sibling_id == asset.content_id
+
+    if content.root_content_id is None:
+        return False
+
+    lineage_id = await session.scalar(
+        select(MarketingContent.id).where(
+            MarketingContent.business_id == business_id,
+            MarketingContent.id == asset.content_id,
+            MarketingContent.root_content_id == content.root_content_id,
+        )
+    )
+    return lineage_id == asset.content_id
+
+
+def _trusted_publish_media_object_key(
+    *,
+    business_id: UUID,
+    asset: CreativeAsset,
+    object_key: str,
+) -> bool:
+    if asset.source_type == "import":
+        prefix = (
+            f"businesses/{business_id}/marketing/uploads/{asset.id}/"
+        )
+        if not object_key.startswith(prefix):
+            return False
+        leaf = object_key.removeprefix(prefix)
+        return (
+            leaf.startswith("source.")
+            and "/" not in leaf
+            and 7 <= len(leaf) <= 32
+        )
+
+    # Generated image finals are deterministic private PNGs. Generated-video
+    # provider storage has a different lifecycle and is deliberately not
+    # guessed here.
+    if asset.source_type == "future_provider" and asset.media_type == "image":
+        prefix = (
+            f"businesses/{business_id}/marketing/creatives/"
+            f"{asset.id}/final/"
+        )
+        if not object_key.startswith(prefix):
+            return False
+        leaf = object_key.removeprefix(prefix)
+        return re.fullmatch(r"generation-[1-9]\\d*\\.png", leaf) is not None
+
+    return False
+
+
+def _safe_dispatch_media_url(value: object) -> bool:
+    if not isinstance(value, str) or not value or len(value) > 4096:
+        return False
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
     )
 
 

@@ -458,7 +458,11 @@ async def complete_authorization(
         or not set(granted).issubset(allowed_granted_scopes)
         or (
             connector_type == "facebook"
-            and not set(definition.oauth_read_scopes).issubset(set(granted))
+            and not set(
+                definition.requested_oauth_scopes(
+                    configuration.external_connector_write_mode
+                )
+            ).issubset(set(granted))
         )
     ):
         return await _fail_exchanged_authorization(

@@ -80,7 +80,7 @@ from app.services.creative_direction import (
     CreativeDirectorSynthesis,
     CreativeDirectionPlan,
     OwnerCreativeIntent,
-    build_creative_director_task,
+    build_creative_plan_task,
     build_creative_direction,
     build_grounded_creative_rescue,
     build_visual_art_direction,
@@ -162,9 +162,15 @@ from app.schemas.marketing import (
     CompetitorUpdate,
     ContentCreate,
     ContentGenerateRequest,
+    ContentPackageGenerateRequest,
+    ContentPackageManualRequest,
+    ContentPackageProposal,
+    ContentPackageResponse,
+    ContentResponse,
     ContentVersionCreate,
     CreativeBriefCreate,
     CreativeAssetResponse,
+    CreativePlan,
     CreativeVariationMode,
     CreativeStrategyProposal,
     LearningResponse,
@@ -190,6 +196,7 @@ from app.services.background_jobs import enqueue_job
 from app.db.transactions import rollback_session
 from app.services.business_branding import validated_business_logo_key
 from app.services.logo_image import MAX_LOGO_UPLOAD_BYTES, sanitize_logo_bytes
+from app.services.marketing_media import PreparedMarketingMedia
 from app.exceptions.logo import LogoError
 from app.storage.base import ObjectNotFoundError, ObjectStorage, StorageError
 
@@ -1689,6 +1696,7 @@ async def create_content(session: AsyncSession, *, business_id: UUID, actor_user
     value_id = uuid4()
     root_id = value_id
     version = 1
+    parent: MarketingContent | None = None
     if parent_content_id:
         parent = parent_content or await get_content(session, business_id=business_id, content_id=parent_content_id)
         if parent.business_id != business_id or parent.id != parent_content_id:
@@ -1698,6 +1706,17 @@ async def create_content(session: AsyncSession, *, business_id: UUID, actor_user
         root_id = parent.root_content_id
         version = int(await session.scalar(select(func.coalesce(func.max(MarketingContent.version), 0)).where(MarketingContent.business_id == business_id, MarketingContent.root_content_id == root_id)) or 0) + 1
     value = MarketingContent(id=value_id, business_id=business_id, created_by_user_id=actor_user_id, ai_generated=ai_generated, status="draft", version=version, parent_content_id=parent_content_id, root_content_id=root_id, **data.model_dump())
+    if parent is not None and parent.proposal_key:
+        package_match = re.fullmatch(
+            r"create-publish:([0-9a-f-]{36}):(instagram|facebook|linkedin|tiktok|youtube)(?::v\d+)?",
+            parent.proposal_key,
+            flags=re.IGNORECASE,
+        )
+        if package_match:
+            value.proposal_key = (
+                f"create-publish:{package_match.group(1)}:"
+                f"{package_match.group(2).lower()}:v{version}"
+            )
     session.add(value)
     await _flush(session)
     record_audit(session, business_id=business_id, actor_user_id=actor_user_id, event_type="marketing.content_created" if version == 1 else "marketing.content_version_created", entity_type="marketing_content", entity_id=value.id, summary=f"Created content {value.title} version {version}; nothing was published externally.")
@@ -1731,6 +1750,11 @@ async def create_content_version(
             title=data.title,
             body=data.body,
             cta=data.cta,
+            platform_fields=(
+                data.platform_fields
+                if data.platform_fields is not None
+                else deepcopy(parent.platform_fields or {})
+            ),
             language=parent.language,
         ),
         ai_generated=False,
@@ -1740,8 +1764,8 @@ async def create_content_version(
     # marketing context attached to the source version remains part of its
     # lineage. The new version is still explicitly marked ai_generated=False.
     #
-    # proposal_key is intentionally NOT copied because it is an idempotency
-    # identity and must remain unique to the proposal that originally created it.
+    # Create & Publish versions retain their package identity through a unique,
+    # version-qualified proposal key. Other proposal identities are not copied.
     version.creative_brief = parent.creative_brief
     version.generation_reasoning = parent.generation_reasoning
     version.recommended_for = parent.recommended_for
@@ -1963,6 +1987,15 @@ async def generate_content(
         ),
     )
 
+    if parent is not None and parent.platform_fields:
+        platform_fields = deepcopy(parent.platform_fields)
+        platform = platform_fields.get("platform")
+        if platform == "youtube":
+            platform_fields["description"] = body
+        else:
+            platform_fields["caption"] = body
+        content.platform_fields = platform_fields
+
     content.creative_brief = proposal.creative_brief
     content.generation_reasoning = proposal.generation_reasoning
     content.recommended_for = recommended_for[:500]
@@ -1982,6 +2015,505 @@ async def generate_content(
     await _flush(session)
 
     return content
+
+
+_CREATE_PUBLISH_CHANNELS: dict[str, str] = {
+    "instagram": "instagram",
+    "facebook": "facebook",
+    "linkedin": "linkedin",
+    "tiktok": "tiktok",
+    # YouTube is represented through the existing canonical content entity
+    # until an official connector/channel migration is introduced.
+    "youtube": "other",
+}
+
+
+_CREATE_PUBLISH_TASK_RUNTIME_MARGIN = 256
+_CREATE_PUBLISH_TASK_MAX_LENGTH = (
+    MAX_AGENT_TASK_LENGTH - _CREATE_PUBLISH_TASK_RUNTIME_MARGIN
+)
+
+
+def _bounded_create_publish_text(
+    value: str | None,
+    *,
+    limit: int,
+    fallback: str,
+) -> str:
+    normalized = " ".join((value or "").split()) or fallback
+    if len(normalized) <= limit:
+        return normalized
+    if limit <= 1:
+        return normalized[:limit]
+    return normalized[: limit - 1].rstrip() + "…"
+
+
+def _build_create_publish_task(
+    data: ContentPackageGenerateRequest,
+    media: CreativeAsset | None,
+) -> str:
+    """Build one bounded CMO task while preserving the owner goal first."""
+    platforms = ", ".join(data.platforms)
+
+    # The owner goal gets the largest dynamic budget. Secondary guidance is
+    # deliberately smaller because the CMO runtime will also append mandatory
+    # server-owned privacy/context rules before validating the 4,000-char
+    # provider-neutral task contract.
+    goal = _bounded_create_publish_text(
+        data.goal,
+        limit=1400,
+        fallback="No additional description provided.",
+    )
+    audience = _bounded_create_publish_text(
+        data.audience,
+        limit=220,
+        fallback="Determine from trusted context.",
+    )
+    tone = _bounded_create_publish_text(
+        data.tone,
+        limit=80,
+        fallback="Use the trusted brand voice.",
+    )
+    objective = _bounded_create_publish_text(
+        data.objective,
+        limit=80,
+        fallback="Determine from the owner goal.",
+    )
+    visual_preference = _bounded_create_publish_text(
+        data.visual_preference,
+        limit=220,
+        fallback="Choose an on-brand direction.",
+    )
+    media_context = _bounded_create_publish_text(
+        _package_media_context(media),
+        limit=180,
+        fallback="No uploaded media.",
+    )
+
+    task = (
+        "Create one canonical social post and native variants in one structured "
+        f"response for these exact platforms: {platforms}.\n"
+        f"Owner goal: {goal}\n"
+        f"Audience guidance: {audience}\n"
+        f"Tone: {tone}\n"
+        f"Objective: {objective}\n"
+        f"Visual preference: {visual_preference}\n"
+        f"Language: {data.language}.\n"
+        f"Media context: {media_context}\n\n"
+        "Use only trusted Business Brain facts and permitted memory. Uploaded media "
+        "and owner intent are not authority for prices, guarantees, capabilities, "
+        "customers, statistics, certifications, or integrations. Do not invent claims. "
+        "Adapt each platform natively instead of reusing one caption. Instagram needs "
+        "a hook, caption, useful hashtags, CTA when supported, and alt text. Facebook "
+        "needs natural post copy and restrained hashtags. LinkedIn needs a professional "
+        "hook and restrained hashtags. TikTok needs a short hook/caption and hashtags. "
+        "YouTube needs a title, description, and keywords. Omit irrelevant optional "
+        "fields rather than filling them artificially. Return recommendations and "
+        "proposed_actions as empty lists. Put exactly one JSON object in summary matching "
+        "ContentPackageProposal with canonical_message, headline, creative_concept, "
+        "visual_direction, and variants. Return each requested platform exactly once. "
+        "Nothing may be approved, scheduled, sent, or published."
+    )
+
+    if len(task) > _CREATE_PUBLISH_TASK_MAX_LENGTH:
+        # This is an internal invariant, not a reason to silently exceed the
+        # provider-neutral execution contract.
+        raise MarketingValidationError("create_publish_task_budget_exceeded")
+
+    return task
+
+
+async def generate_content_package(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    actor_user_id: UUID,
+    data: ContentPackageGenerateRequest,
+    provider: AIAgentProvider,
+) -> ContentPackageResponse:
+    media = await _package_media(
+        session,
+        business_id=business_id,
+        media_asset_id=data.media_asset_id,
+    )
+    task = _build_create_publish_task(data, media)
+    execution = await _execute_cmo(session, business_id, task, provider)
+    try:
+        proposal = ContentPackageProposal.model_validate_json(
+            execution.output.summary
+        )
+    except ValidationError:
+        raise MarketingAIError from None
+    if execution.output.recommendations or execution.output.proposed_actions:
+        raise MarketingAIError
+    returned_platforms = [variant.platform for variant in proposal.variants]
+    if returned_platforms != data.platforms and set(returned_platforms) != set(data.platforms):
+        raise MarketingAIError
+    if len(returned_platforms) != len(set(returned_platforms)):
+        raise MarketingAIError
+
+    cta_capabilities = await _trusted_cta_capabilities(
+        session,
+        business_id=business_id,
+        campaign_id=None,
+    )
+    package_id = uuid4()
+    contents: list[MarketingContent] = []
+    variant_by_platform = {variant.platform: variant for variant in proposal.variants}
+    context_evidence = {
+        "classification": "trusted_context_assembly",
+        "source_type": "business_brain_and_permitted_memory",
+        "source_id": execution.context_revision,
+        "summary": (
+            f"Runtime assembled {execution.business_brain_source_count} Business Brain "
+            f"and {execution.memory_source_count} permitted memory sources for one "
+            "cross-platform package."
+        ),
+        "provenance_role": "provided_to_model",
+    }
+    for platform in data.platforms:
+        variant = variant_by_platform[platform]
+        cta = _normalize_creative_display_cta(
+            variant.cta,
+            capabilities=cta_capabilities,
+        )
+        body = (
+            variant.description
+            if platform == "youtube"
+            else variant.caption or variant.description
+        )
+        if not body or _contains_creative_instruction_copy(
+            variant.title,
+            body,
+            cta,
+        ) or _contains_unclassified_promotional_claim(
+            variant.title or proposal.headline,
+            body,
+            cta,
+        ):
+            raise MarketingAIError
+        platform_fields = {
+            "platform": platform,
+            "caption": variant.caption,
+            "description": variant.description,
+            "hashtags": variant.hashtags,
+            "keywords": variant.keywords,
+            "alt_text": variant.alt_text,
+            "media_disabled": False,
+        }
+        content = await create_content(
+            session,
+            business_id=business_id,
+            actor_user_id=actor_user_id,
+            ai_generated=True,
+            data=ContentCreate(
+                campaign_id=None,
+                channel=_CREATE_PUBLISH_CHANNELS[platform],
+                content_type="social_post",
+                title=variant.title or proposal.headline,
+                body=body,
+                cta=cta,
+                platform_fields=platform_fields,
+                language=data.language,
+            ),
+        )
+        content.proposal_key = f"create-publish:{package_id}:{platform}"
+        content.creative_brief = (
+            f"{proposal.creative_concept}\n{proposal.visual_direction}"
+        )[:5000]
+        content.generation_reasoning = (
+            "Created from one canonical, Business Brain-grounded concept and adapted "
+            f"for {platform}."
+        )
+        content.recommended_for = f"Create & Publish · {platform}"[:500]
+        content.source_evidence = [deepcopy(context_evidence)]
+        contents.append(content)
+
+    if media is not None:
+        _attach_media_to_package(media, contents)
+    await _flush(session)
+    record_audit(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        event_type="marketing.content_package_created",
+        entity_type="marketing_content",
+        entity_id=contents[0].id,
+        summary=(
+            f"Created one canonical post with {len(contents)} platform variants; "
+            "nothing was approved, scheduled, or published."
+        ),
+    )
+    return ContentPackageResponse(
+        package_id=package_id,
+        canonical_message=proposal.canonical_message,
+        contents=[ContentResponse.model_validate(item) for item in contents],
+    )
+
+
+async def create_manual_content_package(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    actor_user_id: UUID,
+    data: ContentPackageManualRequest,
+) -> ContentPackageResponse:
+    media = await _package_media(
+        session,
+        business_id=business_id,
+        media_asset_id=data.media_asset_id,
+    )
+    package_id = uuid4()
+    contents: list[MarketingContent] = []
+    title = data.title or _manual_post_title(data.post_text)
+    for platform in data.platforms:
+        platform_fields = {
+            "platform": platform,
+            "caption": data.post_text if platform != "youtube" else None,
+            "description": data.post_text if platform == "youtube" else None,
+            "hashtags": data.hashtags,
+            "keywords": data.keywords,
+            "alt_text": data.alt_text,
+            "media_disabled": False,
+        }
+        content = await create_content(
+            session,
+            business_id=business_id,
+            actor_user_id=actor_user_id,
+            data=ContentCreate(
+                campaign_id=None,
+                channel=_CREATE_PUBLISH_CHANNELS[platform],
+                content_type="social_post",
+                title=title,
+                body=data.post_text,
+                cta=data.cta,
+                platform_fields=platform_fields,
+                language=data.language,
+            ),
+        )
+        content.proposal_key = f"create-publish:{package_id}:{platform}"
+        content.recommended_for = f"Create & Publish · {platform}"[:500]
+        contents.append(content)
+    if media is not None:
+        _attach_media_to_package(media, contents)
+    await _flush(session)
+    record_audit(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        event_type="marketing.manual_content_package_created",
+        entity_type="marketing_content",
+        entity_id=contents[0].id,
+        summary=(
+            f"Saved one user-authored post for {len(contents)} platforms without "
+            "rewriting, approval, scheduling, or publication."
+        ),
+    )
+    return ContentPackageResponse(
+        package_id=package_id,
+        canonical_message=data.post_text,
+        contents=[ContentResponse.model_validate(item) for item in contents],
+    )
+
+
+async def get_content_package(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    package_id: UUID,
+) -> ContentPackageResponse:
+    prefix = f"create-publish:{package_id}:"
+    try:
+        contents = list(
+            (
+                await session.scalars(
+                    select(MarketingContent)
+                    .where(
+                        MarketingContent.business_id == business_id,
+                        MarketingContent.proposal_key.startswith(prefix),
+                    )
+                    .order_by(
+                        MarketingContent.version.desc(),
+                        MarketingContent.updated_at.desc(),
+                        MarketingContent.id.desc(),
+                    )
+                    .limit(500)
+                )
+            ).all()
+        )
+    except SQLAlchemyError:
+        raise MarketingPersistenceError from None
+    if not contents:
+        raise MarketingNotFoundError
+    latest_by_platform: dict[str, MarketingContent] = {}
+    for content in contents:
+        match = re.fullmatch(
+            rf"{re.escape(prefix)}(instagram|facebook|linkedin|tiktok|youtube)(?::v\d+)?",
+            content.proposal_key or "",
+            flags=re.IGNORECASE,
+        )
+        if match:
+            latest_by_platform.setdefault(match.group(1).lower(), content)
+    contents = [
+        latest_by_platform[platform]
+        for platform in _CREATE_PUBLISH_CHANNELS
+        if platform in latest_by_platform
+    ]
+    if not contents:
+        raise MarketingNotFoundError
+    return ContentPackageResponse(
+        package_id=package_id,
+        canonical_message=contents[0].body,
+        contents=[ContentResponse.model_validate(item) for item in contents],
+    )
+
+
+async def prepare_uploaded_creative_asset(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    actor_user_id: UUID,
+    media: PreparedMarketingMedia,
+    storage: ObjectStorage,
+    content_id: UUID | None = None,
+) -> CreativeAsset:
+    content = (
+        await get_content(
+            session,
+            business_id=business_id,
+            content_id=content_id,
+        )
+        if content_id is not None
+        else None
+    )
+    asset_id = uuid4()
+    object_key = (
+        f"businesses/{business_id}/marketing/uploads/{asset_id}/"
+        f"source.{media.extension}"
+    )
+    put_attempted = False
+    try:
+        put_attempted = True
+        await storage.put(object_key, media.content, media.content_type)
+        reference = storage.public_url(object_key)
+        if not isinstance(reference, str) or not reference or len(reference) > 1024:
+            raise StorageError("Invalid uploaded media reference")
+    except (StorageError, ValueError):
+        if put_attempted:
+            await _best_effort_delete(storage, object_key)
+        raise MarketingPersistenceError from None
+    value = CreativeAsset(
+        id=asset_id,
+        business_id=business_id,
+        campaign_id=None,
+        content_id=content.id if content is not None else None,
+        asset_type=(
+            "video_vertical" if media.media_type == "video" else "other"
+        ),
+        media_type=media.media_type,
+        source_type="import",
+        instructions=f"Uploaded source media: {media.original_name}"[:5000],
+        visual_direction=None,
+        generation_status="ready",
+        storage_reference=reference,
+        width=media.width,
+        height=media.height,
+        aspect_ratio=(
+            f"{media.width}:{media.height}"
+            if media.width and media.height
+            else None
+        ),
+        alt_text=None,
+        duration_seconds=media.duration_seconds,
+        provider_key=None,
+        provider_job_reference=None,
+        creative_metadata={
+            "upload_content_type": media.content_type,
+            "original_name": media.original_name,
+        },
+    )
+    session.add(value)
+    _register_creative_storage_compensation(session, storage, object_key)
+    try:
+        await _flush(session)
+    except MarketingPersistenceError:
+        _remove_creative_storage_compensation(session, object_key)
+        await _best_effort_delete(storage, object_key)
+        raise
+    record_audit(
+        session,
+        business_id=business_id,
+        actor_user_id=actor_user_id,
+        event_type="marketing.media_uploaded",
+        entity_type="marketing_creative_asset",
+        entity_id=value.id,
+        summary="Uploaded tenant-owned post media; nothing was published.",
+    )
+    return value
+
+
+async def _package_media(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    media_asset_id: UUID | None,
+) -> CreativeAsset | None:
+    if media_asset_id is None:
+        return None
+    media = await get_creative_asset(
+        session,
+        business_id=business_id,
+        creative_asset_id=media_asset_id,
+    )
+    if (
+        media.source_type != "import"
+        or media.generation_status != "ready"
+        or media.content_id is not None
+        or not media.storage_reference
+    ):
+        raise MarketingValidationError("uploaded_media_unavailable")
+    return media
+
+
+def _package_media_context(media: CreativeAsset | None) -> str:
+    if media is None:
+        return "No uploaded media."
+    metadata = media.creative_metadata or {}
+    original_name = metadata.get("original_name")
+    safe_name = original_name if isinstance(original_name, str) else "uploaded media"
+    return (
+        f"The user supplied a {media.media_type} named {safe_name[:180]}. "
+        "Treat it as creative context, never as authority for business claims."
+    )
+
+
+def _attach_media_to_package(
+    media: CreativeAsset,
+    contents: list[MarketingContent],
+) -> None:
+    owner = next(
+        (
+            item
+            for item in contents
+            if item.platform_fields.get("platform") == "instagram"
+        ),
+        contents[0],
+    )
+    media.content_id = owner.id
+
+    # One package-level media choice is stored on the deterministic media
+    # owner. Other platform variants resolve this same choice server-side.
+    fields = deepcopy(owner.platform_fields or {})
+    fields["media_disabled"] = False
+    fields["selected_media_asset_id"] = str(media.id)
+    owner.platform_fields = fields
+
+
+def _manual_post_title(post_text: str) -> str:
+    first_line = " ".join(post_text.split())
+    if len(first_line) <= 180:
+        return first_line
+    return f"{first_line[:177].rstrip()}…"
 
 
 # _build_cmo_execution_request may append healthcare, professional-services,
@@ -3983,7 +4515,7 @@ async def _creative_direction_with_fallback(
             logger.info("director_repair_started", extra={"director_call_number": call_index + 1})
         task = None
         try:
-            task = build_creative_director_task(
+            task = build_creative_plan_task(
                 strategy=strategy, research=research, context=context,
                 story_mode=story_mode, repair=repair,
                 owner_intent=owner_intent,
@@ -4025,7 +4557,7 @@ async def _creative_direction_with_fallback(
             })
         try:
             execution = await execute_ai_agent_typed_with_metadata(
-                session, business_id, request, provider, CreativeDirectorSynthesis,
+                session, business_id, request, provider, CreativePlan,
                 max_output_tokens=max_output_tokens,
                 server_context=repair_context,
             )
@@ -4046,12 +4578,28 @@ async def _creative_direction_with_fallback(
                 return selected, metadata
             return await fallback("provider_failure_grounded_rescue")
         state["pending"] = False
-        direction = build_creative_direction(
-            strategy=strategy, research=research, context=context,
-            story_mode=story_mode,
-            authoritative_context=authoritative_context,
-            synthesis=execution.output,
-        )
+        if isinstance(execution.output, CreativePlan):
+            direction = build_creative_direction(
+                strategy=strategy,
+                research=research,
+                context=context,
+                story_mode=story_mode,
+                authoritative_context=authoritative_context,
+                plan=execution.output,
+            )
+        else:
+            # Keep already-deployed in-process callers readable during the
+            # rolling contract transition. New provider calls are typed as
+            # CreativePlan above; persisted legacy checkpoints are adapted in
+            # the recovery branch before this provider boundary.
+            direction = build_creative_direction(
+                strategy=strategy,
+                research=research,
+                context=context,
+                story_mode=story_mode,
+                authoritative_context=authoritative_context,
+                synthesis=execution.output,
+            )
         hard_failure_codes = list(
             creative_direction_hard_failure_codes(direction)
         )
@@ -6174,12 +6722,20 @@ def _final_creative_storage_key(
     )
 
 
-async def list_creative_assets(session: AsyncSession, *, business_id: UUID, campaign_id: UUID | None, content_id: UUID | None) -> list[CreativeAsset]:
+async def list_creative_assets(session: AsyncSession, *, business_id: UUID, campaign_id: UUID | None, content_id: UUID | None, root_content_id: UUID | None = None) -> list[CreativeAsset]:
     statement = select(CreativeAsset).where(CreativeAsset.business_id == business_id)
     if campaign_id:
         statement = statement.where(CreativeAsset.campaign_id == campaign_id)
     if content_id:
         statement = statement.where(CreativeAsset.content_id == content_id)
+    if root_content_id:
+        statement = statement.join(
+            MarketingContent,
+            MarketingContent.id == CreativeAsset.content_id,
+        ).where(
+            MarketingContent.business_id == business_id,
+            MarketingContent.root_content_id == root_content_id,
+        )
     try:
         return list((await session.scalars(statement.order_by(CreativeAsset.created_at.desc(), CreativeAsset.id.desc()).limit(100))).all())
     except SQLAlchemyError:
@@ -6200,19 +6756,28 @@ def materialize_creative_asset_response(
     response = CreativeAssetResponse.model_validate(value)
     presentation_reference: str | None = None
     durable_reference = value.storage_reference
+    imported_reference_prefix = (
+        f"/businesses/{business_id}/marketing/uploads/{value.id}/"
+    )
     if (
         value.generation_status == "ready"
-        # The only final-object writer sets future_provider. Manual/import have
-        # no server-owned upload path and cannot establish storage ownership.
-        and value.source_type == "future_provider"
+        and value.source_type in {"future_provider", "import"}
         and isinstance(durable_reference, str)
         and durable_reference
+        and (
+            value.source_type != "import"
+            or imported_reference_prefix in durable_reference
+        )
     ):
         try:
             object_key = storage.object_key_from_reference(durable_reference)
             expected_prefix = (
-                f"businesses/{business_id}/marketing/creatives/"
-                f"{value.id}/final/"
+                f"businesses/{business_id}/marketing/uploads/{value.id}/"
+                if value.source_type == "import"
+                else (
+                    f"businesses/{business_id}/marketing/creatives/"
+                    f"{value.id}/final/"
+                )
             )
             final_name = object_key.removeprefix(expected_prefix)
             if (
@@ -6270,12 +6835,14 @@ async def list_creative_asset_responses(
     content_id: UUID | None,
     storage: ObjectStorage,
     signed_url_ttl_seconds: int,
+    root_content_id: UUID | None = None,
 ) -> list[CreativeAssetResponse]:
     values = await list_creative_assets(
         session,
         business_id=business_id,
         campaign_id=campaign_id,
         content_id=content_id,
+        root_content_id=root_content_id,
     )
     return [
         materialize_creative_asset_response(
@@ -6704,11 +7271,18 @@ async def _execute_cmo(
     task: str,
     provider: AIAgentProvider,
 ):
-    request = await _build_cmo_execution_request(
-        session,
-        business_id,
-        task,
-    )
+    try:
+        request = await _build_cmo_execution_request(
+            session,
+            business_id,
+            task,
+        )
+    except ValidationError:
+        # The provider-neutral agent contract is a server-side safety boundary.
+        # A user-sized request can become too large after the fixed CMO contract
+        # and privacy policy are appended. Treat that as controlled input
+        # validation instead of allowing Pydantic's error to become an HTTP 500.
+        raise MarketingValidationError("cmo_task_too_large") from None
     try:
         result = await execute_ai_agent(
             session,

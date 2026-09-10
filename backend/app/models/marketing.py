@@ -317,6 +317,11 @@ class MarketingContent(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint("char_length(btrim(title)) BETWEEN 1 AND 180", name="valid_title"),
         CheckConstraint("char_length(body) BETWEEN 1 AND 20000", name="valid_body"),
         CheckConstraint("cta IS NULL OR char_length(cta) <= 300", name="valid_cta"),
+        CheckConstraint(
+            "jsonb_typeof(platform_fields) = 'object' AND "
+            "octet_length(platform_fields::text) <= 8192",
+            name="valid_platform_fields",
+        ),
         CheckConstraint("language ~ '^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$'", name="valid_language"),
         CheckConstraint("status IN ('draft','review','approved','scheduled','ready_to_publish','archived')", name="valid_status"),
         CheckConstraint("version BETWEEN 1 AND 10000", name="valid_version"),
@@ -334,6 +339,12 @@ class MarketingContent(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     title: Mapped[str] = mapped_column(String(180), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     cta: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    platform_fields: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
     language: Mapped[str] = mapped_column(String(16), nullable=False, default="en", server_default="en")
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="draft", server_default="draft")
     ai_generated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
@@ -364,17 +375,17 @@ class CreativeAsset(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint("width IS NULL OR width BETWEEN 1 AND 20000", name="valid_width"),
         CheckConstraint("height IS NULL OR height BETWEEN 1 AND 20000", name="valid_height"),
         CheckConstraint("alt_text IS NULL OR char_length(alt_text) <= 1000", name="valid_alt_text"),
-        CheckConstraint("duration_seconds IS NULL OR duration_seconds IN (6,8,15,30)", name="valid_duration_seconds"),
+        CheckConstraint("duration_seconds IS NULL OR duration_seconds BETWEEN 1 AND 3600", name="valid_duration_seconds"),
         CheckConstraint("provider_key IS NULL OR char_length(btrim(provider_key)) BETWEEN 1 AND 64", name="valid_provider_key"),
         CheckConstraint("provider_job_reference IS NULL OR char_length(btrim(provider_job_reference)) BETWEEN 1 AND 255", name="valid_provider_job_reference"),
         CheckConstraint("jsonb_typeof(creative_metadata) = 'object' AND octet_length(creative_metadata::text) <= 16384", name="valid_creative_metadata"),
-        CheckConstraint("(media_type = 'image' AND duration_seconds IS NULL) OR (media_type = 'video' AND duration_seconds IS NOT NULL)", name="consistent_media_duration"),
+        CheckConstraint("(media_type = 'image' AND duration_seconds IS NULL) OR (media_type = 'video' AND duration_seconds BETWEEN 1 AND 3600)", name="consistent_media_duration"),
         CheckConstraint("provider_job_reference IS NULL OR provider_key IS NOT NULL", name="consistent_provider_job_identity"),
         CheckConstraint("media_type <> 'image' OR (provider_key IS NULL AND provider_job_reference IS NULL)", name="consistent_image_provider_identity"),
         CheckConstraint("generation_status <> 'provider_required' OR (provider_key IS NULL AND provider_job_reference IS NULL AND storage_reference IS NULL)", name="consistent_provider_required_state"),
         CheckConstraint("generation_status <> 'strategy_ready' OR (media_type = 'video' AND provider_key IS NULL AND provider_job_reference IS NULL AND storage_reference IS NULL)", name="consistent_video_strategy_state"),
         CheckConstraint("NOT (media_type = 'video' AND generation_status IN ('queued','generating','reviewing','repairing')) OR (provider_key IS NOT NULL AND provider_job_reference IS NOT NULL AND storage_reference IS NULL)", name="consistent_video_async_state"),
-        CheckConstraint("NOT (media_type = 'video' AND generation_status = 'ready') OR (provider_key IS NOT NULL AND provider_job_reference IS NOT NULL AND storage_reference IS NOT NULL)", name="consistent_ready_video_state"),
+        CheckConstraint("NOT (media_type = 'video' AND generation_status = 'ready' AND source_type = 'future_provider') OR (provider_key IS NOT NULL AND provider_job_reference IS NOT NULL AND storage_reference IS NOT NULL)", name="consistent_ready_video_state"),
         UniqueConstraint("id", "business_id", name="uq_marketing_creative_assets_id_business"),
         Index("ix_marketing_creative_assets_business_campaign", "business_id", "campaign_id", "id"),
         Index(

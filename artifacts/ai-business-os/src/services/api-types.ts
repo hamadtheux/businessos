@@ -921,6 +921,16 @@ export type MarketingContent = {
   title: string;
   body: string;
   cta: string | null;
+  platform_fields?: {
+    platform?: "instagram" | "facebook" | "linkedin" | "tiktok" | "youtube";
+    caption?: string | null;
+    description?: string | null;
+    hashtags?: string[];
+    keywords?: string[];
+    alt_text?: string | null;
+    media_disabled?: boolean;
+    selected_media_asset_id?: string | null;
+  };
   language: string;
   status: MarketingContentStatus;
   ai_generated: boolean;

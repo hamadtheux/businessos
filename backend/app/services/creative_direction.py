@@ -13,7 +13,7 @@ from pydantic import (
 )
 
 from app.schemas.ai_agent import MAX_AGENT_TASK_LENGTH
-from app.schemas.marketing import CreativeStrategyProposal
+from app.schemas.marketing import CreativePlan, CreativeStrategyProposal
 from app.services.creative_research import (
     CreativeResearchBundle,
     PublicCreativeResearchContext,
@@ -266,16 +266,11 @@ def _candidate_hard_failure_codes(
         failures.append("unsupported_business_claim")
     if _PROHIBITED_RENDERER_REPRESENTATION.search(positive_text):
         failures.append("prohibited_fake_representation")
-    if generic_visual.hard_failure or dimensions["genericness_risk"] >= 72:
+    # Only unmistakable prohibited shorthand is a pre-image blocker. The
+    # numeric genericness score remains useful for diagnostics/ranking, but it
+    # is not an artistic authority that can veto an otherwise executable plan.
+    if generic_visual.hard_failure:
         failures.append("generic_visual_shorthand")
-    if dimensions["replaceable_brand_risk"] >= 72:
-        failures.append("replaceable_brand_concept")
-    if dimensions["business_specific_relevance"] < 42:
-        failures.append("insufficient_business_grounding")
-    if dimensions["product_relevance"] < 38:
-        failures.append("missing_grounded_mechanism")
-    if dimensions["composition_feasibility"] < 46:
-        failures.append("composition_not_feasible")
     if not physical_action and not operational_action:
         failures.append("unexecutable_visual_story")
     if (
@@ -287,11 +282,13 @@ def _candidate_hard_failure_codes(
             or authoritative_context.source_count == 0
         )
     ):
+        # An operational/capability story is a factual representation. It may
+        # only pass when the tenant-scoped Business Brain supplied authority;
+        # this is a grounding rule, not an artistic quality score.
         failures.append("insufficient_authoritative_business_information")
-    if (
-        not _HARD_VISIBLE_RELATIONSHIP.search(visual_story)
-        and getattr(world_class, "customer_causality", 0) < 42
-    ):
+    # A plan must describe a visible consequence/relationship, but its
+    # strength is judged on the composed image by the multimodal critic.
+    if not _HARD_VISIBLE_RELATIONSHIP.search(visual_story):
         failures.append("missing_visible_consequence")
 
     return tuple(dict.fromkeys(failures))[:8]
@@ -675,14 +672,19 @@ def build_creative_direction(
     research: CreativeResearchBundle,
     context: PublicCreativeResearchContext,
     synthesis: CreativeDirectorSynthesis | None = None,
+    plan: CreativePlan | None = None,
     story_mode: CreativeStoryMode = "offering_proof",
     authoritative_context: AuthoritativeCreativeContext | None = None,
 ) -> CreativeDirectionPlan:
     if story_mode not in {"offering_proof", "brand_offer"}:
         raise ValueError("Creative story mode is invalid")
+    if synthesis is not None and plan is not None:
+        raise ValueError("Provide either a creative synthesis or a creative plan")
     proposals = (
         synthesis.candidates
         if synthesis is not None
+        else (creative_plan_to_concept(plan, strategy=strategy),)
+        if plan is not None
         else tuple(
             _build_pattern_proposal(
                 pattern=pattern,
@@ -722,7 +724,68 @@ def build_creative_direction(
         selected_concept=selected,
         research_fingerprint=research.research_fingerprint,
         used_live_research=not research.degraded and research.reference_count > 0,
-        used_ai_synthesis=synthesis is not None,
+        used_ai_synthesis=synthesis is not None or plan is not None,
+    )
+
+
+def creative_plan_to_concept(
+    plan: CreativePlan,
+    *,
+    strategy: CreativeStrategyProposal,
+) -> CreativeConceptProposal:
+    """Adapt one planner plan to the existing V2 compositor contract.
+
+    The adapter is intentionally loss-aware: all plan fields map to concrete
+    renderer inputs, while exact copy and factual authority still come from
+    the server-owned strategy/content context.
+    """
+    exclusions = tuple(plan.visual_exclusions) or (
+        "no fake product UI or dashboard",
+        "no glowing AI brain or neon network shorthand",
+    )
+    return CreativeConceptProposal(
+        concept_name=plan.concept_name,
+        marketing_idea=plan.creative_idea,
+        customer_care_reason=plan.audience_reason_to_care,
+        strategic_reason=plan.visual_story,
+        hero_subject=plan.hero_subject,
+        hero_relevance=plan.audience_reason_to_care,
+        product_story=(
+            f"{plan.hero_action.rstrip('.')} with a visible consequence: "
+            f"{plan.visible_consequence}"
+        )[:400],
+        scroll_stopping_hook=plan.visible_consequence,
+        visual_metaphor=plan.creative_idea,
+        layout_intent=plan.composition_intent,
+        focal_area=plan.hero_subject[:160],
+        text_zone=plan.negative_space_intent,
+        offer_treatment=(
+            "compact exact authorized offer element"
+            if strategy.offer
+            else "no offer element"
+        ),
+        cta_treatment=(
+            "compact deterministic display CTA"
+            if strategy.cta
+            else "no CTA element"
+        ),
+        depth="controlled layered depth with a clear hero separation",
+        image_style=plan.image_style,
+        camera_direction=plan.art_direction,
+        lighting=plan.art_direction[:240],
+        mood=plan.art_direction[:240],
+        visual_density="controlled",
+        background_complexity="low detail in the protected copy field",
+        brand_expression=plan.brand_treatment,
+        inspiration_principles=(
+            plan.composition_intent[:180],
+            plan.negative_space_intent[:180],
+        ),
+        avoid_patterns=exclusions,
+        originality_notes=(
+            "Planner-authored campaign territory; exact copy, logo, and brand "
+            "application remain deterministic server composition responsibilities."
+        ),
     )
 
 
@@ -1295,6 +1358,86 @@ def build_creative_director_task(
             )
 
     return task
+
+
+def build_creative_plan_task(
+    *,
+    strategy: CreativeStrategyProposal,
+    research: CreativeResearchBundle,
+    context: PublicCreativeResearchContext,
+    story_mode: CreativeStoryMode = "offering_proof",
+    repair: bool = False,
+    owner_intent: OwnerCreativeIntent | None = None,
+) -> str:
+    """Build the single-plan contract used by the production director call.
+
+    The older three-candidate task remains available for persisted/checkpoint
+    compatibility and focused legacy tests. Normal generation asks the model
+    for one execution-ready plan; server scoring below remains diagnostics and
+    hard validation only.
+    """
+    legacy_task = build_creative_director_task(
+        strategy=strategy,
+        research=research,
+        context=context,
+        story_mode=story_mode,
+        repair=repair,
+        owner_intent=owner_intent,
+    )
+    output_marker = "\n\nOUTPUT RULES:\n"
+    prefix, _separator, _legacy_rules = legacy_task.partition(output_marker)
+    prefix = prefix.replace(
+        "Produce exactly three materially different executable concepts.",
+        "Produce exactly one executable CreativePlan.",
+    ).replace(
+        "They must differ in hero idea, metaphor, image-making approach, "
+        "product/service representation, camera direction, and spatial rhythm—"
+        "not merely color or crop. ",
+        "It must define one specific hero idea, visible action, consequence, "
+        "image-making approach, and spatial rhythm. ",
+    ).replace(
+        "They must differ in hero idea, metaphor, image-making approach, "
+        "subject representation, camera direction, and spatial rhythm—not merely "
+        "color or crop. ",
+        "It must define one specific hero idea, visible action, consequence, "
+        "image-making approach, and spatial rhythm. ",
+    )
+    suffix = (
+        "\n\nOUTPUT RULES:\n"
+        "- Return exactly one CreativePlan through the required typed schema.\n"
+        "- Include headline, supporting_copy, caption, cta, concept_name, "
+        "creative_idea, audience_reason_to_care, visual_story, hero_subject, "
+        "hero_action, visible_consequence, art_direction, image_style, "
+        "composition_intent, negative_space_intent, image_prompt, "
+        "visual_exclusions, and brand_treatment.\n"
+        "- Preserve the trusted headline, supporting copy, and display CTA exactly "
+        "when supplied; do not silently rewrite locked owner/content copy.\n"
+        "- Ground factual claims in the trusted strategy and Business Brain context.\n"
+        "- The visual story must show a subject performing a visible action with a "
+        "visible consequence, not decorative atmosphere.\n"
+        "- Reserve a feasible quiet zone for exact deterministic copy and logo.\n"
+        "- Never ask the image model to draw final copy, typography, or logos.\n"
+        "- Use abstract research only; never include URLs, evidence IDs, external "
+        "actions, hidden reasoning, credentials, or chain-of-thought.\n"
+        "- The raw image will contain no typography; describe visual direction, "
+        "not final copy."
+    )
+    task = prefix + suffix
+    if len(task) > MAX_AGENT_TASK_LENGTH:
+        raise CreativeDirectorTaskBudgetError(
+            task_length=len(task),
+            mandatory_length=len(task),
+        )
+    for marker in (
+        "Return exactly one CreativePlan",
+        "Preserve the trusted headline",
+        "visible consequence",
+        "Never ask the image model to draw final copy",
+    ):
+        if marker not in task:
+            raise ValueError("Creative Plan task lost a mandatory contract")
+    return task
+
 
 def build_visual_art_direction(
     *,

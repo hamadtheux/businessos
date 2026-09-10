@@ -156,7 +156,7 @@ const navGroups: NavGroup[] = [
     label: "AI Team",
     items: [
       { href: "/chatbot", label: "Website Chatbot", icon: MessageCircle, feature: "website_chatbot" as const },
-      { href: "/cmo", label: "AI CMO", icon: Wand2, feature: "marketing_cmo" as const },
+      { href: "/cmo", label: "Create & Publish", icon: Wand2, feature: "marketing_cmo" as const },
       { href: "/agents", label: "AI Agents", icon: Bot, feature: "ai_agents" as const },
       { href: "/automations", label: "Automations", icon: Zap, feature: "automations" as const },
       { href: "/approvals", label: "Approvals", icon: ClipboardCheck },

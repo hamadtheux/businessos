@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from hashlib import sha256
+import re
 from typing import Literal
-from urllib.parse import urlsplit
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -409,15 +409,16 @@ async def prepare_content_publish_action(
     body = content.body
     if content.cta:
         body = f"{body}\n\n{content.cta}"
-    media_refs = (
-        await _ready_instagram_media_refs(
-            session,
-            business_id=business_id,
-            content_id=content.id,
-        )
-        if target == "instagram"
-        else []
+    media = await _ready_social_media_asset(
+        session,
+        business_id=business_id,
+        content=content,
     )
+    if target == "instagram" and media is None:
+        raise MarketingValidationError("instagram_media_required")
+
+    media_refs = [f"creative_asset:{media.id}"] if media is not None else []
+    media_type = media.media_type if media is not None else None
     return await _materialize_governed_proposal(
         session,
         business_id=business_id,
@@ -435,59 +436,172 @@ async def prepare_content_publish_action(
                 platform=target,
                 content=body[:10_000],
                 media_refs=media_refs,
+                media_type=media_type,
             ),
         ),
     )
 
 
-async def _ready_instagram_media_refs(
+_CREATE_PUBLISH_PACKAGE_KEY = re.compile(
+    r"^create-publish:([0-9a-f-]{36}):"
+    r"(instagram|facebook|linkedin|tiktok|youtube)(?::v\\d+)?$",
+    flags=re.IGNORECASE,
+)
+
+
+_CREATE_PUBLISH_MEDIA_OWNER_PRIORITY = (
+    "instagram",
+    "facebook",
+    "linkedin",
+    "tiktok",
+    "youtube",
+)
+
+
+async def _create_publish_media_owner(
     session: AsyncSession,
     *,
     business_id: UUID,
-    content_id: UUID,
-) -> list[str]:
-    """Return only tenant-owned, final, HTTPS media supported by the adapter."""
-    try:
-        candidates = list(
-            (
-                await session.scalars(
-                    select(CreativeAsset)
-                    .where(
-                        CreativeAsset.business_id == business_id,
-                        CreativeAsset.content_id == content_id,
-                        CreativeAsset.source_type == "future_provider",
-                        CreativeAsset.generation_status == "ready",
-                        CreativeAsset.storage_reference.is_not(None),
-                    )
-                    .order_by(
-                        CreativeAsset.created_at.desc(),
-                        CreativeAsset.id.desc(),
-                    )
-                    .limit(10)
+    package_id: str,
+) -> MarketingContent | None:
+    """Return the latest deterministic package media-owner version."""
+    prefix = f"create-publish:{package_id}:"
+
+    for platform in _CREATE_PUBLISH_MEDIA_OWNER_PRIORITY:
+        try:
+            owner = await session.scalar(
+                select(MarketingContent)
+                .where(
+                    MarketingContent.business_id == business_id,
+                    MarketingContent.proposal_key.startswith(
+                        f"{prefix}{platform}"
+                    ),
                 )
-            ).all()
+                .order_by(
+                    MarketingContent.version.desc(),
+                    MarketingContent.updated_at.desc(),
+                    MarketingContent.id.desc(),
+                )
+                .limit(1)
+            )
+        except SQLAlchemyError:
+            raise MarketingPersistenceError from None
+
+        if owner is not None:
+            return owner
+
+    return None
+
+
+async def _ready_social_media_asset(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    content: MarketingContent,
+) -> CreativeAsset | None:
+    """Resolve the exact package media choice, then validate ownership/state."""
+    package_match = _CREATE_PUBLISH_PACKAGE_KEY.fullmatch(
+        getattr(content, "proposal_key", None) or ""
+    )
+
+    selection_content = content
+    package_prefix: str | None = None
+
+    if package_match is not None:
+        package_id = package_match.group(1)
+        package_prefix = f"create-publish:{package_id}:"
+        owner = await _create_publish_media_owner(
+            session,
+            business_id=business_id,
+            package_id=package_id,
+        )
+        if owner is None:
+            raise MarketingValidationError(
+                "content_package_media_owner_missing"
+            )
+        selection_content = owner
+
+    fields = getattr(selection_content, "platform_fields", None) or {}
+    if not isinstance(fields, dict):
+        raise MarketingValidationError(
+            "selected_media_asset_invalid"
+        )
+
+    if fields.get("media_disabled") is True:
+        return None
+
+    selected_raw = fields.get("selected_media_asset_id")
+    selected_id: UUID | None = None
+
+    if selected_raw is not None:
+        if not isinstance(selected_raw, str):
+            raise MarketingValidationError(
+                "selected_media_asset_invalid"
+            )
+        try:
+            selected_id = UUID(selected_raw)
+        except ValueError:
+            raise MarketingValidationError(
+                "selected_media_asset_invalid"
+            ) from None
+
+    statement = select(CreativeAsset).join(
+        MarketingContent,
+        MarketingContent.id == CreativeAsset.content_id,
+    )
+
+    if package_prefix is not None:
+        statement = statement.where(
+            MarketingContent.business_id == business_id,
+            MarketingContent.proposal_key.startswith(package_prefix),
+        )
+    else:
+        root_content_id = (
+            getattr(content, "root_content_id", None)
+            or content.id
+        )
+        statement = statement.where(
+            MarketingContent.business_id == business_id,
+            MarketingContent.root_content_id == root_content_id,
+        )
+
+    statement = statement.where(
+        CreativeAsset.business_id == business_id,
+        CreativeAsset.source_type.in_(
+            {"future_provider", "import"}
+        ),
+        CreativeAsset.generation_status == "ready",
+        CreativeAsset.storage_reference.is_not(None),
+    )
+
+    if selected_id is not None:
+        statement = statement.where(
+            CreativeAsset.id == selected_id
+        )
+    else:
+        # Legacy/newly-generated packages without an explicit user selection
+        # retain the existing deterministic newest-ready behavior.
+        statement = statement.order_by(
+            CreativeAsset.created_at.desc(),
+            CreativeAsset.id.desc(),
+        )
+
+    try:
+        candidate = await session.scalar(
+            statement.limit(1)
         )
     except SQLAlchemyError:
         raise MarketingPersistenceError from None
-    for candidate in candidates:
-        reference = candidate.storage_reference
-        if isinstance(reference, str) and _safe_public_media_reference(reference):
-            return [reference]
-    return []
 
+    if selected_id is not None and candidate is None:
+        # Never silently substitute another image when the owner explicitly
+        # selected one.
+        raise MarketingValidationError(
+            "selected_media_asset_unavailable"
+        )
 
-def _safe_public_media_reference(value: str) -> bool:
-    try:
-        parsed = urlsplit(value)
-    except ValueError:
-        return False
-    return (
-        parsed.scheme == "https"
-        and bool(parsed.hostname)
-        and parsed.username is None
-        and parsed.password is None
-        and len(value) <= 1024
-    )
+    return candidate
+
 
 
 async def _materialize_governed_proposal(
@@ -679,6 +793,17 @@ async def _connector_state(
                 f"{connector_type} is connected for supported reads, but this connection "
                 "does not provide the required external-write capability. No execution "
                 "attempt was created."
+            )
+        elif (
+            action_type == "publish_social_post"
+            and not set(definition.oauth_write_scopes).issubset(
+                set(getattr(connection, "scopes_granted", None) or [])
+            )
+        ):
+            state = "connection_required"
+            message = (
+                f"Reconnect {connector_type} to grant the required publishing "
+                "permission before external execution can be attempted."
             )
         else:
             state = "ready_after_approval"

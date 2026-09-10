@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -346,6 +347,78 @@ class MarketingApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(service.await_args.kwargs["offer_authorization_role"])
         self.assertEqual(self.session.commit_calls, 1)
 
+    async def test_frontend_shaped_content_request_reaches_service_persistence_response(self) -> None:
+        execution = SimpleNamespace(
+            output=SimpleNamespace(
+                summary=json.dumps(
+                    {
+                        "title": "One clear rhythm",
+                        "body": "Bring daily business work into one clearer rhythm.",
+                        "cta": "Learn More",
+                        "offer": None,
+                        "creative_brief": "Grounded editorial owner story.",
+                        "recommended_channel": "instagram",
+                        "generation_reasoning": "The draft makes the operating benefit clear.",
+                        "evidence_source_ids": [],
+                    }
+                ),
+                recommendations=(),
+                proposed_actions=(),
+            ),
+            context_revision="context-revision-1",
+            business_brain_source_count=1,
+            memory_source_count=0,
+        )
+        with patch(
+            "app.services.marketing.execute_ai_agent",
+            new=AsyncMock(return_value=execution),
+        ) as execute:
+            response = await self.client.post(
+                self._url("content/generate"),
+                json={
+                    "prompt": (
+                        "Create an Instagram campaign for 9D Brain showing small "
+                        "business owners how to bring marketing, sales, support "
+                        "and daily operations into a clearer way of working."
+                    ),
+                    "channel": "instagram",
+                    "content_type": "social_post",
+                    "campaign_id": None,
+                    "title": None,
+                    "language": "en",
+                    "offer": None,
+                    "offer_authorized": False,
+                },
+            )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["title"], "One clear rhythm")
+        self.assertEqual(response.json()["cta"], "Learn More")
+        execute.assert_awaited_once()
+        self.assertGreaterEqual(self.session.flush_calls, 1)
+        self.assertEqual(self.session.commit_calls, 1)
+
+    async def test_frontend_shaped_overlimit_content_request_is_controlled_4xx(self) -> None:
+        """The drawer's maximum goal must never escape as an API 500."""
+        response = await self.client.post(
+            self._url("content/generate"),
+            json={
+                "prompt": "x" * 2400,
+                "channel": "instagram",
+                "content_type": "social_post",
+                "campaign_id": None,
+                "title": None,
+                "language": "en",
+                "offer": None,
+                "offer_authorized": False,
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["detail"]["code"], "validation_error")
+        self.assertEqual(self.session.commit_calls, 0)
+        self.assertEqual(self.session.rollback_calls, 1)
+
     async def test_member_cannot_forge_content_offer_authorization(self) -> None:
         with patch(
             "app.api.v1.marketing.service.generate_content",
@@ -607,6 +680,18 @@ class _FakeSession:
     def __init__(self):
         self.commit_calls = 0
         self.rollback_calls = 0
+        self.flush_calls = 0
+        self.added = []
+
+    def add(self, value):
+        self.added.append(value)
+        if getattr(value, "created_at", None) is None:
+            value.created_at = NOW
+        if getattr(value, "updated_at", None) is None:
+            value.updated_at = NOW
+
+    async def flush(self):
+        self.flush_calls += 1
 
     async def commit(self):
         self.commit_calls += 1

@@ -139,7 +139,7 @@ _DEFINITIONS: Final[tuple[ConnectorDefinition, ...]] = (
             "pages_messaging",
             "leads_retrieval",
         ),
-        write_scopes=("pages_manage_ads",),
+        write_scopes=("pages_manage_posts",),
         resources=("meta_business", "facebook_page"), webhook=True,
     ),
     _connector(

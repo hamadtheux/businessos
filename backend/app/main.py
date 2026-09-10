@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 from secrets import token_hex
 from time import monotonic
+import traceback
 
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
@@ -26,6 +27,25 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
 _BUSINESS_PATH = re.compile(r"/businesses/([0-9a-fA-F-]{36})(?:/|$)")
 logger = logging.getLogger("aibos.api")
+
+
+def _safe_application_location(error: Exception) -> str | None:
+    """Return one bounded code location without serializing exception data."""
+    frames = traceback.extract_tb(error.__traceback__)
+    application_frames = [
+        frame
+        for frame in frames
+        if Path(frame.filename).resolve().is_relative_to(_BACKEND_ROOT)
+    ]
+    frame = application_frames[-1] if application_frames else (frames[-1] if frames else None)
+    if frame is None:
+        return None
+    filename = Path(frame.filename).resolve()
+    try:
+        display_path = filename.relative_to(_BACKEND_ROOT)
+    except ValueError:
+        display_path = Path(filename.name)
+    return f"{display_path}:{frame.lineno}"
 
 
 @lru_cache(maxsize=1)
@@ -110,6 +130,9 @@ def create_application() -> FastAPI:
                 extra={
                     "request_id": request_id,
                     "exception_type": type(error).__name__,
+                    "application_location": _safe_application_location(error),
+                    "route": request.url.path,
+                    "method": request.method,
                 },
             )
             response = JSONResponse(

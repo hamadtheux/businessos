@@ -113,6 +113,49 @@ test("AI content generation uses the tenant-scoped POST endpoint", async () => {
   });
 });
 
+test("Create & Publish generates all selected platform variants in one request", async () => {
+  const requests: Array<{ path: string; body: unknown }> = [];
+  const api = await authenticated(async (input, init) => {
+    if (String(input).endsWith("/login")) return json(session);
+    requests.push({
+      path: new URL(String(input)).pathname,
+      body: JSON.parse(String(init?.body)),
+    });
+    return json({ package_id: "package-one", canonical_message: "Launch", contents: [] });
+  });
+  const payload = {
+    goal: "Launch our new service",
+    platforms: ["instagram", "facebook", "linkedin"] as const,
+    tone: "Confident",
+  };
+
+  await api.content.packages.generate(businessA, payload);
+
+  assert.deepEqual(requests, [{
+    path: `/api/v1/businesses/${businessA}/marketing/content/packages/generate`,
+    body: payload,
+  }]);
+});
+
+test("Create & Publish uploads media as authenticated multipart without JSON wrapping", async () => {
+  let request: { path: string; body: FormData | null } | null = null;
+  const api = await authenticated(async (input, init) => {
+    if (String(input).endsWith("/login")) return json(session);
+    request = {
+      path: new URL(String(input)).pathname,
+      body: init?.body instanceof FormData ? init.body : null,
+    };
+    return json({});
+  });
+  const file = new File([new Uint8Array([0xff, 0xd8, 0xff])], "launch.jpg", { type: "image/jpeg" });
+
+  await api.creative.upload(businessA, file, undefined, "content-one");
+
+  assert.equal(request?.path, `/api/v1/businesses/${businessA}/marketing/creative-assets/upload`);
+  assert.equal((request?.body?.get("file") as File | undefined)?.name, file.name);
+  assert.equal(request?.body?.get("content_id"), "content-one");
+});
+
 test("creative briefing, generation, and regeneration use tenant-scoped POST endpoints", async () => {
   const requests: Array<{ path: string; method: string }> = [];
   const api = await authenticated(async (input, init) => {
@@ -205,6 +248,29 @@ test("CMO creative studio exposes honest visual lifecycle states and immutable r
     readFile(new URL("../features/marketing/cmo-content-generator-drawer.tsx", import.meta.url), "utf8"),
     readFile(new URL("../index.css", import.meta.url), "utf8"),
   ]);
+
+  if (page.includes("CreatePublishPage")) {
+    const [currentPage, editor, composer, model] = await Promise.all([
+      readFile(new URL("../features/marketing/create-publish-page.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../features/marketing/create-publish-editor.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../features/marketing/create-publish-composer.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../features/marketing/create-publish-model.ts", import.meta.url), "utf8"),
+    ]);
+    assert.match(currentPage, /CREATIVE_GENERATION_POLL_MS/);
+    assert.match(currentPage, /marketingApi\.creative\.get/);
+    assert.match(currentPage, /marketingApi\.content\.packages\.generate/);
+    assert.match(currentPage, /marketingApi\.content\.preparePublish/);
+    assert.match(currentPage, /automationsApi\.approvals\.approve/);
+    assert.match(editor, /Previous creative history/);
+    assert.match(editor, /compact-image-failure/);
+    assert.match(editor, /onRetryVisual/);
+    assert.match(composer, /Create with AI/);
+    assert.match(currentPage, /Upload Media/);
+    assert.match(currentPage, /Create Manually/);
+    assert.match(model, /future_write_capabilities/);
+    assert.match(styles, /\.create-publish-media-frame/);
+    return;
+  }
 
   assert.match(panel, /creative-\$\{mediaType\}-empty-state/);
   assert.match(panel, /creative-generation-progress/);
@@ -564,6 +630,24 @@ test("content creation surfaces keep capability, loading, and calendar states tr
     readFile(new URL("../index.css", import.meta.url), "utf8"),
   ]);
 
+  if (page.includes("CreatePublishPage")) {
+    const [currentPage, editor, model] = await Promise.all([
+      readFile(new URL("../features/marketing/create-publish-page.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../features/marketing/create-publish-editor.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../features/marketing/create-publish-model.ts", import.meta.url), "utf8"),
+    ]);
+    assert.match(currentPage, /definitions\.isPending \|\| connections\.isPending/);
+    assert.match(currentPage, /ScheduleModal/);
+    assert.match(currentPage, /humanizeApiError/);
+    assert.match(editor, /connection_required/);
+    assert.match(editor, /coming_soon/);
+    assert.match(editor, /Draft saved/);
+    assert.match(model, /state: "checking"/);
+    assert.match(model, /state: "disconnected"/);
+    assert.match(styles, /\.create-publish-action-bar/);
+    return;
+  }
+
   const plan = social.slice(
     social.indexOf('<Card className="intelligence-hero cmo-content-plan">'),
     social.indexOf('<div className="social-channel-strip">'),
@@ -632,6 +716,24 @@ test("AI CMO creation flows use the accessible responsive workspace drawer", asy
     readFile(new URL("../components/ui/sheet.tsx", import.meta.url), "utf8"),
     readFile(new URL("../index.css", import.meta.url), "utf8"),
   ]);
+
+  if (page.includes("CreatePublishPage")) {
+    const [currentPage, editor, composer] = await Promise.all([
+      readFile(new URL("../features/marketing/create-publish-page.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../features/marketing/create-publish-editor.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../features/marketing/create-publish-composer.tsx", import.meta.url), "utf8"),
+    ]);
+    assert.match(currentPage, /data-testid="start-ai"/);
+    assert.match(composer, /<fieldset className="create-publish-platform-fieldset">/);
+    assert.match(composer, /Advanced settings/);
+    assert.match(composer, /<Collapsible/);
+    assert.match(editor, /role="tablist" aria-label="Platform variants"/);
+    assert.match(editor, /data-testid="schedule-post"/);
+    assert.match(editor, /data-testid="publish-now"/);
+    assert.match(currentPage, /const canApproveExternal = \["owner", "admin"\]/);
+    assert.match(styles, /@media \(max-width: 620px\)[\s\S]*\.create-publish-action-bar/);
+    return;
+  }
 
   assert.match(page, /Generate strategy/);
   assert.match(page, /New content/);
@@ -916,7 +1018,7 @@ test("AI CMO creation flows use the accessible responsive workspace drawer", asy
 
 test("completed marketing screens contain no workspace or localStorage dependency", async () => {
   const files = [
-    "../features/marketing/cmo-page.tsx", "../features/marketing/marketing-pages.tsx",
+    "../features/marketing/create-publish-page.tsx", "../features/marketing/marketing-pages.tsx",
     "../features/intelligence/intelligence-pages.tsx", "../features/analytics/analytics-page.tsx",
   ];
   for (const file of files) {

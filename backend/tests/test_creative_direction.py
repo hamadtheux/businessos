@@ -14,7 +14,7 @@ os.environ.setdefault(
 )
 os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 
-from app.schemas.marketing import CreativeStrategyProposal  # noqa: E402
+from app.schemas.marketing import CreativePlan, CreativeStrategyProposal  # noqa: E402
 from app.agents.provider import AIAgentProviderMetadata  # noqa: E402
 from app.exceptions.ai_agent import AIAgentProviderError  # noqa: E402
 from app.exceptions.marketing import MarketingAIError  # noqa: E402
@@ -26,11 +26,13 @@ from app.services.creative_direction import (  # noqa: E402
     CreativeConceptProposal,
     CreativeDirectorSynthesis,
     OwnerCreativeIntent,
+    build_creative_plan_task,
     build_creative_director_task,
     build_creative_direction,
     build_visual_art_direction,
     creative_direction_meets_hard_eligibility,
     creative_direction_meets_quality_floor,
+    creative_plan_to_concept,
 )
 from app.services.creative_research import (  # noqa: E402
     PublicCreativeResearchContext,
@@ -197,6 +199,47 @@ class CreativeDirectionTests(TestCase):
         with self.assertRaisesRegex(ValidationError, "original abstract direction"):
             CreativeConceptProposal.model_validate(unsafe)
 
+    def test_single_creative_plan_adapts_to_the_v2_direction_contract(self) -> None:
+        plan = CreativePlan(
+            headline="Run your business with an AI team",
+            supporting_copy="Automate marketing, sales, and customer operations.",
+            caption="A clearer operating rhythm for growing teams.",
+            cta="Claim the offer",
+            concept_name="One visible operating rhythm",
+            creative_idea="Show scattered work becoming one visible sequence.",
+            audience_reason_to_care="Owners need a calmer way to keep daily work moving.",
+            visual_story=(
+                "A real owner gathers five physical work cards while the cards form one "
+                "visible sequence on the desk."
+            ),
+            hero_subject="A real business owner and five physical work cards",
+            hero_action="Gathers five physical work cards into one sequence",
+            visible_consequence="The cards form one visible operating rhythm.",
+            art_direction="Editorial documentary photography with restrained blue accents.",
+            image_style="Premium editorial photography",
+            composition_intent="Hero on the right with a quiet left-side copy corridor.",
+            negative_space_intent="Keep the left third calm and uncluttered.",
+            image_prompt="A real owner organizing physical work cards on a clean desk.",
+            visual_exclusions=("glowing AI brain", "fake product dashboard"),
+            brand_treatment="Use restrained blue palette cues.",
+            recommended_channel="instagram",
+        )
+
+        concept = creative_plan_to_concept(plan, strategy=_strategy())
+        directed = build_creative_direction(
+            strategy=_strategy(),
+            research=self._research(),
+            context=_context(),
+            plan=plan,
+        )
+
+        self.assertEqual(concept.concept_name, plan.concept_name)
+        self.assertIn(plan.hero_action, concept.product_story)
+        self.assertEqual(directed.selected_concept.concept_name, plan.concept_name)
+        self.assertTrue(directed.used_ai_synthesis)
+        self.assertEqual(len(directed.candidates), 1)
+        self.assertTrue(creative_direction_meets_hard_eligibility(directed))
+
     def test_director_task_contains_only_abstract_research_not_urls_or_source_copy(self) -> None:
         task = build_creative_director_task(
             strategy=_strategy(),
@@ -209,6 +252,23 @@ class CreativeDirectionTests(TestCase):
         self.assertNotIn("make this exact", task.casefold())
         self.assertIn("exactly three", task.casefold())
         self.assertIn("abstract", task.casefold())
+
+    def test_production_plan_task_requests_one_execution_contract(self) -> None:
+        task = build_creative_plan_task(
+            strategy=_strategy(),
+            research=self._research(),
+            context=_context(),
+            owner_intent=OwnerCreativeIntent(
+                visual_direction="Show a real owner organizing a busy working day.",
+                visual_exclusions=("glowing AI brain", "fake dashboards"),
+            ),
+        )
+
+        self.assertLessEqual(len(task), 4000)
+        self.assertIn("Return exactly one CreativePlan", task)
+        self.assertIn("Preserve the trusted headline", task)
+        self.assertIn("visual_exclusions", task)
+        self.assertNotIn("Return exactly three candidates", task)
 
     def test_director_task_preserves_bounded_owner_visual_intent_without_authority(self) -> None:
         task = build_creative_director_task(
@@ -727,6 +787,32 @@ class CreativeDirectorRuntimeTests(IsolatedAsyncioTestCase):
             update={"selected_concept": weak_selected}
         )
 
+    def _creative_plan(self) -> CreativePlan:
+        return CreativePlan(
+            headline=_strategy().headline,
+            supporting_copy=_strategy().supporting_message,
+            caption="A clearer operating rhythm for growing teams.",
+            cta=_strategy().cta,
+            concept_name="One visible operating rhythm",
+            creative_idea="Show scattered work becoming one visible sequence.",
+            audience_reason_to_care="Owners need a calmer way to keep daily work moving.",
+            visual_story=(
+                "A real owner gathers five physical work cards while the cards form one "
+                "visible sequence on the desk."
+            ),
+            hero_subject="A real business owner and five physical work cards",
+            hero_action="Gathers five physical work cards into one sequence",
+            visible_consequence="The cards form one visible operating rhythm.",
+            art_direction="Editorial documentary photography with restrained blue accents.",
+            image_style="Premium editorial photography",
+            composition_intent="Hero on the right with a quiet left-side copy corridor.",
+            negative_space_intent="Keep the left third calm and uncluttered.",
+            image_prompt="A real owner organizing physical work cards on a clean desk.",
+            visual_exclusions=("glowing AI brain", "fake product dashboard"),
+            brand_treatment="Use restrained blue palette cues.",
+            recommended_channel="instagram",
+        )
+
     async def test_soft_dimensions_do_not_block_hard_eligible_deterministic_rescue(self) -> None:
         for field in (
             "business_specific_relevance",
@@ -842,10 +928,40 @@ class CreativeDirectorRuntimeTests(IsolatedAsyncioTestCase):
             )
 
         execute.assert_awaited_once()
-        self.assertIs(execute.await_args.args[4], CreativeDirectorSynthesis)
+        self.assertIs(execute.await_args.args[4], CreativePlan)
         self.assertEqual(execute.await_args.kwargs["max_output_tokens"], 4_000)
         self.assertTrue(direction.used_ai_synthesis)
         self.assertEqual(metadata.provider_request_id, "req_director")
+
+    async def test_creative_plan_provider_output_reaches_v2_direction(self) -> None:
+        context, research, _synthesis = self._inputs()
+        execution = SimpleNamespace(
+            output=self._creative_plan(),
+            provider_metadata=AIAgentProviderMetadata(),
+        )
+        with (
+            patch(
+                "app.services.marketing._build_cmo_execution_request",
+                new=AsyncMock(return_value=object()),
+            ),
+            patch(
+                "app.services.marketing.execute_ai_agent_typed_with_metadata",
+                new=AsyncMock(return_value=execution),
+            ),
+        ):
+            direction, _ = await _creative_direction_with_fallback(
+                object(),
+                business_id=uuid4(),
+                strategy=_strategy(),
+                research=research,
+                context=context,
+                provider=SimpleNamespace(provider_name="test_director"),
+                max_output_tokens=4_000,
+            )
+
+        self.assertEqual(direction.selected_concept.concept_name, self._creative_plan().concept_name)
+        self.assertTrue(direction.used_ai_synthesis)
+        self.assertTrue(creative_direction_meets_hard_eligibility(direction))
 
     async def test_director_provider_failure_uses_pattern_fallback_without_leak(self) -> None:
         context, research, _synthesis = self._inputs()

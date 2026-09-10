@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 from decimal import Decimal
 from typing import Annotated, Any, Literal, get_args
@@ -11,6 +12,13 @@ from app.schemas.ai_agent import AIAgentProposedAction
 
 
 Channel = Literal["meta", "google_ads", "instagram", "facebook", "linkedin", "tiktok", "email", "whatsapp", "website", "other"]
+CreatePublishPlatform = Literal[
+    "instagram",
+    "facebook",
+    "linkedin",
+    "tiktok",
+    "youtube",
+]
 _MARKETING_CHANNEL_VALUES = frozenset(get_args(Channel))
 MarketingPlanStatus = Literal["draft", "ready", "active", "completed", "archived"]
 CampaignStatus = Literal[
@@ -26,6 +34,28 @@ SafeSlug = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]{0,47}$")]
 Money = Annotated[Decimal, Field(ge=0, le=Decimal("1000000000.00"), max_digits=14, decimal_places=2)]
 Ratio = Annotated[Decimal, Field(ge=0, le=1, decimal_places=3)]
 MAX_VIDEO_STRATEGY_BYTES = 12_000
+
+
+def _bounded_platform_fields(value: dict[str, object] | None) -> dict[str, object]:
+    if value is None:
+        return {}
+    try:
+        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        raise ValueError("platform fields must be JSON serializable") from None
+    if len(serialized.encode("utf-8")) > 8192:
+        raise ValueError("platform fields exceed the storage limit")
+    return value
+
+
+def _bounded_platform_terms(values: list[str]) -> list[str]:
+    normalized = [" ".join(value.split()) for value in values]
+    if (
+        any(not value or len(value) > 100 for value in normalized)
+        or len({value.casefold() for value in normalized}) != len(normalized)
+    ):
+        raise ValueError("platform terms must be bounded and unique")
+    return normalized
 
 
 class MarketingSchema(BaseModel):
@@ -288,13 +318,33 @@ class ContentCreate(MarketingSchema):
     title: str = Field(min_length=1, max_length=180)
     body: str = Field(min_length=1, max_length=20000)
     cta: str | None = Field(default=None, max_length=300)
+    platform_fields: dict[str, object] = Field(default_factory=dict)
     language: str = Field(default="en", pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$")
+
+    @field_validator("platform_fields", mode="before")
+    @classmethod
+    def bounded_platform_fields(
+        cls,
+        value: dict[str, object] | None,
+    ) -> dict[str, object]:
+        return _bounded_platform_fields(value)
 
 
 class ContentVersionCreate(MarketingSchema):
     title: str = Field(min_length=1, max_length=180)
     body: str = Field(min_length=1, max_length=20000)
     cta: str | None = Field(default=None, max_length=300)
+    platform_fields: dict[str, object] | None = None
+
+    @field_validator("platform_fields", mode="before")
+    @classmethod
+    def bounded_platform_fields(
+        cls,
+        value: dict[str, object] | None,
+    ) -> dict[str, object] | None:
+        if value is None:
+            return None
+        return _bounded_platform_fields(value)
 
 
 class ContentResponse(ContentCreate, MarketingRecord):
@@ -309,6 +359,49 @@ class ContentResponse(ContentCreate, MarketingRecord):
     generation_reasoning: str | None = None
     recommended_for: str | None = None
     source_evidence: list[dict[str, object]] | None = None
+
+
+class CreativePlan(MarketingSchema):
+    """One bounded planner result used to execute a branded creative.
+
+    This is execution data, not private model reasoning. Business facts and
+    final typography remain server-owned; the plan only describes the story
+    and art direction that the renderer may safely execute.
+    """
+
+    headline: str = Field(min_length=1, max_length=180)
+    supporting_copy: str = Field(min_length=1, max_length=600)
+    caption: str = Field(min_length=1, max_length=4000)
+    cta: str | None = Field(default=None, max_length=300)
+    concept_name: str = Field(min_length=1, max_length=100)
+    creative_idea: str = Field(min_length=1, max_length=600)
+    audience_reason_to_care: str = Field(min_length=1, max_length=500)
+    visual_story: str = Field(min_length=1, max_length=900)
+    hero_subject: str = Field(min_length=1, max_length=500)
+    hero_action: str = Field(min_length=1, max_length=400)
+    visible_consequence: str = Field(min_length=1, max_length=500)
+    art_direction: str = Field(min_length=1, max_length=700)
+    image_style: str = Field(min_length=1, max_length=220)
+    composition_intent: str = Field(min_length=1, max_length=700)
+    negative_space_intent: str = Field(min_length=1, max_length=300)
+    image_prompt: str = Field(min_length=1, max_length=5000)
+    visual_exclusions: tuple[str, ...] = Field(default=(), max_length=8)
+    brand_treatment: str = Field(min_length=1, max_length=700)
+    recommended_channel: Channel | None = None
+
+    @field_validator("visual_exclusions")
+    @classmethod
+    def bounded_visual_exclusions(
+        cls,
+        values: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        normalized = tuple(" ".join(value.split()) for value in values)
+        if (
+            any(not value or len(value) > 180 for value in normalized)
+            or len({value.casefold() for value in normalized}) != len(normalized)
+        ):
+            raise ValueError("visual exclusions must be bounded and unique")
+        return normalized
 
 
 class ContentGenerateRequest(MarketingSchema):
@@ -327,6 +420,84 @@ class ContentGenerateRequest(MarketingSchema):
         if self.offer and not self.offer_authorized:
             raise ValueError("An explicit content offer requires owner authorization")
         return self
+
+
+class PlatformContentVariant(MarketingSchema):
+    platform: CreatePublishPlatform
+    title: str | None = Field(default=None, max_length=180)
+    caption: str | None = Field(default=None, max_length=5000)
+    description: str | None = Field(default=None, max_length=8000)
+    cta: str | None = Field(default=None, max_length=300)
+    hashtags: list[str] = Field(default_factory=list, max_length=30)
+    keywords: list[str] = Field(default_factory=list, max_length=40)
+    alt_text: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("hashtags", "keywords")
+    @classmethod
+    def bounded_unique_terms(cls, values: list[str]) -> list[str]:
+        return _bounded_platform_terms(values)
+
+    @model_validator(mode="after")
+    def has_customer_copy(self) -> "PlatformContentVariant":
+        if not (self.caption or self.description):
+            raise ValueError("a platform variant requires caption or description")
+        return self
+
+
+class ContentPackageProposal(MarketingSchema):
+    canonical_message: str = Field(min_length=1, max_length=3000)
+    headline: str = Field(min_length=1, max_length=180)
+    creative_concept: str = Field(min_length=1, max_length=1200)
+    visual_direction: str = Field(min_length=1, max_length=1600)
+    variants: list[PlatformContentVariant] = Field(min_length=1, max_length=5)
+
+
+class ContentPackageGenerateRequest(MarketingSchema):
+    goal: str = Field(default="", max_length=2400)
+    platforms: list[CreatePublishPlatform] = Field(min_length=1, max_length=5)
+    media_asset_id: UUID | None = None
+    audience: str | None = Field(default=None, max_length=400)
+    tone: str | None = Field(default=None, max_length=120)
+    objective: str | None = Field(default=None, max_length=120)
+    visual_preference: str | None = Field(default=None, max_length=400)
+    language: str = Field(default="en", pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$")
+
+    @model_validator(mode="after")
+    def valid_create_publish_request(self) -> "ContentPackageGenerateRequest":
+        if len(self.platforms) != len(set(self.platforms)):
+            raise ValueError("platforms must be unique")
+        if not self.goal and self.media_asset_id is None:
+            raise ValueError("describe the post or upload media")
+        return self
+
+
+class ContentPackageManualRequest(MarketingSchema):
+    post_text: str = Field(min_length=1, max_length=10000)
+    platforms: list[CreatePublishPlatform] = Field(min_length=1, max_length=5)
+    title: str | None = Field(default=None, max_length=180)
+    cta: str | None = Field(default=None, max_length=300)
+    hashtags: list[str] = Field(default_factory=list, max_length=30)
+    keywords: list[str] = Field(default_factory=list, max_length=40)
+    alt_text: str | None = Field(default=None, max_length=1000)
+    media_asset_id: UUID | None = None
+    language: str = Field(default="en", pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$")
+
+    @field_validator("hashtags", "keywords")
+    @classmethod
+    def bounded_unique_terms(cls, values: list[str]) -> list[str]:
+        return _bounded_platform_terms(values)
+
+    @model_validator(mode="after")
+    def unique_platforms(self) -> "ContentPackageManualRequest":
+        if len(self.platforms) != len(set(self.platforms)):
+            raise ValueError("platforms must be unique")
+        return self
+
+
+class ContentPackageResponse(MarketingSchema):
+    package_id: UUID
+    canonical_message: str
+    contents: list[ContentResponse]
 
 
 class ScheduledContentProposal(MarketingSchema):

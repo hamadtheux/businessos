@@ -101,7 +101,7 @@ class ProviderConnectorActionAdapter:
                 )
             if self.connector_type in {"facebook", "instagram"}:
                 return await self._publish_social(
-                    payload, selected_resources, headers
+                    payload, selected_resources, headers, token
                 )
             if self.connector_type == "meta_ads":
                 return await self._mutate_meta_ads(
@@ -224,41 +224,123 @@ class ProviderConnectorActionAdapter:
             },
         )
 
-    async def _publish_social(self, payload, resources, headers):
+    async def _publish_social(self, payload, resources, headers, token):
         if not isinstance(payload, PublishSocialPostPayload):
             raise ConnectorRequestNotSentError("payload_invalid")
+
         if self.connector_type == "facebook":
+            # Facebook video publishing requires a separate resumable/Reels
+            # workflow. Never turn a video into a text-only post.
+            if payload.media_type == "video":
+                raise ConnectorRequestNotSentError(
+                    "facebook_video_publishing_not_supported"
+                )
+
             page_id = _resource(resources, "facebook_page")
             if page_id is None:
                 raise ConnectorRequestNotSentError("page_selection_required")
-            response = await self._http.request_json(
-                "POST",
-                f"{self._meta_root()}/{page_id}/feed",
-                headers=headers,
-                data={"message": payload.content},
+
+            if len(payload.media_refs) > 1:
+                raise ConnectorRequestNotSentError(
+                    "facebook_multi_media_not_supported"
+                )
+
+            media_url = None
+            if payload.media_refs:
+                candidate = payload.media_refs[0]
+                if (
+                    payload.media_type != "image"
+                    or not _safe_public_media_url(candidate)
+                ):
+                    raise ConnectorRequestNotSentError(
+                        "facebook_media_invalid"
+                    )
+                media_url = candidate
+            elif payload.media_type is not None:
+                raise ConnectorRequestNotSentError(
+                    "facebook_media_invalid"
+                )
+
+            # The stored Meta credential remains server-only. Resolve the
+            # selected Page's Page Access Token immediately before mutation.
+            token_response = await self._http.request_json(
+                "GET",
+                f"{self._meta_root()}/{page_id}",
+                params={
+                    "fields": "access_token",
+                    "access_token": token,
+                },
             )
+            page_token = token_response.get("access_token")
+            if not isinstance(page_token, str) or not page_token:
+                raise ConnectorRequestNotSentError(
+                    "page_access_token_unavailable"
+                )
+
+            page_headers = {
+                **headers,
+                "Authorization": f"Bearer {page_token}",
+            }
+
+            if media_url is not None:
+                response = await self._http.request_json(
+                    "POST",
+                    f"{self._meta_root()}/{page_id}/photos",
+                    headers=page_headers,
+                    data={
+                        "url": media_url,
+                        "caption": payload.content,
+                    },
+                )
+            else:
+                response = await self._http.request_json(
+                    "POST",
+                    f"{self._meta_root()}/{page_id}/feed",
+                    headers=page_headers,
+                    data={"message": payload.content},
+                )
+
             reference = _required_reference(response, "id")
             return ConnectorActionResult(
                 succeeded=True,
                 external_reference_id=reference,
-                safe_metadata={"provider": "facebook"},
+                safe_metadata={
+                    "provider": "facebook",
+                    "media_type": payload.media_type or "text",
+                },
             )
-        instagram_id = _resource(resources, "instagram_account")
-        media_url = next(
-            (item for item in payload.media_refs if _safe_public_media_url(item)),
-            None,
-        )
-        if instagram_id is None or media_url is None:
+
+        # Instagram Reel/video publishing is asynchronous: create container,
+        # wait for provider processing, then media_publish. Until that durable
+        # workflow exists, video must fail before touching Meta.
+        if payload.media_type == "video":
+            raise ConnectorRequestNotSentError(
+                "instagram_video_publishing_not_supported"
+            )
+
+        if len(payload.media_refs) != 1 or payload.media_type != "image":
             raise ConnectorRequestNotSentError(
                 "instagram_media_and_account_required"
             )
+
+        instagram_id = _resource(resources, "instagram_account")
+        media_url = payload.media_refs[0]
+        if instagram_id is None or not _safe_public_media_url(media_url):
+            raise ConnectorRequestNotSentError(
+                "instagram_media_and_account_required"
+            )
+
         container = await self._http.request_json(
             "POST",
             f"{self._meta_root()}/{instagram_id}/media",
             headers=headers,
-            data={"image_url": media_url, "caption": payload.content},
+            data={
+                "image_url": media_url,
+                "caption": payload.content,
+            },
         )
         container_id = _required_reference(container, "id")
+
         published = await self._http.request_json(
             "POST",
             f"{self._meta_root()}/{instagram_id}/media_publish",
@@ -266,11 +348,16 @@ class ProviderConnectorActionAdapter:
             data={"creation_id": container_id},
         )
         reference = _required_reference(published, "id")
+
         return ConnectorActionResult(
             succeeded=True,
             external_reference_id=reference,
-            safe_metadata={"provider": "instagram"},
+            safe_metadata={
+                "provider": "instagram",
+                "media_type": "image",
+            },
         )
+
 
     async def _mutate_meta_ads(self, action_type, payload, resources, headers):
         account = _resource(resources, "ad_account")

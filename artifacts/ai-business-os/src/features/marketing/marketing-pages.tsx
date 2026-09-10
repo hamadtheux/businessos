@@ -77,7 +77,7 @@ import type {
 import { marketingApi, type CampaignPreflight } from "@/services/marketing";
 
 export const cmoTabs = [
-  ["Overview", "/marketing"],
+  ["Create & Publish", "/marketing"],
   ["Content", "/marketing/content"],
   ["Calendar", "/marketing/calendar"],
   ["Campaigns", "/marketing/campaigns"],

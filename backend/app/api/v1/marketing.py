@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime
 from typing import Annotated, Awaitable, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -54,6 +54,9 @@ from app.schemas.marketing import (
     CompetitorUpdate,
     ContentCreate,
     ContentGenerateRequest,
+    ContentPackageGenerateRequest,
+    ContentPackageManualRequest,
+    ContentPackageResponse,
     ContentResponse,
     ContentStatus,
     ContentVersionCreate,
@@ -106,6 +109,7 @@ from app.services.marketing_actions import (
     prepare_campaign_action,
     prepare_content_publish_action,
 )
+from app.services.marketing_media import read_marketing_media
 from app.services.advertising_spend_policy import (
     get_advertising_spend_policy,
     set_advertising_spend_policy,
@@ -312,6 +316,76 @@ async def generate_content(data: ContentGenerateRequest, access: BusinessAccessD
     ))
 
 
+@router.post(
+    "/content/packages/generate",
+    response_model=ContentPackageResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def generate_create_publish_package(
+    data: ContentPackageGenerateRequest,
+    access: BusinessAccessDependency,
+    response: Response,
+    session: SessionDependency,
+    provider: AIAgentProviderDependency,
+):
+    await _guard(session, access.business.id, "marketing_cmo", ai=True)
+    return await _mutate(
+        response,
+        session,
+        service.generate_content_package(
+            session,
+            business_id=access.business.id,
+            actor_user_id=access.user.id,
+            data=data,
+            provider=provider,
+        ),
+    )
+
+
+@router.post(
+    "/content/packages/manual",
+    response_model=ContentPackageResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_manual_create_publish_package(
+    data: ContentPackageManualRequest,
+    access: BusinessAccessDependency,
+    response: Response,
+    session: SessionDependency,
+):
+    await _guard(session, access.business.id, "marketing_cmo")
+    return await _mutate(
+        response,
+        session,
+        service.create_manual_content_package(
+            session,
+            business_id=access.business.id,
+            actor_user_id=access.user.id,
+            data=data,
+        ),
+    )
+
+
+@router.get(
+    "/content/packages/{package_id}",
+    response_model=ContentPackageResponse,
+)
+async def read_create_publish_package(
+    package_id: UUID,
+    access: BusinessAccessDependency,
+    response: Response,
+    session: SessionDependency,
+):
+    return await _read(
+        response,
+        service.get_content_package(
+            session,
+            business_id=access.business.id,
+            package_id=package_id,
+        ),
+    )
+
+
 @router.get("/content/{content_id}", response_model=ContentResponse)
 async def read_content_item(content_id: UUID, access: BusinessAccessDependency, response: Response, session: SessionDependency):
     return await _read(response, service.get_content(session, business_id=access.business.id, content_id=content_id))
@@ -355,8 +429,62 @@ async def change_content_status(content_id: UUID, data: StatusUpdate, access: Bu
 
 
 @router.get("/creative-assets", response_model=list[CreativeAssetResponse])
-async def read_creative_assets(access: BusinessAccessDependency, response: Response, session: SessionDependency, storage: ObjectStorageDependency, campaign_id: UUID | None = None, content_id: UUID | None = None):
-    return await _read(response, service.list_creative_asset_responses(session, business_id=access.business.id, campaign_id=campaign_id, content_id=content_id, storage=storage, signed_url_ttl_seconds=settings.storage_signed_url_ttl_seconds))
+async def read_creative_assets(access: BusinessAccessDependency, response: Response, session: SessionDependency, storage: ObjectStorageDependency, campaign_id: UUID | None = None, content_id: UUID | None = None, root_content_id: UUID | None = None):
+    return await _read(response, service.list_creative_asset_responses(session, business_id=access.business.id, campaign_id=campaign_id, content_id=content_id, root_content_id=root_content_id, storage=storage, signed_url_ttl_seconds=settings.storage_signed_url_ttl_seconds))
+
+
+@router.post(
+    "/creative-assets/upload",
+    response_model=CreativeAssetResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_post_media(
+    access: BusinessAccessDependency,
+    response: Response,
+    session: SessionDependency,
+    storage: ObjectStorageDependency,
+    file: UploadFile = File(...),
+    duration_seconds: int | None = Form(default=None),
+    content_id: UUID | None = Form(default=None),
+):
+    await _guard(session, access.business.id, "marketing_cmo")
+    try:
+        media = await read_marketing_media(
+            file,
+            duration_seconds=duration_seconds,
+        )
+    except MarketingValidationError as error:
+        code = str(error)
+        messages = {
+            "marketing_media_too_large": "The file is too large. Images can be up to 5 MB and videos up to 50 MB.",
+            "marketing_media_empty": "The selected file is empty.",
+            "marketing_media_unreadable": "The selected file could not be read.",
+            "marketing_video_duration_required": "The video duration could not be verified. Choose the file again.",
+            "marketing_media_unsupported": "Use a JPG, PNG, WEBP, MP4, or WEBM file.",
+        }
+        raise HTTPException(
+            status.HTTP_413_CONTENT_TOO_LARGE
+            if code == "marketing_media_too_large"
+            else status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"code": code, "message": messages.get(code, "Choose another media file.")},
+            headers=_PRIVATE_HEADERS,
+        ) from None
+    finally:
+        await file.close()
+    return await _mutate_creative(
+        response,
+        session,
+        service.prepare_uploaded_creative_asset(
+            session,
+            business_id=access.business.id,
+            actor_user_id=access.user.id,
+            media=media,
+            storage=storage,
+            content_id=content_id,
+        ),
+        business_id=access.business.id,
+        storage=storage,
+    )
 
 
 @router.get(

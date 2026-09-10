@@ -662,7 +662,7 @@ class ConfiguredMetaLoginForBusinessTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    def test_facebook_pages_ads_permission_is_optional_when_writes_disabled(self) -> None:
+    def test_facebook_pages_publish_permission_is_optional_when_writes_disabled(self) -> None:
         definition = CONNECTOR_REGISTRY["facebook"]
 
         self.assertEqual(
@@ -677,14 +677,14 @@ class ConfiguredMetaLoginForBusinessTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             definition.oauth_write_scopes,
-            ("pages_manage_ads",),
+            ("pages_manage_posts",),
         )
         self.assertNotIn(
-            "pages_manage_ads",
+            "pages_manage_posts",
             definition.requested_oauth_scopes("disabled"),
         )
         self.assertIn(
-            "pages_manage_ads",
+            "pages_manage_posts",
             definition.oauth_scopes,
         )
 

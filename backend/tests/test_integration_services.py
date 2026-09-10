@@ -275,7 +275,7 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
                         "pages_manage_metadata",
                         "pages_messaging",
                         "leads_retrieval",
-                        "pages_manage_ads",
+                        "pages_manage_posts",
                     ),
                 )
 
@@ -777,7 +777,7 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
 
         adapter.revoke_credentials.assert_awaited_once()
 
-    async def test_meta_public_profile_is_accepted_without_pages_manage_ads(self) -> None:
+    async def test_meta_public_profile_is_accepted_without_pages_manage_posts(self) -> None:
         granted_scopes = (
             "pages_show_list",
             "pages_read_engagement",
@@ -800,7 +800,7 @@ class IntegrationOAuthServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connection.status, "connected")
         self.assertEqual(connection.authentication_state, "authorized")
         self.assertEqual(set(connection.scopes_granted), set(granted_scopes))
-        self.assertNotIn("pages_manage_ads", connection.scopes_granted)
+        self.assertNotIn("pages_manage_posts", connection.scopes_granted)
         adapter.revoke_credentials.assert_not_awaited()
 
     async def test_meta_missing_or_invalid_granted_scopes_are_revoked(self) -> None:
@@ -1931,7 +1931,7 @@ class _MetaAuthorizationConnector(_FakeConnector):
             "pages_manage_metadata",
             "pages_messaging",
             "leads_retrieval",
-            "pages_manage_ads",
+            "pages_manage_posts",
         ),
         identity: ExternalIdentity | None = None,
         resources: list[ExternalResource] | None = None,
