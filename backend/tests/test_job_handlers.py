@@ -73,97 +73,26 @@ class JobHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.failure_code, "invalid_job_state")
         self.assertFalse(outcome.retryable)
 
-    async def test_creative_handler_uses_server_factories_and_typed_asset_reference(self) -> None:
-        creative_asset_id = uuid4()
-        runtime = SimpleNamespace(
-            provider=object(),
-            storage=object(),
-            research_engine=object(),
-            director_provider=object(),
-            visual_review_provider=object(),
-        )
-        run = AsyncMock(return_value=SimpleNamespace(generation_status="ready"))
-        with patch(
-            "app.services.job_handlers.build_creative_generation_runtime",
-            return_value=runtime,
-        ) as build_runtime, patch(
-            "app.services.job_handlers.run_queued_creative_asset_generation",
-            new=run,
-        ):
-            outcome = await handle_generate_creative_asset(
-                _Session(),  # type: ignore[arg-type]
-                _job(
-                    job_type="generate_creative_asset",
-                    creative_asset_id=creative_asset_id,
-                ),
-            )
-
-        self.assertTrue(outcome.succeeded)
-        build_runtime.assert_called_once_with()
-        self.assertEqual(run.await_args.kwargs["business_id"], BUSINESS_ID)
-        self.assertEqual(
-            run.await_args.kwargs["creative_asset_id"], creative_asset_id,
-        )
-        self.assertIs(run.await_args.kwargs["provider"], runtime.provider)
-        self.assertIs(run.await_args.kwargs["storage"], runtime.storage)
-        self.assertTrue(run.await_args.kwargs["require_semantic_review"])
-
-    async def test_creative_handler_classifies_provider_and_storage_failures(self) -> None:
-        job = _job(
-            job_type="generate_creative_asset",
-            creative_asset_id=uuid4(),
-        )
-        runtime = SimpleNamespace(
-            provider=object(), storage=object(), research_engine=object(),
-            director_provider=None, visual_review_provider=None,
-        )
-        with patch(
-            "app.services.job_handlers.build_creative_generation_runtime",
-            return_value=runtime,
-        ), patch(
-            "app.services.job_handlers.run_queued_creative_asset_generation",
-            new=AsyncMock(return_value=SimpleNamespace(
-                generation_status="provider_required",
-            )),
-        ):
-            provider_outcome = await handle_generate_creative_asset(
-                _Session(), job,  # type: ignore[arg-type]
-            )
-        self.assertEqual(provider_outcome.failure_code, "provider_unavailable")
-        self.assertFalse(provider_outcome.retryable)
-
-        with patch(
-            "app.services.job_handlers.build_creative_generation_runtime",
-            return_value=runtime,
-        ), patch(
-            "app.services.job_handlers.run_queued_creative_asset_generation",
-            new=AsyncMock(side_effect=MarketingPersistenceError()),
-        ):
-            storage_outcome = await handle_generate_creative_asset(
-                _Session(), job,  # type: ignore[arg-type]
-            )
-        self.assertEqual(storage_outcome.failure_code, "dependency_unavailable")
-        self.assertTrue(storage_outcome.retryable)
-
-    async def test_creative_persistence_failure_rolls_back_before_retryable_outcome(self) -> None:
-        job = _job(job_type="generate_creative_asset", creative_asset_id=uuid4())
-        runtime = SimpleNamespace(
-            provider=object(), storage=object(), research_engine=object(),
-            director_provider=None, visual_review_provider=None,
-        )
+    async def test_creative_handler_disables_legacy_external_execution(self) -> None:
         session = _Session()
-        with patch(
-            "app.services.job_handlers.build_creative_generation_runtime",
-            return_value=runtime,
-        ), patch(
-            "app.services.job_handlers.run_queued_creative_asset_generation",
-            new=AsyncMock(side_effect=MarketingPersistenceError()),
-        ):
-            outcome = await handle_generate_creative_asset(session, job)  # type: ignore[arg-type]
+        outcome = await handle_generate_creative_asset(
+            session,  # type: ignore[arg-type]
+            _job(
+                job_type="generate_creative_asset",
+                creative_asset_id=uuid4(),
+            ),
+        )
 
         self.assertFalse(outcome.succeeded)
-        self.assertTrue(outcome.retryable)
-        self.assertEqual(session.rollback_calls, 1)
+        self.assertEqual(
+            outcome.failure_code,
+            "external_execution_disabled",
+        )
+        self.assertFalse(outcome.retryable)
+        self.assertEqual(session.rollback_calls, 0)
+
+
+
 
     async def test_generic_persistence_failure_rolls_back_before_dispatch_returns(self) -> None:
         session = _Session()

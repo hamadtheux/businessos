@@ -19,6 +19,7 @@ from app.models.integration import IntegrationConnection
 from app.models.customer import Customer
 from app.models.conversation import Conversation, ConversationMessage
 from app.models.automation_intelligence import MarketingActionProposal
+from app.models.business_branding import BusinessBranding
 from app.models.marketing import Campaign, CreativeAsset, MarketingContent
 from app.integrations.action_adapters import (
     ConnectorActionAdapterRegistry,
@@ -27,10 +28,21 @@ from app.integrations.action_adapters import (
 from app.integrations.registry import require_connector
 from app.schemas.ai_action_payload import (
     ActionPayloadType,
+    CreateGoogleAdsCampaignPayload,
+    CreateMetaCampaignPayload,
     PublishSocialPostPayload,
 )
 from app.storage.base import ObjectStorage, StorageError
 from app.storage.factory import get_object_storage
+from app.exceptions.logo import LogoTooLargeError, LogoValidationError
+from app.services.business_branding import (
+    business_logo_reference,
+    validated_business_logo_key,
+)
+from app.services.logo_image import (
+    GOOGLE_ADS_IMAGE_MAX_BYTES,
+    google_ads_square_logo_bytes,
+)
 from app.services.action_execution_attempt import (
     revalidate_action_execution_attempt_for_dispatch,
 )
@@ -64,6 +76,24 @@ CONNECTOR_WRITE_CAPABILITIES: Final[Mapping[str, str]] = MappingProxyType({
     "change_ad_budget": "future_change_budget",
     "pause_ad_campaign": "future_change_budget",
 })
+
+
+class _MaterializedMetaCampaignPayload(CreateMetaCampaignPayload):
+    """Dispatch-only Meta payload carrying trusted short-lived media URLs."""
+
+    campaign_media_urls: tuple[str, ...]
+
+
+class _MaterializedGoogleAdsCampaignPayload(CreateGoogleAdsCampaignPayload):
+    """
+    Dispatch-only Google payload carrying private trusted bytes.
+
+    These fields never exist in the persisted AIAction, approval snapshot,
+    authorization hash, audit metadata, or provider-safe metadata.
+    """
+
+    campaign_media_bytes: tuple[bytes, bytes]
+    campaign_logo_bytes: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +207,18 @@ async def prepare_connector_dispatch_context(
             payload=payload,
             storage=storage,
         )
+    elif attempt.action_type in {
+        "create_meta_campaign",
+        "create_google_ads_campaign",
+    }:
+        dispatch_payload = await _materialize_campaign_media_payload(
+            session,
+            business_id=business_id,
+            action_id=action.id,
+            action_type=attempt.action_type,
+            payload=payload,
+            storage=storage,
+        )
 
     delivery_target = await _resolve_delivery_target(
         session,
@@ -224,6 +266,268 @@ _CREATE_PUBLISH_PACKAGE_KEY = re.compile(
     r"(instagram|facebook|linkedin|tiktok|youtube)(?::v\\d+)?$",
     flags=re.IGNORECASE,
 )
+
+
+async def _materialize_campaign_media_payload(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    action_id: UUID,
+    action_type: str,
+    payload: ActionPayloadType,
+    storage: ObjectStorage | None,
+) -> ActionPayloadType:
+    """
+    Resolve an approved creative_asset:<uuid> into transient provider media URLs.
+
+    The persisted AIAction, approval snapshot and authorized payload hash continue
+    to contain only the stable creative_asset:<uuid> identity.
+    """
+    if not isinstance(
+        payload,
+        (CreateMetaCampaignPayload, CreateGoogleAdsCampaignPayload),
+    ):
+        raise IntegrationStateError("campaign_payload_invalid")
+
+    refs = payload.creative.creative_refs
+
+    # Existing manual/commerce campaigns without Create & Publish media keep
+    # their established provider path.
+    if not any(ref.startswith(_PUBLISH_MEDIA_HANDLE_PREFIX) for ref in refs):
+        return payload
+
+    if (
+        len(refs) != 1
+        or not refs[0].startswith(_PUBLISH_MEDIA_HANDLE_PREFIX)
+    ):
+        raise IntegrationStateError("campaign_media_contract_invalid")
+
+    try:
+        asset_id = UUID(
+            refs[0].removeprefix(_PUBLISH_MEDIA_HANDLE_PREFIX)
+        )
+    except ValueError:
+        raise IntegrationStateError("campaign_media_handle_invalid") from None
+
+    proposal = await session.scalar(
+        select(MarketingActionProposal).where(
+            MarketingActionProposal.business_id == business_id,
+            MarketingActionProposal.ai_action_id == action_id,
+            MarketingActionProposal.entity_type == "campaign",
+        )
+    )
+    if proposal is None:
+        raise IntegrationStateError("campaign_proposal_link_required")
+
+    asset = await session.scalar(
+        select(CreativeAsset).where(
+            CreativeAsset.business_id == business_id,
+            CreativeAsset.id == asset_id,
+            CreativeAsset.campaign_id == proposal.entity_id,
+            CreativeAsset.source_type == "import",
+            CreativeAsset.generation_status == "ready",
+            CreativeAsset.storage_reference.is_not(None),
+        )
+    )
+    if (
+        asset is None
+        or asset.business_id != business_id
+        or asset.campaign_id != proposal.entity_id
+        or asset.source_type != "import"
+        or asset.generation_status != "ready"
+        or not asset.storage_reference
+    ):
+        raise IntegrationStateError("campaign_media_asset_invalid")
+
+    # Video provider execution gets its own verified transcoding/upload path.
+    # Never pretend an arbitrary uploaded MP4/WebM is ad-ready.
+    if asset.media_type != "image":
+        raise IntegrationStateError(
+            "campaign_video_media_processing_required"
+        )
+
+    metadata = asset.creative_metadata or {}
+    variants = metadata.get("variants")
+    if not isinstance(variants, dict):
+        raise IntegrationStateError("campaign_media_variants_required")
+
+    required_variant_names = (
+        ("square_1_1", "portrait_4_5", "vertical_9_16")
+        if action_type == "create_meta_campaign"
+        else ("square_1_1", "landscape_1_91_1")
+    )
+
+    object_storage = storage or get_object_storage()
+    signed_urls: list[str] = []
+    google_media_bytes: list[bytes] = []
+
+    for variant_name in required_variant_names:
+        variant = variants.get(variant_name)
+        if not isinstance(variant, dict):
+            raise IntegrationStateError(
+                f"campaign_media_variant_missing:{variant_name}"
+            )
+
+        reference = variant.get("storage_reference")
+        if not isinstance(reference, str) or not reference:
+            raise IntegrationStateError(
+                "campaign_media_variant_reference_invalid"
+            )
+
+        try:
+            object_key = object_storage.object_key_from_reference(
+                reference
+            )
+        except (StorageError, ValueError):
+            raise IntegrationStateError(
+                "campaign_media_variant_reference_invalid"
+            ) from None
+
+        expected_key = (
+            f"businesses/{business_id}/marketing/uploads/{asset.id}/"
+            f"variants/{variant_name}.jpg"
+        )
+        if object_key != expected_key:
+            raise IntegrationStateError(
+                "campaign_media_variant_reference_invalid"
+            )
+
+        if action_type == "create_google_ads_campaign":
+            try:
+                content = await object_storage.get(
+                    object_key,
+                    max_bytes=GOOGLE_ADS_IMAGE_MAX_BYTES,
+                )
+            except (StorageError, ValueError):
+                raise IntegrationStateError(
+                    "campaign_media_unavailable"
+                ) from None
+
+            if (
+                not content
+                or len(content)
+                > GOOGLE_ADS_IMAGE_MAX_BYTES
+            ):
+                raise IntegrationStateError(
+                    "google_campaign_image_invalid"
+                )
+
+            google_media_bytes.append(content)
+            continue
+
+        try:
+            signed_url = object_storage.presentation_url(
+                object_key,
+                expires_in_seconds=_PUBLISH_MEDIA_TTL_SECONDS,
+            )
+        except (StorageError, ValueError):
+            raise IntegrationStateError(
+                "campaign_media_unavailable"
+            ) from None
+
+        if not _safe_dispatch_media_url(signed_url):
+            raise IntegrationStateError(
+                "campaign_media_unavailable"
+            )
+
+        signed_urls.append(signed_url)
+
+    if action_type == "create_meta_campaign":
+        if not isinstance(
+            payload,
+            CreateMetaCampaignPayload,
+        ):
+            raise IntegrationStateError(
+                "campaign_payload_invalid"
+            )
+        return _MaterializedMetaCampaignPayload(
+            **payload.model_dump(mode="python"),
+            campaign_media_urls=tuple(signed_urls),
+        )
+
+    if action_type == "create_google_ads_campaign":
+        if not isinstance(
+            payload,
+            CreateGoogleAdsCampaignPayload,
+        ):
+            raise IntegrationStateError(
+                "campaign_payload_invalid"
+            )
+
+        if (
+            payload.network != "performance_max"
+            or payload.merchant_account_ref is not None
+            or len(google_media_bytes) != 2
+        ):
+            raise IntegrationStateError(
+                "google_campaign_media_contract_invalid"
+            )
+
+        branding = await session.scalar(
+            select(BusinessBranding).where(
+                BusinessBranding.business_id
+                == business_id
+            )
+        )
+
+        expected_logo_ref = business_logo_reference(
+            branding,
+            business_id=business_id,
+        )
+        logo_key = validated_business_logo_key(
+            branding,
+            business_id=business_id,
+        )
+
+        if (
+            expected_logo_ref is None
+            or logo_key is None
+            or payload.business_logo_ref
+            != expected_logo_ref
+        ):
+            raise IntegrationStateError(
+                "google_campaign_logo_reapproval_required"
+            )
+
+        try:
+            raw_logo = await object_storage.get(
+                logo_key,
+                max_bytes=GOOGLE_ADS_IMAGE_MAX_BYTES,
+            )
+            logo_bytes = google_ads_square_logo_bytes(
+                raw_logo
+            )
+        except (
+            StorageError,
+            ValueError,
+            LogoTooLargeError,
+            LogoValidationError,
+        ):
+            raise IntegrationStateError(
+                "google_campaign_logo_invalid"
+            ) from None
+
+        if (
+            not logo_bytes
+            or len(logo_bytes)
+            > GOOGLE_ADS_IMAGE_MAX_BYTES
+        ):
+            raise IntegrationStateError(
+                "google_campaign_logo_invalid"
+            )
+
+        return _MaterializedGoogleAdsCampaignPayload(
+            **payload.model_dump(mode="python"),
+            campaign_media_bytes=(
+                google_media_bytes[0],
+                google_media_bytes[1],
+            ),
+            campaign_logo_bytes=logo_bytes,
+        )
+
+    raise IntegrationStateError(
+        "campaign_action_type_invalid"
+    )
 
 
 async def _materialize_publish_media_payload(
@@ -277,7 +581,7 @@ async def _materialize_publish_media_payload(
             CreativeAsset.business_id == business_id,
             CreativeAsset.id == asset_id,
             CreativeAsset.generation_status == "ready",
-            CreativeAsset.source_type.in_({"future_provider", "import"}),
+            CreativeAsset.source_type == "import",
             CreativeAsset.storage_reference.is_not(None),
         )
     )

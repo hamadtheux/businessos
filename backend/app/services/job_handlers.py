@@ -58,18 +58,6 @@ from app.integrations.adapters import connector_adapters
 from app.integrations.contracts import NormalizedAdPerformance
 from app.integrations.credentials import credential_store
 from app.services.marketing import mark_social_schedule_ready
-from app.services.marketing import run_queued_creative_asset_generation
-from app.services.creative_provider import CreativeGenerationProvider
-from app.services.creative_research import CreativeResearchEngine
-from app.services.creative_visual_review import CreativeVisualReviewProvider
-from app.api.dependencies.creative import (
-    get_creative_director_provider,
-    get_creative_generation_provider,
-    get_creative_research_engine,
-    get_creative_visual_review_provider,
-)
-from app.storage.base import ObjectStorage
-from app.storage.factory import get_object_storage
 from app.services.billing_maintenance import maintain_subscription
 from app.services.automation_intelligence import run_competitor_discovery
 from app.services.marketing_automation import (
@@ -118,26 +106,6 @@ class HandlerOutcome:
 
 JobHandler = Callable[[AsyncSession, BackgroundJob], Awaitable[HandlerOutcome]]
 SUCCESS: Final = HandlerOutcome(True)
-
-
-@dataclass(frozen=True, slots=True)
-class CreativeGenerationRuntime:
-    provider: CreativeGenerationProvider
-    storage: ObjectStorage
-    research_engine: CreativeResearchEngine
-    director_provider: AIAgentProvider | None
-    visual_review_provider: CreativeVisualReviewProvider | None
-
-
-def build_creative_generation_runtime() -> CreativeGenerationRuntime:
-    """Build the worker runtime from the same cached server-side factories."""
-    return CreativeGenerationRuntime(
-        provider=get_creative_generation_provider(),
-        storage=get_object_storage(),
-        research_engine=get_creative_research_engine(),
-        director_provider=get_creative_director_provider(),
-        visual_review_provider=get_creative_visual_review_provider(),
-    )
 
 
 async def handle_customer_agent_response(
@@ -387,39 +355,22 @@ async def handle_generate_creative_asset(
     session: AsyncSession,
     job: BackgroundJob,
 ) -> HandlerOutcome:
-    if job.creative_asset_id is None:
-        return HandlerOutcome(False, "invalid_job_state")
-    try:
-        runtime = build_creative_generation_runtime()
-        asset = await run_queued_creative_asset_generation(
-            session,
-            business_id=job.business_id,
-            creative_asset_id=job.creative_asset_id,
-            provider=runtime.provider,
-            storage=runtime.storage,
-            research_engine=runtime.research_engine,
-            director_provider=runtime.director_provider,
-            director_max_output_tokens=settings.creative_director_max_output_tokens,
-            visual_review_provider=runtime.visual_review_provider,
-            max_visual_review_calls=settings.creative_max_visual_review_calls,
-            max_image_attempts=settings.creative_max_image_attempts,
-            max_composition_attempts=settings.creative_max_composition_attempts,
-            quality_threshold=settings.creative_quality_threshold,
-            require_semantic_review=True,
-        )
-    except MarketingNotFoundError:
-        return HandlerOutcome(False, "resource_not_found")
-    except MarketingPersistenceError:
-        await rollback_session(session)
-        return HandlerOutcome(False, "dependency_unavailable", True)
-    except (MarketingStateError, MarketingValidationError):
-        return HandlerOutcome(False, "invalid_job_state")
+    del session
 
-    if asset.generation_status == "ready":
-        return SUCCESS
-    if asset.generation_status == "provider_required":
-        return HandlerOutcome(False, "provider_unavailable")
-    return HandlerOutcome(False, "invalid_job_state")
+    if job.creative_asset_id is None:
+        return HandlerOutcome(
+            False,
+            "invalid_job_state",
+        )
+
+    # Compatibility-only handler for jobs already persisted before creative
+    # generation was retired. It intentionally performs no provider lookup,
+    # research, image generation, video generation, composition or review.
+    return HandlerOutcome(
+        False,
+        "external_execution_disabled",
+        False,
+    )
 
 
 async def handle_analyze_campaign_opportunities(

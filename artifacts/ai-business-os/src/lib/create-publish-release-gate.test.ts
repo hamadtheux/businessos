@@ -217,11 +217,11 @@ test("publishing is limited to real connectors, scopes, and explicit owner appro
   assert.match(page, /\["owner", "admin"\]\.includes/);
   assert.match(
     page,
-    /proposal\.connector_state !== "ready_after_approval"/,
+    /proposal\.connector_state\s*!==\s*"ready_after_approval"/,
   );
   assert.match(
     page,
-    /proposal\.approval_status === "pending"/,
+    /proposal\.approval_status\s*===\s*"pending"/,
   );
   assert.match(
     page,
@@ -229,10 +229,11 @@ test("publishing is limited to real connectors, scopes, and explicit owner appro
   );
   assert.match(
     page,
-    /platform !== "facebook" && platform !== "instagram"/,
+    /platform !==\s*"facebook" &&\s*platform !==\s*"instagram"/,
   );
   assert.match(editor, /!canApproveExternal/);
-  assert.match(editor, /data-testid="publish-now"/);
+  assert.match(editor, /data-testid="publish-only"/);
+  assert.match(editor, /data-testid="publish-run-campaign"/);
 });
 
 

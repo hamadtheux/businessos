@@ -44,6 +44,11 @@ from app.models.commerce import (
     ProductGroupItem,
 )
 from app.models.integration import IntegrationConnection
+from app.models.marketing import Campaign
+from app.services.campaign_catalog_approval import (
+    CatalogApprovalSnapshotError,
+    approved_campaign_catalog_snapshot,
+)
 from app.schemas.commerce import ProductGroupCreate
 from app.services.operations import record_audit
 
@@ -334,6 +339,74 @@ async def synchronize_product_group(
         ProductGroupItem.business_id == business_id,
         ProductGroupItem.product_group_id == group.id,
     ))).all())
+
+    offer_ids = tuple(
+        item.sku or str(item.id)
+        for item in members
+    )
+
+    group_rule = (
+        group.rule
+        if isinstance(group.rule, dict)
+        else {}
+    )
+
+    raw_campaign_id = group_rule.get("campaign_id")
+
+    if raw_campaign_id is not None:
+        if not isinstance(raw_campaign_id, str):
+            raise CommerceValidationError(
+                "campaign_product_group_invalid"
+            )
+
+        try:
+            campaign_id = UUID(raw_campaign_id)
+        except ValueError:
+            raise CommerceValidationError(
+                "campaign_product_group_invalid"
+            ) from None
+
+        campaign = await session.scalar(
+            select(Campaign).where(
+                Campaign.id == campaign_id,
+                Campaign.business_id == business_id,
+            )
+        )
+
+        if campaign is None:
+            raise CommerceValidationError(
+                "campaign_product_group_invalid"
+            )
+
+        try:
+            approved_snapshot = (
+                approved_campaign_catalog_snapshot(
+                    normalized_proposal=(
+                        campaign.normalized_proposal
+                    ),
+                    durable_product_ids=[
+                        item.id for item in members
+                    ],
+                )
+            )
+        except CatalogApprovalSnapshotError as error:
+            raise CommerceValidationError(
+                error.code
+            ) from None
+
+        if (
+            group_rule.get("catalog_scope")
+            != approved_snapshot.scope
+        ):
+            raise CommerceValidationError(
+                "campaign_product_group_mismatch"
+            )
+
+        offer_ids = tuple(
+            product.offer_id
+            for product in approved_snapshot.products
+        )
+
     adapter = (adapters or provider_adapters()).get(destination.provider)
     if adapter is None or not destination.external_account_id:
         raise CommerceConfigurationRequiredError("configuration_required")
@@ -344,7 +417,7 @@ async def synchronize_product_group(
         rule["catalog_reference"] = destination.external_resource_id
     normalized = NormalizedProductGroup(
         external_key=group.external_key, name=group.name, rule=rule,
-        offer_ids=tuple(item.sku or str(item.id) for item in members),
+        offer_ids=offer_ids,
     )
     binding = await session.scalar(select(ProductGroupDestination).where(
         ProductGroupDestination.business_id == business_id,

@@ -248,15 +248,52 @@ class CreateGoogleAdsCampaignPayload(CreateCampaignPayload):
     merchant_account_ref: Reference | None = None
     conversion_action_ref: Reference | None = None
     product_offer_ids: list[Reference] = Field(default_factory=list, max_length=1_000)
-    business_name: str | None = Field(default=None, max_length=25)
+
+    # Standard Performance Max brand-guideline assets.
+    business_name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=25,
+    )
+    business_logo_ref: Reference | None = None
+
     headlines: list[str] = Field(default_factory=list, max_length=15)
+    long_headlines: list[str] = Field(default_factory=list, max_length=5)
     descriptions: list[str] = Field(default_factory=list, max_length=5)
 
-    @field_validator("product_offer_ids", "headlines", "descriptions")
+    # 9D Brain currently executes commercial, non-EU-political Google
+    # campaigns only. Explicit political-ad support requires a separate owner
+    # declaration workflow rather than silently changing this value.
+    eu_political_advertising_status: Literal[
+        "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING"
+    ] = "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING"
+
+    @field_validator(
+        "product_offer_ids",
+        "headlines",
+        "long_headlines",
+        "descriptions",
+    )
     @classmethod
     def unique_campaign_values(cls, value: list[str]) -> list[str]:
         if len(value) != len(set(value)):
             raise ValueError("campaign values cannot contain duplicates")
+        return value
+
+    @field_validator("headlines")
+    @classmethod
+    def validate_google_headlines(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() or len(item) > 30 for item in value):
+            raise ValueError("Google headlines must be 1-30 characters")
+        return value
+
+    @field_validator("long_headlines", "descriptions")
+    @classmethod
+    def validate_google_long_text(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() or len(item) > 90 for item in value):
+            raise ValueError(
+                "Google long headlines and descriptions must be 1-90 characters"
+            )
         return value
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from hashlib import sha256
 import re
 from typing import Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -20,7 +21,10 @@ from app.models.automation_intelligence import (
     MarketingActionProposal,
 )
 from app.models.integration import IntegrationConnection
+from app.models.business import Business
+from app.models.business_branding import BusinessBranding
 from app.models.catalog_item import CatalogItem
+from app.models.commerce import ProductGroup, ProductGroupItem
 from app.models.commerce import (
     CatalogMedia,
     CommerceFeedDestination,
@@ -52,15 +56,277 @@ from app.services.ai_agent_execution import (
     create_running_ai_agent_execution,
     finalize_successful_ai_agent_execution,
 )
+from app.services.business_branding import business_logo_reference
 from app.services.marketing import get_campaign, get_content
 from app.exceptions.marketing import (
     MarketingPersistenceError,
     MarketingValidationError,
 )
+from app.services.campaign_catalog_approval import (
+    ApprovedCatalogSnapshot,
+    CatalogApprovalSnapshotError,
+    approved_campaign_catalog_snapshot,
+)
 
 
 CampaignActionChannel = Literal["meta", "google_ads"]
 SocialActionChannel = Literal["facebook", "instagram"]
+
+
+def _approved_catalog_snapshot(
+    campaign: Campaign,
+    product_ids: list[UUID],
+) -> ApprovedCatalogSnapshot:
+    try:
+        return approved_campaign_catalog_snapshot(
+            normalized_proposal=(
+                getattr(campaign, "normalized_proposal", None)
+            ),
+            durable_product_ids=product_ids,
+        )
+    except CatalogApprovalSnapshotError as error:
+        raise MarketingValidationError(error.code) from None
+
+
+def _campaign_internal_product_group_id(
+    campaign: Campaign,
+) -> UUID | None:
+    proposal = getattr(
+        campaign,
+        "normalized_proposal",
+        None,
+    )
+
+    if not isinstance(proposal, dict):
+        return None
+
+    product_group = proposal.get("product_group")
+
+    if not isinstance(product_group, dict):
+        return None
+
+    raw_group_id = product_group.get(
+        "internal_product_group_id"
+    )
+
+    if not isinstance(raw_group_id, str):
+        return None
+
+    try:
+        return UUID(raw_group_id)
+    except ValueError:
+        return None
+
+
+async def _campaign_meta_product_set_binding(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    campaign: Campaign,
+    destination_id: UUID,
+    product_ids: list[UUID],
+    catalog_scope: str,
+) -> tuple[ProductGroupDestination | None, str | None]:
+    proposal = getattr(
+        campaign,
+        "normalized_proposal",
+        None,
+    )
+
+    if not isinstance(proposal, dict):
+        return None, "campaign_catalog_snapshot_required"
+
+    group_snapshot = proposal.get("product_group")
+
+    if not isinstance(group_snapshot, dict):
+        return None, "campaign_product_group_required"
+
+    raw_group_id = group_snapshot.get(
+        "internal_product_group_id"
+    )
+
+    if not isinstance(raw_group_id, str):
+        return None, "campaign_product_group_required"
+
+    try:
+        group_id = UUID(raw_group_id)
+    except ValueError:
+        return None, "campaign_product_group_invalid"
+
+    group = await session.scalar(
+        select(ProductGroup).where(
+            ProductGroup.id == group_id,
+            ProductGroup.business_id == business_id,
+            ProductGroup.external_key
+            == f"campaign:{campaign.id}",
+            ProductGroup.status == "active",
+        )
+    )
+
+    if group is None:
+        return None, "campaign_product_group_required"
+
+    rule = group.rule if isinstance(group.rule, dict) else {}
+
+    if (
+        rule.get("campaign_id") != str(campaign.id)
+        or rule.get("catalog_scope") != catalog_scope
+    ):
+        return None, "campaign_product_group_mismatch"
+
+    member_ids = set(
+        (
+            await session.scalars(
+                select(ProductGroupItem.catalog_item_id).where(
+                    ProductGroupItem.business_id
+                    == business_id,
+                    ProductGroupItem.product_group_id
+                    == group.id,
+                )
+            )
+        ).all()
+    )
+
+    if member_ids != set(product_ids):
+        return None, "campaign_product_group_mismatch"
+
+    binding = await session.scalar(
+        select(ProductGroupDestination).where(
+            ProductGroupDestination.business_id
+            == business_id,
+            ProductGroupDestination.product_group_id
+            == group.id,
+            ProductGroupDestination.destination_id
+            == destination_id,
+            ProductGroupDestination.status == "ready",
+            ProductGroupDestination.external_reference.is_not(
+                None
+            ),
+        )
+    )
+
+    if (
+        binding is None
+        or not binding.external_reference
+    ):
+        return None, "campaign_product_set_sync_required"
+
+    return binding, None
+
+
+def _google_copy_fragment(
+    value: object,
+    *,
+    max_length: int,
+) -> str | None:
+    if not isinstance(value, str):
+        return None
+
+    normalized = " ".join(value.split()).strip()
+    if not normalized:
+        return None
+
+    if len(normalized) <= max_length:
+        return normalized
+
+    clipped = normalized[: max_length + 1]
+    if " " in clipped:
+        clipped = clipped.rsplit(" ", 1)[0].strip()
+
+    if not clipped:
+        clipped = normalized[:max_length].strip()
+
+    return clipped[:max_length] or None
+
+
+def _google_unique_copy(
+    values: list[object],
+    *,
+    max_length: int,
+    maximum: int,
+) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for value in values:
+        candidate = _google_copy_fragment(
+            value,
+            max_length=max_length,
+        )
+        if candidate is None:
+            continue
+
+        folded = candidate.casefold()
+        if folded in seen:
+            continue
+
+        seen.add(folded)
+        result.append(candidate)
+
+        if len(result) >= maximum:
+            break
+
+    return result
+
+
+def _google_standard_pmax_text_assets(
+    *,
+    campaign: Campaign,
+    business: Business,
+) -> tuple[list[str], list[str], list[str]]:
+    """
+    Build only from authoritative campaign/business copy already stored in
+    9D Brain. No advertising claim or offer is invented here.
+    """
+    headlines = _google_unique_copy(
+        [
+            campaign.name,
+            business.name,
+            getattr(campaign, "objective", None),
+            getattr(campaign, "proposed_copy", None),
+            getattr(campaign, "description", None),
+            getattr(campaign, "creative_brief", None),
+        ],
+        max_length=30,
+        maximum=15,
+    )
+
+    long_headlines = _google_unique_copy(
+        [
+            getattr(campaign, "proposed_copy", None),
+            getattr(campaign, "description", None),
+            getattr(campaign, "creative_brief", None),
+            campaign.name,
+            business.description,
+        ],
+        max_length=90,
+        maximum=5,
+    )
+
+    descriptions = _google_unique_copy(
+        [
+            getattr(campaign, "proposed_copy", None),
+            getattr(campaign, "description", None),
+            getattr(campaign, "measurement_plan", None),
+            getattr(campaign, "creative_brief", None),
+            getattr(campaign, "objective", None),
+            business.description,
+            campaign.name,
+        ],
+        max_length=90,
+        maximum=5,
+    )
+
+    if (
+        len(headlines) < 3
+        or len(long_headlines) < 1
+        or len(descriptions) < 2
+    ):
+        raise MarketingValidationError(
+            "google_pmax_text_assets_required"
+        )
+
+    return headlines, long_headlines, descriptions
 
 
 async def preflight_campaign(
@@ -75,6 +341,8 @@ async def preflight_campaign(
     provider = "google" if target == "google_ads" else "meta"
     connector_type = "google_ads" if provider == "google" else "meta_ads"
     issues: list[dict[str, object]] = []
+    repair_product_group_id: UUID | None = None
+    repair_feed_destination_id: UUID | None = None
     if contains_sensitive_targeting(campaign.audience_definition):
         issues.append(_preflight_issue(
             "sensitive_targeting_prohibited",
@@ -114,6 +382,26 @@ async def preflight_campaign(
         CampaignProductSelection.campaign_id == campaign.id,
     ))).all())
     product_ids = [item.catalog_item_id for item in selections]
+
+    catalog_snapshot: ApprovedCatalogSnapshot | None = None
+
+    if product_ids:
+        try:
+            catalog_snapshot = _approved_catalog_snapshot(
+                campaign,
+                product_ids,
+            )
+        except MarketingValidationError as error:
+            issues.append(
+                _preflight_issue(
+                    str(error),
+                    (
+                        "The approved catalog snapshot no longer "
+                        "matches the durable campaign selection."
+                    ),
+                )
+            )
+
     products = list((await session.scalars(select(CatalogItem).where(
         CatalogItem.business_id == business_id,
         CatalogItem.id.in_(product_ids) if product_ids else False,
@@ -155,14 +443,52 @@ async def preflight_campaign(
         )) or 0)
         if eligible != len(product_ids):
             issues.append(_preflight_issue("product_ineligible", f"{len(product_ids) - eligible} selected product(s) are not eligible in the provider catalog."))
-    if provider == "meta" and destination is not None:
-        product_set = await session.scalar(select(ProductGroupDestination).where(
-            ProductGroupDestination.business_id == business_id,
-            ProductGroupDestination.destination_id == destination.id,
-            ProductGroupDestination.status == "ready",
-        ))
-        if product_set is None or not product_set.external_reference:
-            issues.append(_preflight_issue("product_set_required", "Create and synchronize a Meta product set for this campaign selection."))
+    if (
+        provider == "meta"
+        and destination is not None
+        and catalog_snapshot is not None
+    ):
+        product_set, product_set_issue = (
+            await _campaign_meta_product_set_binding(
+                session,
+                business_id=business_id,
+                campaign=campaign,
+                destination_id=destination.id,
+                product_ids=product_ids,
+                catalog_scope=catalog_snapshot.scope,
+            )
+        )
+
+        if product_set is None:
+            if (
+                product_set_issue
+                == "campaign_product_set_sync_required"
+            ):
+                exact_group_id = (
+                    _campaign_internal_product_group_id(
+                        campaign
+                    )
+                )
+
+                if exact_group_id is not None:
+                    # The binding helper returns this issue only
+                    # after validating tenant ownership, campaign
+                    # identity, catalog scope, and exact membership.
+                    repair_product_group_id = exact_group_id
+                    repair_feed_destination_id = (
+                        destination.id
+                    )
+
+            issues.append(
+                _preflight_issue(
+                    product_set_issue
+                    or "campaign_product_set_sync_required",
+                    (
+                        "Synchronize the exact campaign-owned "
+                        "Meta product set before advertising."
+                    ),
+                )
+            )
 
     if campaign.planned_budget <= 0:
         issues.append(_preflight_issue("budget_rejected", "Set a positive campaign budget."))
@@ -193,9 +519,61 @@ async def preflight_campaign(
         "provider": provider,
         "selected_products": len(product_ids),
         "eligible_products": eligible,
+        "product_group_id": repair_product_group_id,
+        "feed_destination_id": repair_feed_destination_id,
         "approval_required": True,
         "issues": issues,
     }
+
+
+async def _campaign_uploaded_media_asset(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    campaign: Campaign,
+) -> CreativeAsset | None:
+    proposal = getattr(campaign, "normalized_proposal", None) or {}
+    creative = proposal.get("creative")
+
+    if not isinstance(creative, dict):
+        return None
+
+    raw_asset_id = creative.get("uploaded_media_asset_id")
+    raw_content_id = creative.get("source_content_id")
+
+    if raw_asset_id is None and raw_content_id is None:
+        return None
+
+    if not isinstance(raw_asset_id, str) or not isinstance(raw_content_id, str):
+        raise MarketingValidationError("campaign_media_reference_invalid")
+
+    try:
+        asset_id = UUID(raw_asset_id)
+        source_content_id = UUID(raw_content_id)
+    except ValueError:
+        raise MarketingValidationError(
+            "campaign_media_reference_invalid"
+        ) from None
+
+    try:
+        asset = await session.scalar(
+            select(CreativeAsset).where(
+                CreativeAsset.business_id == business_id,
+                CreativeAsset.id == asset_id,
+                CreativeAsset.campaign_id == campaign.id,
+                CreativeAsset.content_id == source_content_id,
+                CreativeAsset.source_type == "import",
+                CreativeAsset.generation_status == "ready",
+                CreativeAsset.storage_reference.is_not(None),
+            )
+        )
+    except SQLAlchemyError:
+        raise MarketingPersistenceError from None
+
+    if asset is None:
+        raise MarketingValidationError("campaign_media_unavailable")
+
+    return asset
 
 
 async def prepare_campaign_action(
@@ -209,6 +587,9 @@ async def prepare_campaign_action(
     campaign = await get_campaign(
         session, business_id=business_id, campaign_id=campaign_id
     )
+    if campaign.planned_budget <= 0:
+        raise MarketingValidationError("campaign_budget_required")
+
     target = _campaign_channel(campaign, channel)
     action_type = {
         "meta": "create_meta_campaign",
@@ -240,8 +621,18 @@ async def prepare_campaign_action(
         min_age=min_age,
         max_age=max_age,
     )
+    campaign_media = await _campaign_uploaded_media_asset(
+        session,
+        business_id=business_id,
+        campaign=campaign,
+    )
+
     creative = CampaignCreative(
-        creative_refs=[f"marketing-campaign:{campaign.id}"],
+        creative_refs=(
+            [f"creative_asset:{campaign_media.id}"]
+            if campaign_media is not None
+            else [f"marketing-campaign:{campaign.id}"]
+        ),
         destination_url=campaign.landing_destination,
     )
     common = {
@@ -272,19 +663,113 @@ async def prepare_campaign_action(
             )
         ).all()
     )
+    approved_catalog_snapshot = _approved_catalog_snapshot(
+        campaign,
+        [item_id for _sku, item_id in product_rows],
+    )
+
+    approved_offer_ids = [
+        product.offer_id
+        for product in approved_catalog_snapshot.products
+    ]
+
     commerce_campaign = campaign.campaign_type in {
         "retail_performance_max",
         "catalog_sales",
     } or bool(product_rows)
     if not commerce_campaign:
-        # Preserve the existing manual campaign path. It still creates only a
-        # governed, approval-required proposal; provider execution remains
-        # independently gated by the action boundary and connector state.
-        payload = (
-            CreateMetaCampaignPayload(**common)
-            if target == "meta"
-            else CreateGoogleAdsCampaignPayload(network="search", **common)
-        )
+        # Uploaded-image Google campaigns are standard Performance Max.
+        # They must never silently become Search campaigns or discard media.
+        if (
+            target == "google_ads"
+            and campaign_media is not None
+        ):
+            if campaign_media.media_type != "image":
+                raise MarketingValidationError(
+                    "campaign_video_media_processing_required"
+                )
+
+            destination = campaign.landing_destination
+            parsed_destination = (
+                urlsplit(destination)
+                if isinstance(destination, str)
+                else None
+            )
+            if (
+                parsed_destination is None
+                or parsed_destination.scheme != "https"
+                or not parsed_destination.hostname
+            ):
+                raise MarketingValidationError(
+                    "google_pmax_https_landing_page_required"
+                )
+
+            business = await session.scalar(
+                select(Business).where(
+                    Business.id == business_id,
+                    Business.status == "active",
+                )
+            )
+            if business is None:
+                raise MarketingValidationError(
+                    "google_pmax_business_required"
+                )
+
+            business_name = " ".join(
+                business.name.split()
+            ).strip()
+            if (
+                not business_name
+                or len(business_name) > 25
+            ):
+                raise MarketingValidationError(
+                    "google_pmax_business_name_required"
+                )
+
+            branding = await session.scalar(
+                select(BusinessBranding).where(
+                    BusinessBranding.business_id
+                    == business_id
+                )
+            )
+            logo_ref = business_logo_reference(
+                branding,
+                business_id=business_id,
+            )
+            if logo_ref is None:
+                raise MarketingValidationError(
+                    "google_pmax_business_logo_required"
+                )
+
+            (
+                headlines,
+                long_headlines,
+                descriptions,
+            ) = _google_standard_pmax_text_assets(
+                campaign=campaign,
+                business=business,
+            )
+
+            payload = CreateGoogleAdsCampaignPayload(
+                network="performance_max",
+                **common,
+                business_name=business_name,
+                business_logo_ref=logo_ref,
+                headlines=headlines,
+                long_headlines=long_headlines,
+                descriptions=descriptions,
+            )
+        else:
+            # Preserve legitimate legacy non-commerce paths.
+            payload = (
+                CreateMetaCampaignPayload(**common)
+                if target == "meta"
+                else CreateGoogleAdsCampaignPayload(
+                    network="search",
+                    **common,
+                )
+            )
+
         return await _materialize_governed_proposal(
             session,
             business_id=business_id,
@@ -327,11 +812,26 @@ async def prepare_campaign_action(
             CommerceFeedDestination.integration_connection_id == connection.id,
             CommerceFeedDestination.external_resource_id == resources.get("meta_catalog"),
         ))
-        product_set = await session.scalar(select(ProductGroupDestination).where(
-            ProductGroupDestination.business_id == business_id,
-            ProductGroupDestination.destination_id == destination.id,
-            ProductGroupDestination.status == "ready",
-        ))
+        product_set, product_set_issue = (
+            await _campaign_meta_product_set_binding(
+                session,
+                business_id=business_id,
+                campaign=campaign,
+                destination_id=destination.id,
+                product_ids=[
+                    item_id
+                    for _sku, item_id in product_rows
+                ],
+                catalog_scope=approved_catalog_snapshot.scope,
+            )
+        )
+
+        if product_set is None:
+            raise MarketingValidationError(
+                product_set_issue
+                or "campaign_product_set_sync_required"
+            )
+
         payload = CreateMetaCampaignPayload(
             **common, catalog_ref=resources["meta_catalog"],
             product_set_ref=product_set.external_reference,
@@ -347,7 +847,9 @@ async def prepare_campaign_action(
             network="performance_max", **common,
             merchant_account_ref=resources["google_merchant_account"],
             conversion_action_ref=resources["google_conversion_action"],
-            product_offer_ids=[sku or str(item_id) for sku, item_id in product_rows],
+            # Use the exact proposal-time offer IDs the owner reviewed.
+            # Never substitute a later CatalogItem.sku value.
+            product_offer_ids=approved_offer_ids,
             business_name=None,
             headlines=[campaign.name[:30]],
             descriptions=[(campaign.proposed_copy or campaign.description or campaign.objective)[:90]],
@@ -567,9 +1069,7 @@ async def _ready_social_media_asset(
 
     statement = statement.where(
         CreativeAsset.business_id == business_id,
-        CreativeAsset.source_type.in_(
-            {"future_provider", "import"}
-        ),
+        CreativeAsset.source_type == "import",
         CreativeAsset.generation_status == "ready",
         CreativeAsset.storage_reference.is_not(None),
     )

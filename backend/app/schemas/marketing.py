@@ -542,8 +542,11 @@ class CampaignGenerateRequest(MarketingSchema):
     start_date: date | None = None
     end_date: date | None = None
     catalog_item_ids: list[UUID] = Field(default_factory=list, max_length=100)
+    catalog_scope: Literal["none", "selected", "all", "recommended"] = "none"
     offer: str | None = Field(default=None, max_length=2000)
     offer_authorized: bool = False
+    media_asset_id: UUID | None = None
+    source_content_id: UUID | None = None
 
     @field_validator("catalog_item_ids")
     @classmethod
@@ -556,6 +559,22 @@ class CampaignGenerateRequest(MarketingSchema):
     def authorized_offer_only(self) -> "CampaignGenerateRequest":
         if self.offer and not self.offer_authorized:
             raise ValueError("An explicit campaign offer requires owner authorization")
+        if (self.media_asset_id is None) != (self.source_content_id is None):
+            raise ValueError(
+                "media_asset_id and source_content_id must be provided together"
+            )
+        if self.catalog_scope == "selected" and not self.catalog_item_ids:
+            raise ValueError(
+                "selected catalog scope requires catalog_item_ids"
+            )
+        if (
+            self.catalog_scope in {"all", "recommended"}
+            and self.catalog_item_ids
+        ):
+            raise ValueError(
+                "all/recommended catalog scope cannot include catalog_item_ids"
+            )
+
         return self
 
 
@@ -570,6 +589,8 @@ class CampaignPreflightResponse(MarketingSchema):
     provider: Literal["google", "meta"]
     selected_products: int
     eligible_products: int
+    product_group_id: UUID | None = None
+    feed_destination_id: UUID | None = None
     approval_required: bool = True
     issues: list[CampaignPreflightIssue] = Field(default_factory=list)
 

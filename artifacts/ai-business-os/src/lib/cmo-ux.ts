@@ -65,36 +65,10 @@ export type PublishingCapability = {
   state: PublishingCapabilityState;
   copy: string;
 };
-export type CreativePhase =
-  | "strategy"
-  | "visual"
-  | "video_strategy"
-  | "video_generation"
-  | "video_review";
-
-export type CreativeProgress = {
-  phase: CreativePhase;
-  contentId?: string;
-  assetId?: string;
-} | null;
-
 export type CreativePreviewFailure = {
   creativeId: string;
   reference: string;
 };
-
-export const CREATIVE_GENERATION_POLL_MS = 3_000;
-const ACTIVE_CREATIVE_GENERATION_STATUSES = new Set<
-  CreativeAsset["generation_status"]
->(["queued", "generating", "reviewing", "repairing"]);
-
-export function isCreativeGenerationActive(
-  asset: Pick<CreativeAsset, "generation_status"> | null | undefined,
-) {
-  return Boolean(
-    asset && ACTIVE_CREATIVE_GENERATION_STATUSES.has(asset.generation_status),
-  );
-}
 
 export function isCreativePreviewFailureCurrent(
   failure: CreativePreviewFailure | null,
@@ -300,56 +274,8 @@ export function channelGenerationNotice(outcome: ChannelGenerationOutcome) {
   return `${ready} of ${total} channel drafts ${ready === 1 ? "is" : "are"} ready. ${failed} could not be completed.`;
 }
 
-export function creativeResultNotice(asset: CreativeAsset) {
-  if (asset.generation_status === "ready") {
-    return `Your final branded ${asset.media_type} creative is ready for review.`;
-  }
-  if (asset.generation_status === "provider_required") {
-    return asset.media_type === "video"
-      ? "Your video strategy and storyboard are saved. Video generation isn’t connected yet, so no final video has been rendered."
-      : "Image generation is temporarily unavailable. Your creative strategy is saved. Try again shortly—nothing has been lost.";
-  }
-  if (["strategy_ready", "queued", "generating", "reviewing", "repairing"].includes(asset.generation_status)) {
-    return `Your ${asset.media_type} creative is ${asset.generation_status.replaceAll("_", " ")}.`;
-  }
-  return "The final creative could not be completed. Your saved strategy remains ready to retry.";
-}
 
-export function recommendedCreativeMediaForContent(
-  content: Pick<MarketingContent, "channel" | "content_type">,
-): CreativeMediaType {
-  const editorial = EDITORIAL_CONTENT_TYPES.has(content.content_type);
-  return content.channel === "tiktok" && !editorial ? "video" : "image";
-}
 
-export function videoFormatForContent(
-  content: Pick<MarketingContent, "channel" | "content_type">,
-) {
-  const isShortMessage = ["headline", "cta"].includes(content.content_type);
-  const isLongForm = ["blog_draft", "landing_page_copy", "content_package"].includes(
-    content.content_type,
-  );
-  const duration_seconds: 8 | 15 | 30 = isShortMessage
-    ? 8
-    : isLongForm
-      ? 30
-      : 15;
-
-  if (
-    content.channel === "tiktok" &&
-    !EDITORIAL_CONTENT_TYPES.has(content.content_type)
-  ) {
-    return { aspect_ratio: "9:16" as const, duration_seconds };
-  }
-  if (
-    content.channel === "website" ||
-    content.channel === "google_ads" ||
-    EDITORIAL_CONTENT_TYPES.has(content.content_type)
-  ) {
-    return { aspect_ratio: "16:9" as const, duration_seconds };
-  }
-  return { aspect_ratio: "1:1" as const, duration_seconds };
-}
 
 export function publishingCapability({
   channel,
@@ -423,131 +349,6 @@ export function publishingCapability({
         state: "unavailable",
         copy: `${definition.display_name} needs a healthy authorized connection before publishing can be prepared. Scheduling remains available.`,
       };
-}
-
-export function creativeFormatForContent(
-  content: Pick<MarketingContent, "channel" | "content_type">,
-): CreativeFormat {
-  if (content.channel === "tiktok") return CREATIVE_FORMATS.vertical;
-  if (
-    content.content_type === "ad_copy" ||
-    content.channel === "google_ads" ||
-    content.channel === "meta"
-  ) {
-    return CREATIVE_FORMATS.advertising;
-  }
-  if (
-    content.channel === "email" ||
-    content.channel === "website" ||
-    EDITORIAL_CONTENT_TYPES.has(content.content_type)
-  ) {
-    return CREATIVE_FORMATS.editorial;
-  }
-  return CREATIVE_FORMATS.social;
-}
-
-export function creativePhaseForDisplay(
-  progress: CreativeProgress,
-  contentId?: string,
-  assetId?: string,
-): CreativePhase | null {
-  if (!progress) return null;
-  if (progress.contentId && progress.contentId !== contentId) return null;
-  if (progress.assetId && progress.assetId !== assetId) return null;
-  if (!progress.contentId && !progress.assetId) return null;
-  return progress.phase;
-}
-
-export function creativeWorkspaceForDisplay(
-  creatives: CreativeAsset[] | undefined,
-  activeAssetId?: string,
-  activeAsset?: CreativeAsset | null,
-) {
-  if (!activeAssetId) {
-    return {
-      creative: creatives?.[0],
-      creatives,
-    };
-  }
-
-  const authoritative =
-    activeAsset?.id === activeAssetId
-      ? activeAsset
-      : creatives?.find((item) => item.id === activeAssetId);
-
-  if (!authoritative) {
-    return {
-      creative: undefined,
-      creatives: [],
-    };
-  }
-
-  return {
-    creative: authoritative,
-    creatives: [
-      authoritative,
-      ...(creatives ?? []).filter(
-        (item) => item.id !== authoritative.id,
-      ),
-    ],
-  };
-}
-
-
-async function refreshAfterCreativeOperation(refresh: () => Promise<unknown>) {
-  try {
-    await refresh();
-  } catch {
-    // The operation result remains authoritative; normal query error UX owns
-    // any follow-up refresh failure.
-  }
-}
-
-export async function createCreativeWithRecovery<
-  Brief extends { id: string },
-  Result,
->({
-  contentId,
-  createBrief,
-  generate,
-  refresh,
-  onProgress,
-}: {
-  contentId: string;
-  createBrief: () => Promise<Brief>;
-  generate: (brief: Brief) => Promise<Result>;
-  refresh: () => Promise<unknown>;
-  onProgress: (progress: CreativeProgress) => void;
-}): Promise<Result> {
-  onProgress({ phase: "strategy", contentId });
-  try {
-    const brief = await createBrief();
-    onProgress({ phase: "visual", contentId });
-    return await generate(brief);
-  } finally {
-    await refreshAfterCreativeOperation(refresh);
-    onProgress(null);
-  }
-}
-
-export async function runCreativeOperationWithRecovery<Result>({
-  progress,
-  operation,
-  refresh,
-  onProgress,
-}: {
-  progress: Exclude<CreativeProgress, null>;
-  operation: () => Promise<Result>;
-  refresh: () => Promise<unknown>;
-  onProgress: (progress: CreativeProgress) => void;
-}): Promise<Result> {
-  onProgress(progress);
-  try {
-    return await operation();
-  } finally {
-    await refreshAfterCreativeOperation(refresh);
-    onProgress(null);
-  }
 }
 
 export function safeCreativeMediaUrl(reference: string | null | undefined) {

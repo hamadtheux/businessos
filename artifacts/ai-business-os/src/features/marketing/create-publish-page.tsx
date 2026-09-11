@@ -35,12 +35,6 @@ import {
   type EditablePlatformFields,
 } from "@/features/marketing/create-publish-model";
 import { CmoDepartmentNav } from "@/features/marketing/marketing-pages";
-import {
-  CREATIVE_GENERATION_POLL_MS,
-  creativeFormatForContent,
-  isCreativeGenerationActive,
-  videoFormatForContent,
-} from "@/lib/cmo-ux";
 import { humanizeApiError } from "@/services/api-client";
 import type { CreativeAsset, MarketingContent } from "@/services/api-types";
 import { automationsApi } from "@/services/automations";
@@ -94,15 +88,6 @@ export function CreatePublishPage() {
     queryFn: ({ signal }) => integrationsApi.connections(activeBusinessId, signal),
     enabled: Boolean(activeBusinessId),
   });
-  const mediaRecord = useQuery({
-    queryKey: ["marketing", activeBusinessId, "create-publish-media", media?.id],
-    queryFn: ({ signal }) => marketingApi.creative.get(activeBusinessId, media!.id, signal),
-    enabled: Boolean(activeBusinessId && media?.id && isCreativeGenerationActive(media)),
-    refetchInterval: (query) =>
-      !query.state.data || isCreativeGenerationActive(query.state.data)
-        ? CREATIVE_GENERATION_POLL_MS
-        : false,
-  });
   const mediaHistory = useQuery({
     queryKey: ["marketing", activeBusinessId, "create-publish-media-history", contentPackage?.package_id],
     queryFn: ({ signal }) => {
@@ -117,10 +102,6 @@ export function CreatePublishPage() {
     },
     enabled: Boolean(activeBusinessId && contentPackage?.contents.length),
   });
-
-  useEffect(() => {
-    if (mediaRecord.data) setMedia(mediaRecord.data);
-  }, [mediaRecord.data]);
 
   const readiness = useMemo(
     () => Object.fromEntries(
@@ -194,45 +175,37 @@ export function CreatePublishPage() {
   }
 
   const createPackage = useMutation({
-    mutationFn: async ({ input, visual }: { input: GenerateContentPackageInput; visual: string }) => {
+    mutationFn: async (input: GenerateContentPackageInput) => {
       setCreationStage("Creating your post…");
-      const result = await marketingApi.content.packages.generate(activeBusinessId, input);
-      if (input.media_asset_id) return { result, asset: media };
-      if (visual === "none") return { result, asset: null };
-      const owner = mediaOwner(result.contents);
-      setCreationStage(visual === "video" ? "Creating video…" : "Creating visual…");
-      try {
-        if (visual === "video") {
-          const format = videoFormatForContent(owner);
-          const strategy = await marketingApi.creative.videoStrategy(activeBusinessId, {
-            campaign_id: owner.campaign_id,
-            content_id: owner.id,
-            ...format,
-            instructions: owner.creative_brief || `Create an on-brand video for ${owner.title}.`,
-          });
-          const asset = await marketingApi.creative.generateVideo(activeBusinessId, strategy.id);
-          return { result, asset };
-        }
-        const format = creativeFormatForContent(owner);
-        const brief = await marketingApi.creative.brief(activeBusinessId, {
-          campaign_id: owner.campaign_id,
-          content_id: owner.id,
-          ...format,
-          instructions: owner.creative_brief || `Create an on-brand visual for ${owner.title}.`,
-          alt_text: owner.platform_fields?.alt_text || `Branded visual for ${owner.title}`,
-        });
-        setCreationStage("Applying your brand…");
-        const asset = await marketingApi.creative.generate(activeBusinessId, brief.id);
-        return { result, asset };
-      } catch {
-        return { result, asset: null };
-      }
+
+      const result = await marketingApi.content.packages.generate(
+        activeBusinessId,
+        input,
+      );
+
+      return {
+        result,
+        asset:
+          input.media_asset_id && media?.id === input.media_asset_id
+            ? media
+            : null,
+      };
     },
     onSuccess: ({ result, asset }) => {
       openPackage(result, asset);
-      setNotice(asset ? "Your post is ready. The visual will appear as it finishes." : "Your platform-ready post is saved.");
+      setNotice(
+        asset
+          ? "Your platform-ready post is ready with your uploaded media."
+          : "Your platform-ready post is saved.",
+      );
     },
-    onError: (reason) => setError(humanizeApiError(reason, "We couldn’t create this post. Your input is safe—try again.")),
+    onError: (reason) =>
+      setError(
+        humanizeApiError(
+          reason,
+          "We couldn’t create this post. Your input is safe—try again.",
+        ),
+      ),
     onSettled: () => setCreationStage(""),
   });
 
@@ -291,28 +264,6 @@ export function CreatePublishPage() {
     onError: (reason) => setError(humanizeApiError(reason, "This copy could not be rewritten.")),
   });
 
-  const visual = useMutation({
-    mutationFn: async (content: MarketingContent) => {
-      if (media && media.source_type !== "import") {
-        return marketingApi.creative.regenerate(activeBusinessId, media.id, "alternate_metaphor");
-      }
-      const format = creativeFormatForContent(content);
-      const brief = await marketingApi.creative.brief(activeBusinessId, {
-        campaign_id: content.campaign_id,
-        content_id: content.id,
-        ...format,
-        instructions: content.creative_brief || `Create an on-brand visual for ${content.title}.`,
-        alt_text: content.platform_fields?.alt_text || `Branded visual for ${content.title}`,
-      });
-      return marketingApi.creative.generate(activeBusinessId, brief.id);
-    },
-    onSuccess: (asset) => {
-      void persistMediaChoice(asset);
-      void queryClient.invalidateQueries({ queryKey: ["marketing", activeBusinessId, "create-publish-media-history"] });
-      setNotice("Another visual is being prepared. Your copy is unchanged.");
-    },
-    onError: () => setError("We couldn’t start another visual. Your post and settings are safe."),
-  });
 
   const schedule = useMutation({
     mutationFn: async (scheduledFor: Record<CreatePublishPlatform, string>) => {
@@ -337,54 +288,228 @@ export function CreatePublishPage() {
   const publish = useMutation({
     mutationFn: async () => {
       if (!contentPackage) throw new Error("No post selected");
+
       const next = { ...EMPTY_PUBLISH_PROGRESS };
+      let attempted = 0;
+      let failed = 0;
+
       contentPackage.contents.forEach((content) => {
         const platform = contentPlatform(content);
-        next[platform] = readiness[platform].state === "coming_soon"
-          ? "coming_soon"
-          : readiness[platform].canPublish
-            ? "approving"
-            : "connection_required";
+
+        next[platform] =
+          readiness[platform].state === "coming_soon"
+            ? "coming_soon"
+            : readiness[platform].canPublish
+              ? "approving"
+              : "connection_required";
       });
+
       setPublishProgress(next);
-      await Promise.all(contentPackage.contents.map(async (content) => {
-        const platform = contentPlatform(content);
-        if (
-          !readiness[platform].canPublish ||
-          (platform !== "facebook" && platform !== "instagram")
-        ) return;
-        try {
-          const approved = await ensureContentApproved(activeBusinessId, content);
-          const proposal = await marketingApi.content.preparePublish(
-            activeBusinessId,
-            approved.id,
-            platform,
-          );
-          if (proposal.connector_state !== "ready_after_approval" || !proposal.approval_id) {
-            updatePublishProgress(platform, "connection_required");
+
+      await Promise.all(
+        contentPackage.contents.map(async (content) => {
+          const platform = contentPlatform(content);
+
+          if (
+            !readiness[platform].canPublish ||
+            (platform !== "facebook" &&
+              platform !== "instagram")
+          ) {
             return;
           }
-          updatePublishProgress(platform, "publishing");
-          if (proposal.approval_status === "pending") {
-            await automationsApi.approvals.approve(
-              activeBusinessId,
-              proposal.approval_id,
-              "Publish Now confirmed in Create & Publish.",
+
+          attempted += 1;
+
+          try {
+            const approved =
+              await ensureContentApproved(
+                activeBusinessId,
+                content,
+              );
+
+            const proposal =
+              await marketingApi.content.preparePublish(
+                activeBusinessId,
+                approved.id,
+                platform,
+              );
+
+            if (
+              proposal.connector_state !==
+                "ready_after_approval" ||
+              !proposal.approval_id
+            ) {
+              failed += 1;
+              updatePublishProgress(
+                platform,
+                "connection_required",
+              );
+              return;
+            }
+
+            updatePublishProgress(
+              platform,
+              "publishing",
+            );
+
+            if (
+              proposal.approval_status ===
+              "pending"
+            ) {
+              await automationsApi.approvals.approve(
+                activeBusinessId,
+                proposal.approval_id,
+                "Publish confirmed in Create & Publish.",
+              );
+            }
+
+            const refreshed =
+              await marketingApi.content.preparePublish(
+                activeBusinessId,
+                approved.id,
+                platform,
+              );
+
+            const state = publishState(
+              refreshed.action_status,
+            );
+
+            updatePublishProgress(
+              platform,
+              state,
+            );
+
+            if (
+              state === "failed" ||
+              state === "connection_required"
+            ) {
+              failed += 1;
+            }
+          } catch {
+            failed += 1;
+            updatePublishProgress(
+              platform,
+              "failed",
             );
           }
-          const refreshed = await marketingApi.content.preparePublish(
-            activeBusinessId,
-            approved.id,
-            platform,
-          );
-          updatePublishProgress(platform, publishState(refreshed.action_status));
-        } catch {
-          updatePublishProgress(platform, "failed");
-        }
-      }));
+        }),
+      );
+
+      return {
+        attempted,
+        failed,
+      };
     },
-    onSuccess: () => setNotice("Publishing was prepared only for connected, supported platforms. Results are shown below."),
-    onError: (reason) => setError(humanizeApiError(reason, "Publishing could not be started.")),
+    onSuccess: () =>
+      setNotice(
+        "Publishing was prepared only for connected, supported platforms. Results are shown below.",
+      ),
+    onError: (reason) =>
+      setError(
+        humanizeApiError(
+          reason,
+          "Publishing could not be started.",
+        ),
+      ),
+  });
+
+  const publishAndCampaign = useMutation({
+    mutationFn: async () => {
+      if (!contentPackage) {
+        throw new Error("No post selected");
+      }
+
+      const owner = mediaOwner(
+        contentPackage.contents,
+      );
+
+      const selectedMediaId =
+        owner.platform_fields
+          ?.selected_media_asset_id;
+
+      if (
+        !media ||
+        media.id !== selectedMediaId ||
+        media.business_id !== activeBusinessId ||
+        media.source_type !== "import" ||
+        media.generation_status !== "ready" ||
+        !media.storage_reference ||
+        media.content_id !== owner.id
+      ) {
+        throw new Error(
+          "Select a ready uploaded image or video before preparing a paid campaign.",
+        );
+      }
+
+      const organicResult =
+        await publish.mutateAsync();
+
+      if (!organicResult.attempted) {
+        throw new Error(
+          "Connect Facebook or Instagram before using Publish + Run Campaign.",
+        );
+      }
+
+      if (organicResult.failed > 0) {
+        throw new Error(
+          "One or more organic publishes need attention. No paid campaign proposal was created. Any publish that already completed was not rolled back.",
+        );
+      }
+
+      return marketingApi.campaigns.generate(
+        activeBusinessId,
+        {
+          goal: (
+            `Promote the approved post: ${owner.title}`
+          ).slice(0, 500),
+          name: (
+            `${owner.title} · Campaign`
+          ).slice(0, 200),
+          audience_definition: null,
+          channels: [
+            "meta",
+            "google_ads",
+          ],
+          planned_budget: "0",
+          budget_mode: "daily",
+          catalog_scope: "none",
+          catalog_item_ids: [],
+          media_asset_id: media.id,
+          source_content_id: owner.id,
+        },
+      );
+    },
+    onSuccess: async (campaign) => {
+      setError("");
+      setNotice(
+        "Your post was published and its paid campaign proposal is ready for review. No ad was launched and no spend occurred.",
+      );
+
+      await queryClient.invalidateQueries({
+        queryKey: [
+          "marketing",
+          activeBusinessId,
+        ],
+      });
+
+      navigate(
+        `/marketing/campaigns?campaign=${encodeURIComponent(
+          campaign.id,
+        )}`,
+      );
+    },
+    onError: (reason) => {
+      setNotice(
+        "No paid campaign was launched or charged.",
+      );
+
+      setError(
+        humanizeApiError(
+          reason,
+          "The paid campaign proposal could not be prepared.",
+        ),
+      );
+    },
   });
 
   const loadRecent = useMutation({
@@ -444,8 +569,20 @@ export function CreatePublishPage() {
     setNotice("");
   };
 
-  const currentMedia = mediaRecord.data || media;
-  const actionPending = publish.isPending || schedule.isPending;
+  const currentMedia = media;
+
+  const campaignAvailable = Boolean(
+    currentMedia &&
+      currentMedia.business_id === activeBusinessId &&
+      currentMedia.source_type === "import" &&
+      currentMedia.generation_status === "ready" &&
+      currentMedia.storage_reference,
+  );
+
+  const actionPending =
+    publish.isPending ||
+    publishAndCampaign.isPending ||
+    schedule.isPending;
 
   return (
     <div className="create-publish-page">
@@ -468,24 +605,25 @@ export function CreatePublishPage() {
           readiness={readiness}
           media={currentMedia}
           mediaHistory={mediaHistory.data || (currentMedia ? [currentMedia] : [])}
-          mediaLoading={mediaRecord.isLoading || visual.isPending}
+          mediaLoading={upload.isPending}
           mediaPreviewUrl={mediaPreviewUrl}
           draftState={draftState}
           publishProgress={publishProgress}
           actionPending={actionPending}
+          campaignPending={publishAndCampaign.isPending}
+          campaignAvailable={campaignAvailable}
           canApproveExternal={canApproveExternal}
           onPlatformChange={setActivePlatform}
           onSave={(content, fields) => saveDraft.mutate({ content, fields })}
           onRewrite={(content, instruction) => rewrite.mutate({ content, instruction })}
-          onTryVisual={() => visual.mutate(mediaOwner(contentPackage.contents))}
-          onRetryVisual={(asset) => visual.mutate(
-            contentPackage.contents.find((item) => item.id === asset.content_id) || contentPackage.contents[0],
-          )}
           onUseMedia={(asset) => void persistMediaChoice(asset)}
           onUpload={uploadMedia}
           onConnect={() => navigate("/integrations")}
           onSchedule={() => setScheduleOpen(true)}
           onPublish={() => publish.mutate()}
+          onPublishAndCampaign={() =>
+            publishAndCampaign.mutate()
+          }
         />
       ) : mode ? (
         <CreatePublishComposer
@@ -499,7 +637,7 @@ export function CreatePublishPage() {
           error={error}
           onBack={resetComposer}
           onUpload={uploadMedia}
-          onGenerate={(input, visualPreference) => createPackage.mutate({ input, visual: visualPreference })}
+          onGenerate={(input) => createPackage.mutate(input)}
           onManual={(input) => manualPackage.mutate(input)}
         />
       ) : (
@@ -550,7 +688,7 @@ function StartExperience({
         <button type="button" onClick={() => onChoose("ai")} data-testid="start-ai">
           <span><Sparkles /></span>
           <strong>Create with AI</strong>
-          <p>Describe the goal. 9D Brain prepares the copy, variants, and visual.</p>
+          <p>Describe the goal. 9D Brain prepares the copy and platform variants for review.</p>
         </button>
         <button type="button" onClick={() => onChoose("upload")} data-testid="start-upload">
           <span><Upload /></span>

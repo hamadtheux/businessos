@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from uuid import UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,7 +24,6 @@ from app.agents.runtime import (
     execute_ai_agent_typed_with_metadata,
 )
 from app.domain.marketing import CAMPAIGN_TRANSITIONS, CONTENT_TRANSITIONS, MARKETING_PLAN_TRANSITIONS, TREND_TRANSITIONS
-from app.domain.background_jobs import creative_asset_generation_job_key
 from app.domain.business_industries import get_business_industry, is_healthcare_business_type
 from app.domain.audience_safety import contains_sensitive_targeting
 from app.exceptions.ai_agent import (
@@ -34,94 +33,11 @@ from app.exceptions.ai_agent import (
 )
 from app.exceptions.ai_context import AIContextAssemblyError
 from app.exceptions.marketing import MarketingAIError, MarketingNotFoundError, MarketingPersistenceError, MarketingStateError, MarketingValidationError
-from app.exceptions.background_jobs import (
-    BackgroundJobPersistenceError,
-    BackgroundJobValidationError,
-)
-from app.services.creative_provider import (
-    CreativeGenerationProvider,
-    CreativeGenerationRequest,
-    CreativeGenerationResult,
-    CreativeProviderError,
-    CreativeProviderNotConfiguredError,
-)
-from app.services.creative_brand_identity import (
-    CreativeBrandIdentity,
-    build_creative_brand_identity,
-)
-from app.services.creative_world_class import (
-    CreativeStoryMode,
-    world_class_raw_visual_contract,
-)
 from app.services.ai_context_policy import cmo_context_policy
-from app.services.creative_authority import (
-    AuthoritativeCreativeContext,
-    assemble_authoritative_creative_context,
-)
-from app.services.creative_compositor import (
-    CreativeCompositionError,
-    CreativeCompositionInput,
-    CreativeCompositionResult,
-    CreativeCompositor,
-    resolve_final_dimensions,
-)
-from app.services.creative_engine import (
-    CreativeMasterPlan,
-    build_creative_master_plan,
-    build_image_execution_plan,
-    build_master_plan_from_video_strategy,
-    build_video_execution_plan,
-    route_creative_failure,
-)
-from app.services.creative_direction import (
-    CreativeConceptProposal,
-    CreativeDirectorTaskBudgetError,
-    CreativeDirectionCheckpoint,
-    CreativeDirectorSynthesis,
-    CreativeDirectionPlan,
-    OwnerCreativeIntent,
-    build_creative_plan_task,
-    build_creative_direction,
-    build_grounded_creative_rescue,
-    build_visual_art_direction,
-    creative_direction_hard_failure_codes,
-    creative_direction_meets_hard_eligibility,
-    creative_direction_meets_quality_floor,
-    creative_direction_soft_deficiencies,
-    creative_directions_materially_differ,
-    revalidate_selected_creative_concept,
-)
-from app.services.creative_quality import (
-    CreativeQualityAssessment,
-    assess_creative_quality,
-)
-from app.services.creative_research import (
-    CreativeResearchBundle,
-    CreativeResearchEngine,
-    PublicCreativeResearchContext,
-    build_research_request,
-    degraded_research_bundle,
-    derive_public_research_context,
-)
-from app.services.creative_visual_review import (
-    CreativeVisualReview,
-    CreativeVisualReviewProvider,
-    CreativeVisualReviewRequest,
-    CreativeVisualReviewResult,
-    semantic_review_has_concept_failure,
-    semantic_visual_quality_score,
-    semantic_visual_review_meets_threshold,
-    validate_visual_review_for_mode,
-)
-from app.services.creative_video import (
-    VideoGenerationProvider,
-    VideoGenerationRequest,
-    VideoProviderError,
-    VideoProviderNotConfiguredError,
-)
 from app.models.business import Business
 from app.models.business_branding import BusinessBranding
 from app.models.catalog_item import CatalogItem
+from app.models.commerce import ProductGroup, ProductGroupItem
 from app.models.automation_intelligence import AudienceHypothesis, MarketingAutomationRun
 from app.models.crm_lead import CRMLead
 from app.models.customer import Customer
@@ -201,13 +117,49 @@ from app.exceptions.logo import LogoError
 from app.storage.base import ObjectNotFoundError, ObjectStorage, StorageError
 
 
+CreativeStoryMode = Literal["offering_proof", "brand_offer"]
+
+
+class OwnerCreativeIntent(BaseModel):
+    """Bounded owner-authored campaign intent, never factual authority."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        str_strip_whitespace=True,
+    )
+
+    visual_direction: str | None = Field(default=None, max_length=1200)
+    visual_exclusions: tuple[str, ...] = Field(default=(), max_length=8)
+    locked_headline: str | None = Field(default=None, max_length=180)
+    locked_supporting_copy: str | None = Field(default=None, max_length=600)
+    locked_cta: str | None = Field(default=None, max_length=300)
+
+    @field_validator("visual_exclusions")
+    @classmethod
+    def bounded_unique_exclusions(
+        cls,
+        values: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        normalized = tuple(" ".join(value.split()) for value in values)
+        if (
+            any(not value or len(value) > 180 for value in normalized)
+            or len({value.casefold() for value in normalized}) != len(normalized)
+        ):
+            raise ValueError(
+                "owner visual exclusions must be bounded and unique"
+            )
+        return normalized
+
+
+
+
 ZERO = Decimal("0")
 MONEY_QUANTUM = Decimal("0.0001")
 RATIO_QUANTUM = Decimal("0.000001")
 
 logger = logging.getLogger("aibos.marketing")
 
-_CREATIVE_METADATA_APP_MAX_BYTES = 12_000
 _CREATIVE_DIRECTOR_CHECKPOINT_VERSION = 1
 
 _SAFE_AI_DIAGNOSTIC_IDENTIFIER = re.compile(
@@ -314,7 +266,6 @@ _VIDEO_PIPELINE = "provider_neutral_video_v1"
 _VIDEO_STRATEGY_SCHEMA_VERSION = 1
 _CREATIVE_METADATA_MAX_BYTES = 16_384
 _CREATIVE_RAW_CHECKPOINT_MAX_BYTES = 30 * 1024 * 1024
-_MAX_CREATIVE_GENERATION_EPOCH = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -741,39 +692,10 @@ async def _paged(session: AsyncSession, statement: Select, page: int, page_size:
         raise MarketingPersistenceError from None
 
 
-def _serialized_json_byte_size(value: object) -> int:
-    """Return the deterministic UTF-8 size used by application JSON guards."""
-    return len(
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-    )
 
 
-def _creative_metadata_byte_size(metadata: dict[str, object]) -> int:
-    if not isinstance(metadata, dict):
-        raise TypeError("Creative metadata must be an object")
-    return _serialized_json_byte_size(metadata)
 
 
-def _log_creative_direction_persist_failure(
-    error: BaseException,
-    *,
-    metadata_bytes: int,
-) -> None:
-    """Emit only bounded diagnostics at the Director metadata boundary."""
-    logger.error(
-        "creative_direction_state_persist_failed exception_type=%s metadata_bytes=%d",
-        type(error).__name__,
-        metadata_bytes,
-        extra={
-            "exception_type": type(error).__name__,
-            "metadata_bytes": metadata_bytes,
-        },
-    )
 
 
 async def _rollback_session(session: AsyncSession) -> None:
@@ -781,47 +703,10 @@ async def _rollback_session(session: AsyncSession) -> None:
     await rollback_session(session)
 
 
-def _guard_creative_metadata_size(metadata: dict[str, object]) -> int:
-    metadata_bytes = _creative_metadata_byte_size(metadata)
-    if metadata_bytes > _CREATIVE_METADATA_APP_MAX_BYTES:
-        _log_creative_direction_persist_failure(
-            ValueError("creative metadata exceeds application ceiling"),
-            metadata_bytes=metadata_bytes,
-        )
-        raise MarketingPersistenceError from None
-    return metadata_bytes
 
 
-async def _flush_creative_direction_state(
-    session: AsyncSession,
-    *,
-    metadata_bytes: int,
-) -> None:
-    try:
-        await session.flush()
-    except SQLAlchemyError as error:
-        _log_creative_direction_persist_failure(
-            error,
-            metadata_bytes=metadata_bytes,
-        )
-        await _rollback_session(session)
-        raise MarketingPersistenceError from None
 
 
-async def _commit_creative_direction_state(
-    session: AsyncSession,
-    *,
-    metadata_bytes: int,
-) -> None:
-    try:
-        await session.commit()
-    except SQLAlchemyError as error:
-        _log_creative_direction_persist_failure(
-            error,
-            metadata_bytes=metadata_bytes,
-        )
-        await _rollback_session(session)
-        raise MarketingPersistenceError from None
 
 
 async def _flush(session: AsyncSession) -> None:
@@ -1144,6 +1029,380 @@ async def create_channel_plan(session: AsyncSession, *, business_id: UUID, campa
     return value
 
 
+async def _resolve_generated_campaign_budget(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    requested_budget: Decimal,
+    budget_mode: str,
+) -> tuple[Decimal, str]:
+    """
+    Resolve a generated campaign budget without inventing arbitrary spend.
+
+    Priority:
+    1. Explicit user-provided budget.
+    2. Median of this tenant's recent non-zero campaign budgets.
+    3. Zero when no grounded recommendation exists.
+
+    AI-derived recommendations are capped by active tenant-owned spend policy.
+    A zero result is draft-only and cannot cross the advertising boundary.
+    """
+    if requested_budget > Decimal("0.00"):
+        return requested_budget.quantize(Decimal("0.01")), "owner_input"
+
+    recent_budgets = list(
+        (
+            await session.scalars(
+                select(Campaign.planned_budget)
+                .where(
+                    Campaign.business_id == business_id,
+                    Campaign.planned_budget > Decimal("0.00"),
+                )
+                .order_by(Campaign.updated_at.desc())
+                .limit(9)
+            )
+        ).all()
+    )
+
+    if not recent_budgets:
+        return Decimal("0.00"), "requires_owner_input"
+
+    values = sorted(Decimal(value) for value in recent_budgets)
+    midpoint = len(values) // 2
+
+    if len(values) % 2:
+        recommendation = values[midpoint]
+    else:
+        recommendation = (
+            values[midpoint - 1] + values[midpoint]
+        ) / Decimal("2")
+
+    # Local import keeps the marketing service import graph isolated.
+    from app.services.advertising_spend_policy import (
+        get_advertising_spend_policy,
+    )
+
+    policy = await get_advertising_spend_policy(
+        session,
+        business_id=business_id,
+    )
+
+    if policy is not None and policy.active:
+        caps = [Decimal(policy.max_single_campaign_budget)]
+
+        if budget_mode == "daily":
+            if policy.daily_advertising_limit is not None:
+                caps.append(Decimal(policy.daily_advertising_limit))
+
+            if policy.monthly_ai_managed_limit is not None:
+                caps.append(
+                    Decimal(policy.monthly_ai_managed_limit) / Decimal("31")
+                )
+
+        elif policy.monthly_ai_managed_limit is not None:
+            caps.append(Decimal(policy.monthly_ai_managed_limit))
+
+        positive_caps = [
+            value for value in caps
+            if value > Decimal("0.00")
+        ]
+
+        if not positive_caps:
+            return Decimal("0.00"), "requires_owner_input"
+
+        recommendation = min(recommendation, min(positive_caps))
+
+    recommendation = recommendation.quantize(Decimal("0.01"))
+
+    if recommendation <= Decimal("0.00"):
+        return Decimal("0.00"), "requires_owner_input"
+
+    return recommendation, "tenant_campaign_history"
+
+
+_MAX_RECOMMENDED_CAMPAIGN_PRODUCTS = 12
+
+
+def _campaign_catalog_quality_score(item: CatalogItem) -> int:
+    """
+    Rank only authoritative catalog completeness.
+
+    This score is deliberately secondary to observed sales/performance and is
+    never presented as proof of product demand.
+    """
+    score = 0
+
+    if item.availability == "in_stock":
+        score += 6
+    elif item.availability in {"preorder", "backorder"}:
+        score += 3
+
+    if item.product_url:
+        score += 3
+    if item.price is not None and item.price > 0:
+        score += 3
+    if item.sku:
+        score += 2
+    if item.description:
+        score += 1
+    if item.brand or item.vendor:
+        score += 1
+    if item.gtin or item.mpn:
+        score += 1
+    if item.google_product_category:
+        score += 1
+
+    return score
+
+
+async def _rank_campaign_catalog_recommendations(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    products: list[CatalogItem],
+) -> list[CatalogItem]:
+    """
+    Deterministically rank tenant-owned products from trusted evidence.
+
+    Priority:
+    1. first-party paid-order demand,
+    2. provider-attributed advertising outcomes,
+    3. authoritative catalog quality.
+
+    Provider attribution is used only as provider-supplied evidence and is not
+    treated as proof that advertising caused first-party sales.
+    """
+    if not products:
+        return []
+
+    product_ids = {item.id for item in products}
+
+    order_metrics: dict[UUID, tuple[int, Decimal]] = {}
+    provider_metrics: dict[
+        UUID,
+        tuple[Decimal, Decimal, Decimal],
+    ] = {}
+
+    if hasattr(session, "execute"):
+        try:
+            order_rows = (
+                await session.execute(
+                    select(
+                        OrderLineItem.catalog_item_id,
+                        func.coalesce(
+                            func.sum(OrderLineItem.quantity),
+                            0,
+                        ).label("units"),
+                        func.coalesce(
+                            func.sum(
+                                OrderLineItem.unit_price
+                                * OrderLineItem.quantity
+                                - OrderLineItem.discount_amount
+                            ),
+                            0,
+                        ).label("revenue"),
+                    )
+                    .join(
+                        Order,
+                        (Order.id == OrderLineItem.order_id)
+                        & (
+                            Order.business_id
+                            == OrderLineItem.business_id
+                        ),
+                    )
+                    .where(
+                        Order.business_id == business_id,
+                        OrderLineItem.business_id == business_id,
+                        OrderLineItem.catalog_item_id.is_not(None),
+                        Order.payment_status.in_(
+                            ("paid", "partially_refunded")
+                        ),
+                    )
+                    .group_by(OrderLineItem.catalog_item_id)
+                )
+            ).all()
+
+            performance_rows = (
+                await session.execute(
+                    select(
+                        ProductCampaignPerformance.catalog_item_id,
+                        func.coalesce(
+                            func.sum(ProductCampaignPerformance.spend),
+                            0,
+                        ).label("spend"),
+                        func.coalesce(
+                            func.sum(
+                                ProductCampaignPerformance.conversions
+                            ),
+                            0,
+                        ).label("conversions"),
+                        func.coalesce(
+                            func.sum(
+                                ProductCampaignPerformance.conversion_value
+                            ),
+                            0,
+                        ).label("conversion_value"),
+                    )
+                    .where(
+                        ProductCampaignPerformance.business_id
+                        == business_id,
+                        ProductCampaignPerformance.attribution_class
+                        == "provider_attributed",
+                    )
+                    .group_by(
+                        ProductCampaignPerformance.catalog_item_id
+                    )
+                )
+            ).all()
+        except SQLAlchemyError:
+            raise MarketingPersistenceError from None
+
+        for row in order_rows:
+            item_id = row.catalog_item_id
+            if item_id not in product_ids:
+                continue
+            order_metrics[item_id] = (
+                int(row.units or 0),
+                Decimal(row.revenue or 0),
+            )
+
+        for row in performance_rows:
+            item_id = row.catalog_item_id
+            if item_id not in product_ids:
+                continue
+            provider_metrics[item_id] = (
+                Decimal(row.spend or 0),
+                Decimal(row.conversions or 0),
+                Decimal(row.conversion_value or 0),
+            )
+
+    def rank_key(
+        item: CatalogItem,
+    ) -> tuple[
+        int,
+        Decimal,
+        int,
+        int,
+        Decimal,
+        Decimal,
+        Decimal,
+        int,
+        str,
+        str,
+    ]:
+        units, revenue = order_metrics.get(
+            item.id,
+            (0, Decimal("0")),
+        )
+        spend, conversions, conversion_value = provider_metrics.get(
+            item.id,
+            (
+                Decimal("0"),
+                Decimal("0"),
+                Decimal("0"),
+            ),
+        )
+
+        has_first_party = int(units > 0 or revenue > 0)
+        has_provider = int(
+            spend > 0
+            or conversions > 0
+            or conversion_value > 0
+        )
+
+        roas = (
+            conversion_value / spend
+            if spend > 0
+            else Decimal("0")
+        )
+
+        # sorted() is ascending, so numeric evidence is negated.
+        return (
+            -has_first_party,
+            -revenue,
+            -units,
+            -has_provider,
+            -conversion_value,
+            -conversions,
+            -roas,
+            -_campaign_catalog_quality_score(item),
+            item.name.casefold(),
+            str(item.id),
+        )
+
+    ranked = sorted(products, key=rank_key)
+    return ranked[:_MAX_RECOMMENDED_CAMPAIGN_PRODUCTS]
+
+
+async def _resolve_campaign_catalog_products(
+    session: AsyncSession,
+    *,
+    business_id: UUID,
+    data: CampaignGenerateRequest,
+) -> tuple[str, list[CatalogItem]]:
+    """
+    Resolve the durable catalog scope from tenant-owned database truth.
+
+    `none` + explicit IDs remains supported for older clients and is normalized
+    to `selected`. New clients must send an explicit catalog_scope.
+    """
+    scope = (
+        "selected"
+        if data.catalog_scope == "none" and data.catalog_item_ids
+        else data.catalog_scope
+    )
+
+    if scope == "none":
+        return scope, []
+
+    statement = select(CatalogItem).where(
+        CatalogItem.business_id == business_id,
+        CatalogItem.item_type == "product",
+        CatalogItem.status != "archived",
+        CatalogItem.published.is_(True),
+    )
+
+    if scope == "selected":
+        statement = statement.where(
+            CatalogItem.id.in_(data.catalog_item_ids)
+        )
+
+    products = list((await session.scalars(statement)).all())
+
+    # Do not rely only on SQL predicates: fail closed if an injected/fake row
+    # violates tenant or product ownership assumptions.
+    if any(
+        item.business_id != business_id
+        or item.item_type != "product"
+        or item.status == "archived"
+        or item.published is not True
+        for item in products
+    ):
+        raise MarketingValidationError("catalog_selection_invalid")
+
+    if scope == "selected":
+        expected_ids = set(data.catalog_item_ids)
+        actual_ids = {item.id for item in products}
+        if actual_ids != expected_ids:
+            raise MarketingValidationError("catalog_selection_invalid")
+
+    if not products:
+        raise MarketingValidationError("catalog_selection_empty")
+
+    if scope == "recommended":
+        products = await _rank_campaign_catalog_recommendations(
+            session,
+            business_id=business_id,
+            products=products,
+        )
+        if not products:
+            raise MarketingValidationError(
+                "catalog_recommendation_empty"
+            )
+
+    return scope, products
+
+
 async def generate_campaign(
     session: AsyncSession,
     *,
@@ -1162,15 +1421,49 @@ async def generate_campaign(
     )
     if contains_sensitive_targeting(data.goal, data.audience_definition or ""):
         raise MarketingValidationError("sensitive_targeting_prohibited")
-    selected_products: list[CatalogItem] = []
-    if data.catalog_item_ids:
-        selected_products = list((await session.scalars(select(CatalogItem).where(
-            CatalogItem.business_id == business_id,
-            CatalogItem.id.in_(data.catalog_item_ids),
-            CatalogItem.status != "archived",
-        ))).all())
-        if {item.id for item in selected_products} != set(data.catalog_item_ids):
-            raise MarketingValidationError("catalog_selection_invalid")
+    catalog_scope, selected_products = await _resolve_campaign_catalog_products(
+        session,
+        business_id=business_id,
+        data=data,
+    )
+    planned_budget, budget_source = await _resolve_generated_campaign_budget(
+        session,
+        business_id=business_id,
+        requested_budget=data.planned_budget,
+        budget_mode=data.budget_mode,
+    )
+    campaign_media: CreativeAsset | None = None
+    if data.media_asset_id is not None:
+        source_content = await get_content(
+            session,
+            business_id=business_id,
+            content_id=data.source_content_id,
+        )
+
+        source_fields = source_content.platform_fields or {}
+        if (
+            not isinstance(source_fields, dict)
+            or source_fields.get("media_disabled") is True
+            or str(source_fields.get("selected_media_asset_id") or "")
+            != str(data.media_asset_id)
+        ):
+            raise MarketingValidationError("campaign_media_selection_conflict")
+
+        campaign_media = await get_creative_asset(
+            session,
+            business_id=business_id,
+            creative_asset_id=data.media_asset_id,
+        )
+
+        if (
+            campaign_media.business_id != business_id
+            or campaign_media.source_type != "import"
+            or campaign_media.generation_status != "ready"
+            or not campaign_media.storage_reference
+            or campaign_media.content_id != source_content.id
+        ):
+            raise MarketingValidationError("campaign_media_unavailable")
+
     audience = await build_audience_hypothesis(
         session, business_id=business_id, goal=data.goal
     )
@@ -1208,7 +1501,7 @@ async def generate_campaign(
         "Create an internal campaign proposal grounded only in trusted business context and the "
         "evidence-backed audience hypothesis below. Label every unsupported audience detail as an AI inference. "
         f"Goal: {data.goal}. Audience hypothesis: {audience_definition}. Channels: {', '.join(channels)}. "
-        f"Total budget guidance: {data.planned_budget}. Selected authoritative catalog products:\n"
+        f"Total budget guidance: {planned_budget}. Selected authoritative catalog products:\n"
         f"{product_facts[:8000] or '- No product was explicitly selected; recommend only from available trusted context.'}\n"
         f"Audience evidence:\n{evidence_text[:8000]}\n"
         "Return strategy, message, creative direction, CTA, risks, assumptions, and measurement guidance. "
@@ -1224,8 +1517,11 @@ async def generate_campaign(
             if isinstance(value, str) and len(value.strip()) == 2 and value.strip().isalpha()
         ][:50],
         start_date=data.start_date, end_date=data.end_date,
-        planned_budget=data.planned_budget, budget_mode=data.budget_mode,
+        planned_budget=planned_budget, budget_mode=data.budget_mode,
     ))
+    if campaign_media is not None:
+        campaign_media.campaign_id = campaign.id
+
     recommendations = list(output.recommendations)
     campaign.origin_type = origin_type
     campaign.proposal_key = proposal_key
@@ -1266,8 +1562,64 @@ async def generate_campaign(
         campaign.product_selections.append(CampaignProductSelection(
             business_id=business_id, campaign_id=campaign.id,
             catalog_item_id=item.id,
-            selection_reason="Owner-selected product context" if data.catalog_item_ids else "AI-recommended product context",
+            selection_reason={
+                "selected": "Owner-selected product context",
+                "all": "Owner-selected all-products catalog scope",
+                "recommended": (
+                    "Business Brain evidence-ranked product context using "
+                    "first-party orders, provider-attributed performance, "
+                    "and authoritative catalog quality"
+                ),
+            }.get(catalog_scope, "Catalog product context"),
         ))
+    campaign_product_group: ProductGroup | None = None
+
+    if selected_products:
+        campaign_product_group = ProductGroup(
+            business_id=business_id,
+            created_by_user_id=actor_user_id,
+            name=f"Campaign products · {campaign.name}"[:160],
+            external_key=f"campaign:{campaign.id}",
+            group_type="manual",
+            rule={
+                "campaign_id": str(campaign.id),
+                "catalog_scope": catalog_scope,
+                "approval_source": (
+                    "normalized_proposal.selected_products"
+                ),
+            },
+            status="active",
+        )
+        session.add(campaign_product_group)
+
+        # Obtain the UUID before inserting tenant-scoped membership rows.
+        await _flush(session)
+
+        for item in selected_products:
+            session.add(
+                ProductGroupItem(
+                    business_id=business_id,
+                    product_group_id=campaign_product_group.id,
+                    catalog_item_id=item.id,
+                )
+            )
+
+        await _flush(session)
+
+        record_audit(
+            session,
+            business_id=business_id,
+            actor_user_id=actor_user_id,
+            event_type="marketing.campaign_product_group_created",
+            entity_type="commerce_product_group",
+            entity_id=campaign_product_group.id,
+            summary=(
+                f"Created the immutable approval product group for "
+                f"campaign {campaign.name} with "
+                f"{len(selected_products)} products."
+            ),
+        )
+
     if len(selected_products) == 1:
         product = selected_products[0]
         campaign.landing_destination = product.product_url
@@ -1276,16 +1628,43 @@ async def generate_campaign(
     campaign.offer_source = "owner_authorized" if verified_offer_role else "none"
     campaign.offer_authorized = verified_offer_role is not None
     campaign.proposal_confidence = Decimal("0.80") if selected_products and commerce_context["provider"] else Decimal("0.55")
-    total_exposure = data.planned_budget
+    total_exposure = planned_budget
     if data.budget_mode == "daily" and data.start_date and data.end_date:
-        total_exposure = data.planned_budget * Decimal((data.end_date - data.start_date).days + 1)
+        total_exposure = planned_budget * Decimal((data.end_date - data.start_date).days + 1)
     campaign.normalized_proposal = {
         "schema_version": 1,
         "goal": data.goal,
         "recommended_provider": commerce_context["provider"],
         "why_provider": commerce_context["why_provider"],
         "campaign_type": execution_campaign_type,
-        "product_group": None,
+        "catalog_scope": catalog_scope,
+        "product_group": (
+            {
+                "scope": catalog_scope,
+                "internal_product_group_id": (
+                    str(campaign_product_group.id)
+                    if campaign_product_group is not None
+                    else None
+                ),
+                "external_key": (
+                    campaign_product_group.external_key
+                    if campaign_product_group is not None
+                    else None
+                ),
+                "recommendation_method": (
+                    "first_party_orders_then_provider_attribution_then_catalog_quality"
+                    if catalog_scope == "recommended"
+                    else None
+                ),
+                "recommendation_limit": (
+                    _MAX_RECOMMENDED_CAMPAIGN_PRODUCTS
+                    if catalog_scope == "recommended"
+                    else None
+                ),
+            }
+            if catalog_scope != "none"
+            else None
+        ),
         "selected_products": [
             {"catalog_item_id": str(item.id), "offer_id": item.sku or str(item.id), "name": item.name,
              "price": str(item.price) if item.price is not None else None, "currency": item.currency,
@@ -1321,6 +1700,17 @@ async def generate_campaign(
             "landing_url": campaign.landing_destination,
             "asset_requirements": commerce_context["asset_requirements"],
             "media_requirements": commerce_context["asset_requirements"],
+            "uploaded_media_asset_id": (
+                str(campaign_media.id) if campaign_media is not None else None
+            ),
+            "uploaded_media_type": (
+                campaign_media.media_type if campaign_media is not None else None
+            ),
+            "source_content_id": (
+                str(data.source_content_id)
+                if data.source_content_id is not None
+                else None
+            ),
         },
         "seller_business_advantage": None,
         "product_differentiators": [
@@ -1333,9 +1723,21 @@ async def generate_campaign(
             if value is not None
         ][:20],
         "budget": {
-            "amount": str(data.planned_budget), "currency": campaign.currency,
-            "interval": data.budget_mode, "maximum_planned_spend": str(total_exposure),
-            "rationale": "Owner-provided budget guidance; spend remains subject to server policy and approval.",
+            "amount": str(planned_budget),
+            "currency": campaign.currency,
+            "interval": data.budget_mode,
+            "maximum_planned_spend": str(total_exposure),
+            "source": budget_source,
+            "requires_owner_input": planned_budget <= Decimal("0.00"),
+            "rationale": (
+                "Owner-provided budget guidance; spend remains subject to server policy and approval."
+                if budget_source == "owner_input"
+                else
+                "Recommendation grounded in this business's prior campaign budgets and capped by active server-owned spend limits."
+                if budget_source == "tenant_campaign_history"
+                else
+                "No grounded budget recommendation is available yet. Owner input is required before advertising execution."
+            ),
         },
         "duration": {
             "start_date": data.start_date.isoformat() if data.start_date else None,
@@ -1358,7 +1760,7 @@ async def generate_campaign(
         "confidence": str(campaign.proposal_confidence),
         "approval_requirements": ["advertising_spend_policy", "human_approval", "provider_preflight"],
     }
-    allocations = _allocate_budget(data.planned_budget, len(channels))
+    allocations = _allocate_budget(planned_budget, len(channels))
     for index, channel in enumerate(channels):
         recommendation = output.recommendations[index] if index < len(output.recommendations) else output.summary
         session.add(CampaignChannelPlan(
@@ -2466,16 +2868,53 @@ async def prepare_uploaded_creative_asset(
         f"businesses/{business_id}/marketing/uploads/{asset_id}/"
         f"source.{media.extension}"
     )
-    put_attempted = False
+    stored_object_keys: list[str] = []
+    variant_object_keys: list[str] = []
+    variant_records: dict[str, dict[str, object]] = {}
+
     try:
-        put_attempted = True
         await storage.put(object_key, media.content, media.content_type)
+        stored_object_keys.append(object_key)
+
         reference = storage.public_url(object_key)
         if not isinstance(reference, str) or not reference or len(reference) > 1024:
             raise StorageError("Invalid uploaded media reference")
-    except (StorageError, ValueError):
-        if put_attempted:
-            await _best_effort_delete(storage, object_key)
+
+        if media.media_type == "image":
+            from app.services.marketing_media import build_marketing_image_variants
+
+            for variant in build_marketing_image_variants(media):
+                variant_key = (
+                    f"businesses/{business_id}/marketing/uploads/{asset_id}/"
+                    f"variants/{variant.key}.{variant.extension}"
+                )
+                await storage.put(
+                    variant_key,
+                    variant.content,
+                    variant.content_type,
+                )
+                stored_object_keys.append(variant_key)
+                variant_object_keys.append(variant_key)
+
+                variant_reference = storage.public_url(variant_key)
+                if (
+                    not isinstance(variant_reference, str)
+                    or not variant_reference
+                    or len(variant_reference) > 1024
+                ):
+                    raise StorageError("Invalid uploaded media variant reference")
+
+                variant_records[variant.key] = {
+                    "storage_reference": variant_reference,
+                    "content_type": variant.content_type,
+                    "width": variant.width,
+                    "height": variant.height,
+                    "aspect_ratio": variant.aspect_ratio,
+                    "transformation": "contain_no_crop",
+                }
+    except (StorageError, ValueError, MarketingValidationError):
+        for stored_key in reversed(stored_object_keys):
+            await _best_effort_delete(storage, stored_key)
         raise MarketingPersistenceError from None
     value = CreativeAsset(
         id=asset_id,
@@ -2505,15 +2944,28 @@ async def prepare_uploaded_creative_asset(
         creative_metadata={
             "upload_content_type": media.content_type,
             "original_name": media.original_name,
+            "original_immutable": True,
+            "variants": variant_records,
         },
     )
     session.add(value)
-    _register_creative_storage_compensation(session, storage, object_key)
+    persisted_object_keys = [object_key, *variant_object_keys]
+    for persisted_key in persisted_object_keys:
+        _register_creative_storage_compensation(
+            session,
+            storage,
+            persisted_key,
+        )
     try:
         await _flush(session)
     except MarketingPersistenceError:
-        _remove_creative_storage_compensation(session, object_key)
-        await _best_effort_delete(storage, object_key)
+        for persisted_key in persisted_object_keys:
+            _remove_creative_storage_compensation(
+                session,
+                persisted_key,
+            )
+        for persisted_key in reversed(persisted_object_keys):
+            await _best_effort_delete(storage, persisted_key)
         raise
     record_audit(
         session,
@@ -2933,441 +3385,6 @@ def _build_bounded_creative_strategy_task(
     return task
 
 
-async def create_creative_brief(
-    session: AsyncSession,
-    *,
-    business_id: UUID,
-    actor_user_id: UUID,
-    data: CreativeBriefCreate,
-    provider: AIAgentProvider,
-) -> CreativeAsset:
-    campaign = (
-        await get_campaign(
-            session,
-            business_id=business_id,
-            campaign_id=data.campaign_id,
-        )
-        if data.campaign_id
-        else None
-    )
-    content = (
-        await get_content(
-            session,
-            business_id=business_id,
-            content_id=data.content_id,
-        )
-        if data.content_id
-        else None
-    )
-
-    if campaign and content and content.campaign_id != campaign.id:
-        raise MarketingValidationError
-
-    authorized_offer, claim_source = _campaign_offer_claim(campaign)
-    content_offer, content_claim_source = _content_offer_claim(content)
-    if content_offer is not None:
-        authorized_offer = content_offer
-        claim_source = content_claim_source
-    cta_capabilities = await _trusted_cta_capabilities(
-        session,
-        business_id=business_id,
-        campaign_id=(
-            campaign.id
-            if campaign is not None
-            else content.campaign_id if content is not None else None
-        ),
-    )
-    owner_intent = _parse_owner_creative_intent(
-        data.instructions,
-        cta_capabilities=cta_capabilities,
-    )
-    trusted_content_cta = (
-        _normalize_creative_display_cta(
-            content.cta,
-            capabilities=cta_capabilities,
-        )
-        if content is not None and not content.ai_generated
-        else _normalize_generated_cta(
-            content.cta if content is not None else None,
-            capabilities=cta_capabilities,
-        )
-    )
-
-    expected_channel: str | None = None
-
-    if content is not None:
-        expected_channel = content.channel
-    task = _build_bounded_creative_strategy_task(
-        owner_instructions=data.instructions,
-        asset_type=data.asset_type,
-        aspect_ratio=data.aspect_ratio,
-        authorized_offer=authorized_offer,
-        offer_claim_source=claim_source,
-        campaign_name=campaign.name if campaign is not None else None,
-        campaign_objective=campaign.objective if campaign is not None else None,
-        content_channel=content.channel if content is not None else None,
-        content_type=content.content_type if content is not None else None,
-        content_title=content.title if content is not None else None,
-        content_body=content.body if content is not None else None,
-        content_cta=trusted_content_cta,
-        existing_creative_brief=(
-            content.creative_brief if content is not None else None
-        ),
-    )
-
-    execution = await _execute_creative_strategy(
-        session,
-        business_id,
-        task,
-        provider,
-        expected_channel=expected_channel,
-    )
-
-    try:
-        provider_strategy = _CreativeStrategyProviderProposal.model_validate(
-            execution.output,
-            from_attributes=True,
-        )
-    except ValidationError:
-        _log_creative_strategy_failure(
-            "creative_strategy_provider_payload_invalid",
-            provider=provider,
-            expected_channel=expected_channel,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError from None
-
-    provider_channel = _normalize_creative_strategy_context(
-        provider_strategy.recommended_channel
-    ).casefold()
-
-    expected_channel_normalized = (
-        _normalize_creative_strategy_context(expected_channel).casefold()
-        if expected_channel is not None
-        else None
-    )
-
-    # Governance violations must be rejected, never silently removed.
-    if provider_strategy.recommendations:
-        _log_creative_strategy_failure(
-            "creative_strategy_unexpected_recommendations",
-            provider=provider,
-            expected_channel=expected_channel,
-            returned_channel=provider_strategy.recommended_channel,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError
-
-    if provider_strategy.proposed_actions:
-        _log_creative_strategy_failure(
-            "creative_strategy_proposed_actions_rejected",
-            provider=provider,
-            expected_channel=expected_channel,
-            returned_channel=provider_strategy.recommended_channel,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError
-
-    if provider_strategy.evidence_source_ids:
-        _log_creative_strategy_failure(
-            "creative_strategy_evidence_ids_rejected",
-            provider=provider,
-            expected_channel=expected_channel,
-            returned_channel=provider_strategy.recommended_channel,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError
-
-    if (
-        expected_channel_normalized is not None
-        and provider_channel != expected_channel_normalized
-    ):
-        _log_creative_strategy_failure(
-            "creative_strategy_channel_mismatch",
-            provider=provider,
-            expected_channel=expected_channel,
-            returned_channel=provider_strategy.recommended_channel,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError
-
-    if provider_strategy.claim_source != "none":
-        _log_creative_strategy_failure(
-            "creative_strategy_claim_source_rejected",
-            provider=provider,
-            expected_channel=expected_channel,
-            returned_channel=provider_strategy.recommended_channel,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError
-
-    provider_offer = _normalized_claim(provider_strategy.offer)
-    trusted_offer = _normalized_claim(authorized_offer)
-
-    if authorized_offer is not None:
-        if provider_offer not in {None, trusted_offer}:
-            _log_creative_strategy_failure(
-                "creative_strategy_offer_mismatch",
-                provider=provider,
-                expected_channel=expected_channel,
-                returned_channel=provider_strategy.recommended_channel,
-                provider_request_id=_creative_strategy_request_id(execution),
-            )
-            raise MarketingAIError
-    elif provider_offer is not None:
-        _log_creative_strategy_failure(
-            "creative_strategy_unsupported_offer_rejected",
-            provider=provider,
-            expected_channel=expected_channel,
-            returned_channel=provider_strategy.recommended_channel,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError
-
-    # Only after provider output has passed the security/governance boundary do
-    # trusted server values replace model-authored values.
-    canonical_channel = (
-        expected_channel_normalized
-        if expected_channel_normalized is not None
-        else provider_channel
-    )
-
-    try:
-        strategy = CreativeStrategyProposal.model_validate(
-            {
-                **provider_strategy.model_dump(
-                    exclude={
-                        "offer",
-                        "claim_source",
-                        "recommended_channel",
-                        "evidence_source_ids",
-                        "recommendations",
-                        "proposed_actions",
-                    }
-                ),
-                # Exact authorized offer and provenance are applied by the
-                # existing trusted-offer branch below, after headline repair.
-                "offer": None,
-                "claim_source": "none",
-                "recommended_channel": canonical_channel,
-                "evidence_source_ids": [],
-                "recommendations": [],
-                "proposed_actions": [],
-            }
-        )
-    except ValidationError:
-        _log_creative_strategy_failure(
-            "creative_strategy_domain_invalid",
-            provider=provider,
-            expected_channel=expected_channel,
-            returned_channel=provider_strategy.recommended_channel,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError from None
-
-    if strategy.recommendations:
-        _log_creative_strategy_failure(
-            "creative_strategy_unexpected_recommendations",
-            provider=provider,
-            expected_channel=expected_channel,
-            returned_channel=strategy.recommended_channel,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError
-
-    if strategy.proposed_actions:
-        _log_creative_strategy_failure(
-            "creative_strategy_proposed_actions_rejected",
-            provider=provider,
-            expected_channel=expected_channel,
-            returned_channel=strategy.recommended_channel,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError
-
-    if strategy.evidence_source_ids:
-        _log_creative_strategy_failure(
-            "creative_strategy_evidence_ids_rejected",
-            provider=provider,
-            expected_channel=expected_channel,
-            returned_channel=strategy.recommended_channel,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError
-
-    if _contains_creative_instruction_copy(
-        strategy.headline,
-        strategy.supporting_message,
-        strategy.cta,
-    ):
-        _log_creative_strategy_failure(
-            "creative_strategy_instruction_as_copy_rejected",
-            provider=provider,
-            expected_channel=expected_channel,
-            returned_channel=strategy.recommended_channel,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError
-
-    strategy_cta = _normalize_generated_cta(
-        strategy.cta,
-        capabilities=cta_capabilities,
-    )
-    if content is not None and content.cta is not None:
-        strategy_cta = trusted_content_cta
-    strategy = strategy.model_copy(update={"cta": strategy_cta})
-
-    returned_offer = _normalized_claim(strategy.offer)
-    if strategy.claim_source != "none":
-        _log_creative_strategy_failure(
-            "creative_strategy_claim_source_rejected",
-            provider=provider,
-            expected_channel=expected_channel,
-            returned_channel=strategy.recommended_channel,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError
-    if authorized_offer is not None:
-        if returned_offer not in {None, authorized_offer}:
-            _log_creative_strategy_failure(
-                "creative_strategy_offer_mismatch",
-                provider=provider,
-                expected_channel=expected_channel,
-                returned_channel=strategy.recommended_channel,
-                provider_request_id=_creative_strategy_request_id(execution),
-            )
-            raise MarketingAIError
-        normalized_authorized_offer = _normalized_claim(
-            authorized_offer
-        )
-        if (
-            normalized_authorized_offer is not None
-            and _normalized_claim(strategy.headline)
-            == normalized_authorized_offer
-        ):
-            # The provider may copy a promotion into the headline even though
-            # the offer is rendered separately. Reuse grounded customer-facing
-            # copy already produced in the same strategy instead of failing the
-            # entire creative or inventing new server copy.
-            replacement_headline = _shorten_creative_strategy_context(
-                strategy.hook,
-                180,
-            )
-            if (
-                not replacement_headline
-                or _normalized_claim(replacement_headline)
-                == normalized_authorized_offer
-            ):
-                _log_creative_strategy_failure(
-                    "creative_strategy_offer_headline_unrepairable",
-                    provider=provider,
-                    expected_channel=expected_channel,
-                    returned_channel=strategy.recommended_channel,
-                    provider_request_id=_creative_strategy_request_id(execution),
-                )
-                raise MarketingAIError
-
-            try:
-                strategy = CreativeStrategyProposal.model_validate(
-                    {
-                        **strategy.model_dump(),
-                        "headline": replacement_headline,
-                    }
-                )
-            except ValidationError:
-                raise MarketingAIError from None
-
-        try:
-            strategy = CreativeStrategyProposal.model_validate({
-                **strategy.model_dump(),
-                "offer": authorized_offer,
-                "claim_source": claim_source,
-            })
-        except ValidationError:
-            raise MarketingAIError from None
-    elif returned_offer is not None or _contains_unclassified_promotional_claim(
-        strategy.headline,
-        strategy.supporting_message,
-    ):
-        _log_creative_strategy_failure(
-            "creative_strategy_unsupported_offer_rejected",
-            provider=provider,
-            expected_channel=expected_channel,
-            returned_channel=strategy.recommended_channel,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError
-
-    strategy = _apply_owner_copy_locks(strategy, owner_intent)
-
-    if (
-        expected_channel is not None
-        and strategy.recommended_channel != expected_channel
-    ):
-        _log_creative_strategy_failure(
-            "creative_strategy_channel_mismatch",
-            provider=provider,
-            expected_channel=expected_channel,
-            returned_channel=strategy.recommended_channel,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError
-
-    # Keep the existing CreativeAsset contract and database model intact.
-    # visual_direction now contains canonical structured strategy JSON rather
-    # than unvalidated provider prose. A later generation step can parse this
-    # exact strategy without asking the model to reinterpret the owner's goal.
-    visual_direction = strategy.model_dump_json(
-        exclude={
-            "evidence_source_ids",
-            "recommendations",
-            "proposed_actions",
-        },
-    )
-
-    if len(visual_direction) > 5000:
-        _log_creative_strategy_failure(
-            "creative_strategy_output_too_large",
-            provider=provider,
-            expected_channel=expected_channel,
-            returned_channel=strategy.recommended_channel,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError
-
-    value = CreativeAsset(
-        business_id=business_id,
-        campaign_id=data.campaign_id,
-        content_id=data.content_id,
-        asset_type=data.asset_type,
-        media_type="image",
-        source_type="ai_brief",
-        instructions=data.instructions,
-        visual_direction=visual_direction,
-        generation_status="brief_ready",
-        storage_reference=None,
-        width=data.width,
-        height=data.height,
-        aspect_ratio=data.aspect_ratio,
-        alt_text=data.alt_text,
-    )
-    session.add(value)
-    await _flush(session)
-
-    record_audit(
-        session,
-        business_id=business_id,
-        actor_user_id=actor_user_id,
-        event_type="marketing.creative_brief_created",
-        entity_type="marketing_creative_asset",
-        entity_id=value.id,
-        summary=(
-            "Created a grounded structured Creative Intelligence strategy; "
-            "no image provider was called."
-        ),
-    )
-
-    return value
 
 
 _VIDEO_STRATEGY_TASK_PREAMBLE = (
@@ -3393,859 +3410,25 @@ _VIDEO_STRATEGY_TASK_CONTRACT = (
 )
 
 
-def _build_video_strategy_task(
-    *,
-    data: VideoCreativeCreateRequest,
-    campaign: Campaign | None,
-    content: MarketingContent | None,
-    trusted_content_cta: str | None,
-    authorized_offer: str | None,
-    claim_source: str,
-) -> str:
-    """Build a bounded video task without truncating governance or exact fields."""
-    fields: list[dict[str, object]] = [
-        {
-            "key": "owner_intent",
-            "prefix": "Owner intent: ",
-            "value": _normalize_creative_strategy_context(data.instructions),
-            "cap": 700,
-            "minimum": 64,
-            "priority": 1,
-            "exact": False,
-        },
-        {
-            "key": "duration",
-            "prefix": "\nDuration: ",
-            "value": f"{data.duration_seconds} seconds exactly.",
-            "priority": 0,
-            "exact": True,
-        },
-        {
-            "key": "aspect_ratio",
-            "prefix": "\nAspect ratio: ",
-            "value": f"{data.aspect_ratio} exactly.",
-            "priority": 0,
-            "exact": True,
-        },
-        {
-            "key": "channel",
-            "prefix": "\nChannel: ",
-            "value": content.channel if content else "choose a supported channel",
-            "priority": 0,
-            "exact": True,
-        },
-        {
-            "key": "validated_cta",
-            "prefix": "\nValidated content CTA: ",
-            "value": trusted_content_cta or "none",
-            "priority": 0,
-            "exact": True,
-        },
-        {
-            "key": "authorized_offer",
-            "prefix": "\nAuthorized offer: ",
-            "value": authorized_offer or "none",
-            "priority": 0,
-            "exact": True,
-        },
-        {
-            "key": "claim_source",
-            "prefix": "\nServer claim source: ",
-            "value": f"{claim_source}.",
-            "priority": 0,
-            "exact": True,
-        },
-        {
-            "key": "campaign_name",
-            "prefix": "\nCampaign: ",
-            "value": _normalize_creative_strategy_context(
-                campaign.name if campaign else None
-            ) or "none",
-            "cap": 180,
-            "minimum": 24,
-            "priority": 2,
-            "exact": False,
-        },
-        {
-            "key": "campaign_objective",
-            "prefix": "\nCampaign objective: ",
-            "value": _normalize_creative_strategy_context(
-                campaign.objective if campaign else None
-            ) or "none",
-            "cap": 360,
-            "minimum": 32,
-            "priority": 3,
-            "exact": False,
-        },
-        {
-            "key": "content_title",
-            "prefix": "\nContent title: ",
-            "value": _normalize_creative_strategy_context(
-                content.title if content else None
-            ) or "none",
-            "cap": 180,
-            "minimum": 24,
-            "priority": 4,
-            "exact": False,
-        },
-        {
-            "key": "content_body",
-            "prefix": "\nContent body: ",
-            "value": _normalize_creative_strategy_context(
-                content.body if content else None
-            ) or "none",
-            "cap": 700,
-            "minimum": 32,
-            "priority": 5,
-            "exact": False,
-        },
-        {
-            "key": "style",
-            "prefix": "\nStyle preference: ",
-            "value": _normalize_creative_strategy_context(data.style)
-            or "decide professionally",
-            "cap": 160,
-            "minimum": 16,
-            "priority": 6,
-            "exact": False,
-        },
-        {
-            "key": "audio",
-            "prefix": "\nAudio preference: ",
-            "value": _normalize_creative_strategy_context(data.audio_preference)
-            or "decide professionally",
-            "cap": 160,
-            "minimum": 16,
-            "priority": 7,
-            "exact": False,
-        },
-        {
-            "key": "motion",
-            "prefix": "\nMotion preference: ",
-            "value": _normalize_creative_strategy_context(data.motion_preference)
-            or "decide professionally",
-            "cap": 160,
-            "minimum": 16,
-            "priority": 8,
-            "exact": False,
-        },
-    ]
-    available_values = (
-        _CREATIVE_STRATEGY_TASK_BUDGET
-        - len(_VIDEO_STRATEGY_TASK_PREAMBLE)
-        - len(_VIDEO_STRATEGY_TASK_CONTRACT)
-        - sum(len(str(field["prefix"])) for field in fields)
-    )
-    allocations: dict[str, int] = {}
-    for field in fields:
-        value = str(field["value"])
-        allocations[str(field["key"])] = (
-            len(value)
-            if bool(field["exact"])
-            else min(len(value), int(field["minimum"]))
-        )
-
-    overflow = sum(allocations.values()) - available_values
-    if overflow > 0:
-        for field in sorted(
-            fields,
-            key=lambda item: int(item["priority"]),
-            reverse=True,
-        ):
-            if bool(field["exact"]):
-                continue
-            key = str(field["key"])
-            reduction = min(max(0, allocations[key] - 1), overflow)
-            allocations[key] -= reduction
-            overflow -= reduction
-            if overflow == 0:
-                break
-    if overflow > 0:
-        raise MarketingAIError
-
-    remaining = available_values - sum(allocations.values())
-    for field in sorted(fields, key=lambda item: int(item["priority"])):
-        if remaining <= 0:
-            break
-        key = str(field["key"])
-        value = str(field["value"])
-        target = len(value) if bool(field["exact"]) else min(
-            len(value), int(field["cap"])
-        )
-        growth = min(max(0, target - allocations[key]), remaining)
-        allocations[key] += growth
-        remaining -= growth
-
-    context = "".join(
-        f"{field['prefix']}"
-        f"{_shorten_creative_strategy_context(str(field['value']), allocations[str(field['key'])])}"
-        for field in fields
-    )
-    task = (
-        _VIDEO_STRATEGY_TASK_PREAMBLE
-        + context
-        + _VIDEO_STRATEGY_TASK_CONTRACT
-    )
-    if len(task) > _CREATIVE_STRATEGY_TASK_BUDGET:
-        raise MarketingAIError
-    return task
 
 
-def _video_strategy_metadata(
-    strategy: VideoCreativeStrategy,
-    *,
-    phase: str,
-    master_plan: CreativeMasterPlan | None = None,
-) -> dict[str, object]:
-    """Build the versioned, bounded JSONB envelope for a video strategy."""
-    metadata: dict[str, object] = {
-        "schema_version": _VIDEO_STRATEGY_SCHEMA_VERSION,
-        "pipeline": _VIDEO_PIPELINE,
-        "phase": phase,
-        "video_strategy": strategy.canonical_payload(),
-    }
-    if master_plan is not None:
-        # Only compact identity is durable. The complete shared plan and shot
-        # expansion stay transient so the 12 KB application ceiling remains
-        # meaningful and legacy checkpoints remain recoverable.
-        metadata["shared_creative_identity"] = {
-            "territory_key": master_plan.territory_key,
-            "concept_name": master_plan.concept_name,
-            "campaign_mechanism": master_plan.campaign_mechanism[:240],
-            "composition_family": master_plan.composition.family,
-        }
-    serialized = json.dumps(
-        metadata,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    if len(serialized.encode("utf-8")) > _CREATIVE_METADATA_MAX_BYTES:
-        raise MarketingAIError
-    return metadata
 
 
-def _video_strategy_from_asset(value: CreativeAsset) -> VideoCreativeStrategy:
-    """Load only the canonical versioned strategy from bounded server metadata."""
-    metadata = value.creative_metadata
-    if (
-        not isinstance(metadata, dict)
-        or metadata.get("schema_version") != _VIDEO_STRATEGY_SCHEMA_VERSION
-        or metadata.get("pipeline") != _VIDEO_PIPELINE
-        or not isinstance(metadata.get("video_strategy"), dict)
-    ):
-        raise MarketingValidationError
-    try:
-        strategy = VideoCreativeStrategy.model_validate(metadata["video_strategy"])
-    except ValidationError:
-        raise MarketingValidationError from None
-    if (
-        strategy.duration_seconds != value.duration_seconds
-        or strategy.aspect_ratio != value.aspect_ratio
-    ):
-        raise MarketingValidationError
-    return strategy
 
 
-def _valid_video_provider_identifier(value: object, *, maximum: int) -> bool:
-    return (
-        isinstance(value, str)
-        and value == value.strip()
-        and 1 <= len(value) <= maximum
-    )
 
 
-def _safe_video_provider_key(provider: VideoGenerationProvider) -> str | None:
-    value = _safe_provider_attribute(provider, "provider_name")
-    return value if _valid_video_provider_identifier(value, maximum=64) else None
 
 
-async def create_video_creative_strategy(
-    session: AsyncSession,
-    *,
-    business_id: UUID,
-    actor_user_id: UUID,
-    data: VideoCreativeCreateRequest,
-    provider: AIAgentProvider,
-) -> CreativeAsset:
-    campaign = (
-        await get_campaign(session, business_id=business_id, campaign_id=data.campaign_id)
-        if data.campaign_id
-        else None
-    )
-    content = (
-        await get_content(session, business_id=business_id, content_id=data.content_id)
-        if data.content_id
-        else None
-    )
-    if campaign and content and content.campaign_id != campaign.id:
-        raise MarketingValidationError
-
-    authorized_offer, claim_source = _campaign_offer_claim(campaign)
-    content_offer, content_claim_source = _content_offer_claim(content)
-    if content_offer is not None:
-        authorized_offer, claim_source = content_offer, content_claim_source
-    cta_capabilities = await _trusted_cta_capabilities(
-        session,
-        business_id=business_id,
-        campaign_id=(
-            campaign.id
-            if campaign is not None
-            else content.campaign_id if content is not None else None
-        ),
-    )
-    trusted_content_cta = _normalize_generated_cta(
-        content.cta if content is not None else None,
-        capabilities=cta_capabilities,
-    )
-
-    task = _build_video_strategy_task(
-        data=data,
-        campaign=campaign,
-        content=content,
-        trusted_content_cta=trusted_content_cta,
-        authorized_offer=authorized_offer,
-        claim_source=claim_source,
-    )
-    try:
-        request = await _build_cmo_execution_request(session, business_id, task)
-    except ValidationError:
-        _log_creative_strategy_failure(
-            "video_strategy_request_invalid",
-            provider=provider,
-            expected_channel=content.channel if content is not None else None,
-        )
-        raise MarketingAIError from None
-
-    try:
-        execution = await execute_ai_agent_typed_with_metadata(
-            session,
-            business_id,
-            request,
-            provider,
-            VideoCreativeStrategy,
-            max_output_tokens=4_000,
-        )
-    except AIAgentResponseError:
-        _log_creative_strategy_failure(
-            "video_strategy_schema_invalid",
-            provider=provider,
-            expected_channel=content.channel if content is not None else None,
-        )
-        raise MarketingAIError from None
-    except AIAgentProviderError:
-        _log_creative_strategy_failure(
-            "video_strategy_provider_failed",
-            provider=provider,
-            expected_channel=content.channel if content is not None else None,
-        )
-        raise MarketingAIError from None
-    except AIAgentError:
-        raise MarketingAIError from None
-
-    try:
-        strategy = VideoCreativeStrategy.model_validate(execution.output)
-    except ValidationError:
-        _log_creative_strategy_failure(
-            "video_strategy_schema_invalid",
-            provider=provider,
-            expected_channel=content.channel if content is not None else None,
-            provider_request_id=_creative_strategy_request_id(execution),
-        )
-        raise MarketingAIError from None
-
-    if strategy.recommendations or strategy.proposed_actions or strategy.evidence_source_ids:
-        raise MarketingAIError
-    if strategy.duration_seconds != data.duration_seconds or strategy.aspect_ratio != data.aspect_ratio:
-        raise MarketingAIError
-    if content is not None and strategy.recommended_channel != content.channel:
-        raise MarketingAIError
-    strategy_cta = _normalize_generated_cta(
-        strategy.cta,
-        capabilities=cta_capabilities,
-    )
-    if content is not None and content.cta is not None:
-        strategy_cta = trusted_content_cta
-    strategy = strategy.model_copy(update={"cta": strategy_cta})
-    if _contains_creative_instruction_copy(
-        strategy.hook,
-        strategy.script,
-        strategy.cta,
-        strategy.end_card,
-        *(scene.on_screen_copy for scene in strategy.scenes),
-        *(scene.voiceover for scene in strategy.scenes),
-    ):
-        raise MarketingAIError
-
-    returned_offer = _normalized_claim(strategy.offer)
-    if strategy.claim_source != "none":
-        raise MarketingAIError
-    if authorized_offer is not None:
-        if returned_offer not in {None, authorized_offer}:
-            raise MarketingAIError
-        strategy = strategy.model_copy(
-            update={"offer": authorized_offer, "claim_source": claim_source}
-        )
-    elif returned_offer is not None or _contains_unclassified_promotional_claim(
-        strategy.hook,
-        strategy.script,
-        strategy.end_card,
-        *(scene.on_screen_copy for scene in strategy.scenes),
-        *(scene.voiceover for scene in strategy.scenes),
-    ):
-        raise MarketingAIError
-
-    try:
-        strategy = VideoCreativeStrategy.model_validate(strategy.model_dump())
-    except ValidationError:
-        raise MarketingAIError from None
-    try:
-        shared_master_plan = build_master_plan_from_video_strategy(
-            strategy=strategy,
-            instructions=data.instructions,
-            aspect_ratio=data.aspect_ratio,
-        )
-        # Validate the media adapter from the same shared identity. The current
-        # provider-neutral strategy is retained as the public contract, while
-        # these compact fields make the shared creative identity explicit.
-        build_video_execution_plan(
-            shared_master_plan,
-            duration_seconds=data.duration_seconds,
-        )
-        strategy = strategy.model_copy(
-            update={
-                "creative_territory_key": shared_master_plan.territory_key,
-                "creative_concept_name": shared_master_plan.concept_name,
-                "campaign_mechanism": shared_master_plan.campaign_mechanism,
-                "composition_family": shared_master_plan.composition.family,
-            }
-        )
-    except (TypeError, ValueError, ValidationError):
-        raise MarketingAIError from None
-    asset_type = {
-        "9:16": "video_vertical",
-        "16:9": "video_landscape",
-        "1:1": "video_square",
-    }[data.aspect_ratio]
-    dimensions = {
-        "9:16": (1080, 1920),
-        "16:9": (1920, 1080),
-        "1:1": (1080, 1080),
-    }[data.aspect_ratio]
-    value = CreativeAsset(
-        business_id=business_id,
-        campaign_id=data.campaign_id,
-        content_id=data.content_id,
-        asset_type=asset_type,
-        media_type="video",
-        source_type="ai_brief",
-        instructions=data.instructions,
-        visual_direction=strategy.storyboard_summary,
-        generation_status="strategy_ready",
-        storage_reference=None,
-        width=dimensions[0],
-        height=dimensions[1],
-        aspect_ratio=data.aspect_ratio,
-        alt_text=None,
-        duration_seconds=data.duration_seconds,
-        creative_metadata=_video_strategy_metadata(
-            strategy,
-            phase="planning_complete",
-            master_plan=shared_master_plan,
-        ),
-    )
-    session.add(value)
-    await _flush(session)
-    record_audit(
-        session,
-        business_id=business_id,
-        actor_user_id=actor_user_id,
-        event_type="marketing.video_strategy_created",
-        entity_type="marketing_creative_asset",
-        entity_id=value.id,
-        summary=(
-            "Created a bounded, grounded video strategy; no generation provider "
-            "was called and nothing was published."
-        ),
-        after_value=_provider_usage_audit_value(execution.provider_metadata),
-    )
-    return value
 
 
-async def start_video_generation(
-    session: AsyncSession,
-    *,
-    business_id: UUID,
-    creative_asset_id: UUID,
-    actor_user_id: UUID,
-    provider: VideoGenerationProvider,
-) -> CreativeAsset:
-    value = await _lock_creative_asset(
-        session,
-        business_id=business_id,
-        creative_asset_id=creative_asset_id,
-    )
-    if value.business_id != business_id:
-        raise MarketingNotFoundError
-    if value.media_type != "video":
-        raise MarketingStateError
-    if value.provider_job_reference is not None:
-        if not _valid_video_provider_identifier(value.provider_key, maximum=64):
-            raise MarketingValidationError
-        if not _valid_video_provider_identifier(
-            value.provider_job_reference,
-            maximum=255,
-        ):
-            raise MarketingValidationError
-        return value
-    if value.generation_status not in {
-        "strategy_ready",
-        "provider_required",
-        "failed",
-    }:
-        raise MarketingStateError
-    try:
-        strategy = _video_strategy_from_asset(value)
-        shared_master_plan = build_master_plan_from_video_strategy(
-            strategy=strategy,
-            instructions=(
-                value.instructions
-                or value.visual_direction
-                or "the validated campaign story"
-            ),
-            aspect_ratio=value.aspect_ratio or "",
-        )
-        video_execution_plan = build_video_execution_plan(
-            shared_master_plan,
-            duration_seconds=value.duration_seconds or 0,
-        )
-        if (
-            strategy.composition_family is not None
-            and strategy.composition_family != shared_master_plan.composition.family
-        ):
-            raise MarketingValidationError
-        if (
-            strategy.creative_territory_key is not None
-            and strategy.creative_territory_key != shared_master_plan.territory_key
-        ):
-            raise MarketingValidationError
-        if (
-            strategy.creative_concept_name is not None
-            and strategy.creative_concept_name != shared_master_plan.concept_name
-        ):
-            raise MarketingValidationError
-        if (
-            strategy.campaign_mechanism is not None
-            and strategy.campaign_mechanism != shared_master_plan.campaign_mechanism
-        ):
-            raise MarketingValidationError
-        idempotency_key = str(
-            uuid5(
-                _VIDEO_IDEMPOTENCY_NAMESPACE,
-                f"{business_id}:{value.id}",
-            )
-        )
-        request = VideoGenerationRequest(
-            business_id=business_id,
-            creative_asset_id=value.id,
-            strategy_json=strategy.canonical_json(),
-            duration_seconds=value.duration_seconds or 0,
-            aspect_ratio=value.aspect_ratio or "",
-            idempotency_key=idempotency_key,
-            creative_territory_key=shared_master_plan.territory_key,
-            creative_concept_name=shared_master_plan.concept_name,
-            campaign_mechanism=shared_master_plan.campaign_mechanism,
-            composition_family=shared_master_plan.composition.family,
-            execution_plan_json=video_execution_plan.model_dump_json(),
-        )
-    except (MarketingValidationError, ValueError):
-        raise MarketingValidationError from None
-
-    if not provider.configured:
-        value.generation_status = "provider_required"
-        value.provider_key = None
-        value.provider_job_reference = None
-        value.creative_metadata = {
-            **(value.creative_metadata or {}),
-            "phase": "provider_required",
-        }
-        await _flush(session)
-        record_audit(
-            session,
-            business_id=business_id,
-            actor_user_id=actor_user_id,
-            event_type="marketing.video_generation_provider_required",
-            entity_type="marketing_creative_asset",
-            entity_id=value.id,
-            summary=(
-                "Video strategy is ready, but no video provider is configured; "
-                "no video was generated and nothing was published."
-            ),
-        )
-        return value
-
-    value.creative_metadata = {
-        **(value.creative_metadata or {}),
-        "submission_idempotency_key": idempotency_key,
-    }
-    try:
-        submission = await provider.submit(request)
-    except VideoProviderNotConfiguredError:
-        value.generation_status = "provider_required"
-        value.provider_key = None
-        value.provider_job_reference = None
-    except VideoProviderError:
-        value.generation_status = "failed"
-        value.provider_key = _safe_video_provider_key(provider)
-        value.provider_job_reference = None
-    else:
-        value.generation_status = "queued"
-        value.provider_key = submission.provider_name
-        value.provider_job_reference = submission.provider_job_reference
-    value.creative_metadata = {
-        **(value.creative_metadata or {}),
-        "phase": value.generation_status,
-    }
-    await _flush(session)
-    record_audit(
-        session,
-        business_id=business_id,
-        actor_user_id=actor_user_id,
-        event_type="marketing.video_generation_submission_recorded",
-        entity_type="marketing_creative_asset",
-        entity_id=value.id,
-        summary=(
-            f"Recorded truthful video generation state {value.generation_status}; "
-            "nothing was published."
-        ),
-    )
-    return value
 
 
-def _creative_visual_generation_instructions(
-    strategy: CreativeStrategyProposal,
-    direction: CreativeDirectionPlan,
-    *,
-    research_context: PublicCreativeResearchContext,
-    aspect_ratio: str,
-    brand_identity: CreativeBrandIdentity,
-    story_mode: CreativeStoryMode = "offering_proof",
-    correction: str | None = None,
-    authoritative_context: AuthoritativeCreativeContext | None = None,
-    master_plan: CreativeMasterPlan | None = None,
-) -> str:
-    """
-    Produce one bounded, renderer-safe raw-visual prompt.
-
-    The 5,000-character provider boundary is authoritative. Exact tenant identity,
-    exact marketing copy, credentials, storage references and private provider data
-    never enter this prompt.
-
-    Mandatory commercial policy, renderer safety and server-owned retry corrections
-    are preserved in full. Only redundant or expendable art-direction detail may be
-    shortened.
-    """
-
-    max_provider_instructions = 5_000
-
-    resolved_master_plan = master_plan or build_creative_master_plan(
-        strategy=strategy,
-        direction=direction,
-        aspect_ratio=aspect_ratio,
-    )
-
-    base_direction = build_visual_art_direction(
-        strategy=strategy,
-        direction=direction,
-        context=research_context,
-        aspect_ratio=aspect_ratio,
-        primary_color=brand_identity.primary_color,
-        secondary_color=brand_identity.secondary_color,
-        accent_color=brand_identity.accent_color,
-        story_mode=story_mode,
-        correction=correction,
-        authoritative_context=authoritative_context,
-    )
-
-    # These lines are represented again in protected fixed sections below.
-    # Removing them from the expendable base avoids duplicate policy and ensures
-    # retry corrections can never disappear when the base direction is shortened.
-    redundant_base_prefixes = (
-        "Originality:",
-        "DO NOT GENERATE ",
-        "Do not turn an offer ",
-        "Correction for this attempt:",
-    )
-
-    base_lines = tuple(
-        line.rstrip()
-        for line in base_direction.splitlines()
-        if not any(
-            line.startswith(prefix)
-            for prefix in redundant_base_prefixes
-        )
-    )
-
-    bounded_base = "\n".join(base_lines).strip()
-
-    mandatory_renderer_safety = (
-        "MANDATORY RAW-RENDERER SAFETY:\n"
-        "- Do not imitate or reproduce any source design.\n"
-        "- Generate no letters, words, numbers, typography, logos, fake brand "
-        "marks, watermarks, interface text, offer or CTA copy, fake product labels, "
-        "or invented branded packaging.\n"
-        "- Keep the reserved deterministic copy/logo area visually quiet. The "
-        "application adds exact marketing copy and the real tenant logo afterward."
-    )
-
-    correction_section = ""
-
-    if correction is not None:
-        normalized_correction = " ".join(correction.split()).strip()
-
-        # All production retry/variation corrections are server-owned and short.
-        # Refuse unexpected expansion rather than truncating a corrective contract.
-        if not normalized_correction or len(normalized_correction) > 600:
-            raise ValueError(
-                "Raw visual correction exceeded the server-owned safe budget"
-            )
-
-        correction_section = (
-            "Correction for this attempt:\n"
-            f"{normalized_correction}"
-        )
-
-    policy_sections = tuple(
-        section
-        for section in (
-            world_class_raw_visual_contract(story_mode).strip(),
-            brand_identity.provider_palette_instruction().strip(),
-            correction_section,
-            mandatory_renderer_safety,
-        )
-        if section
-    )
-
-    policy_tail = "\n\n".join(policy_sections)
-
-    # The V2 still prompt is the primary art-direction contract. Reserve space
-    # for the existing server-owned direction as well as the non-negotiable
-    # safety/palette sections before asking the prompt builder to bound it.
-    v2_prompt_budget = (
-        max_provider_instructions
-        - len(policy_tail)
-        - (5 * len("\n\n"))
-        - 500
-    )
-    if v2_prompt_budget < 800:
-        raise ValueError(
-            "Mandatory raw-visual policy leaves insufficient V2 prompt budget"
-        )
-    image_execution = build_image_execution_plan(
-        resolved_master_plan,
-        max_prompt_chars=min(5_000, v2_prompt_budget),
-    )
-    fixed_sections = (image_execution.still_prompt.strip(),) + policy_sections
-    fixed_tail = "\n\n".join(fixed_sections)
-
-    # One separator is required between the dynamic art direction and the
-    # protected fixed policy/correction tail.
-    base_budget = (
-        max_provider_instructions
-        - len(fixed_tail)
-        - len("\n\n")
-    )
-
-    if base_budget < 500:
-        # Never solve policy growth by silently deleting the actual campaign idea.
-        raise ValueError(
-            "Mandatory raw-visual policy leaves insufficient renderer prompt budget"
-        )
-
-    if len(bounded_base) > base_budget:
-        kept_lines: list[str] = []
-        used = 0
-
-        for line in bounded_base.splitlines():
-            separator_cost = 1 if kept_lines else 0
-            remaining = base_budget - used - separator_cost
-
-            if remaining <= 0:
-                break
-
-            if len(line) <= remaining:
-                kept_lines.append(line)
-                used += separator_cost + len(line)
-                continue
-
-            if remaining >= 32:
-                fragment = line[: remaining - 1].rstrip() + "…"
-                kept_lines.append(fragment)
-
-            break
-
-        bounded_base = "\n".join(kept_lines).strip()
-
-    instructions = "\n\n".join(
-        (
-            bounded_base,
-            fixed_tail,
-        )
-    )
-
-    if not 1 <= len(instructions) <= max_provider_instructions:
-        raise ValueError(
-            "Raw visual generation instructions exceeded the provider-safe budget"
-        )
-
-    normalized = instructions.casefold()
-
-    required_markers = (
-        "swap-logo",
-        (
-            "actual supported product"
-            if story_mode == "offering_proof"
-            else "do not invent a product or service"
-        ),
-        "do not imitate or reproduce",
-        "no letters, words, numbers",
-        "real tenant logo",
-    )
-
-    if any(
-        marker not in normalized
-        for marker in required_markers
-    ):
-        raise ValueError(
-            "Raw visual generation instructions lost a mandatory safety contract"
-        )
-
-    if correction_section and correction_section not in instructions:
-        raise ValueError(
-            "Raw visual generation instructions lost the retry correction"
-        )
-
-    return instructions
 
 
 _MAX_CREATIVE_DIRECTOR_CALLS = 2
 
 
-def _creative_direction_quality_log_fields(
-    direction: CreativeDirectionPlan,
-) -> dict[str, int]:
-    """Safe numeric diagnostics for a rejected renderer-bound direction."""
-    score = direction.selected_concept.scorecard
-    return {
-        "selected_overall_score": score.overall_score,
-        "business_specificity": score.business_specific_relevance,
-        "product_service_mechanism": score.product_relevance,
-        "marketing_idea_strength": score.marketing_idea_strength,
-        "visual_proof": score.visual_storytelling,
-        "commercial_readiness": score.commercial_sophistication,
-        "genericness_risk": score.genericness_risk,
-        "replaceable_brand_risk": score.replaceable_brand_risk,
-    }
 
 
 _CREATIVE_DIRECTOR_REPAIR_INSTRUCTION = (
@@ -4286,2440 +3469,64 @@ _CREATIVE_REPAIR_DEFICIENCIES = frozenset({
 })
 
 
-def _creative_director_repair_context(
-    rejected_scene: object,
-    deficiencies: object = (),
-) -> str:
-    """One repair policy plus bounded conclusions and rejected scene fields."""
-    if not isinstance(rejected_scene, dict) or set(rejected_scene) != {"hero", "story"}:
-        raise ValueError("Creative Director rejected scene is invalid")
-    for field, maximum in (("hero", 500), ("story", 400)):
-        value = rejected_scene[field]
-        if not isinstance(value, str) or not 1 <= len(value) <= maximum:
-            raise ValueError("Creative Director rejected scene is invalid")
-    if (
-        not isinstance(deficiencies, (list, tuple))
-        or len(deficiencies) > 8
-        or any(
-            not isinstance(code, str) or code not in _CREATIVE_REPAIR_DEFICIENCIES
-            for code in deficiencies
-        )
-    ):
-        raise ValueError("Creative Director repair deficiencies are invalid")
-    context = json.dumps({
-        "instruction": _CREATIVE_DIRECTOR_REPAIR_INSTRUCTION,
-        "reason": "concept_quality_failed",
-        "deficiencies": list(dict.fromkeys(deficiencies)),
-        "rejected_proposal": rejected_scene,
-    }, ensure_ascii=False)
-    # The trusted runtime appends server_context separately from the 4,000-char
-    # task, with an 8,000-char cap. Fail rather than let it truncate this policy.
-    if len(context) > 8_000:
-        raise ValueError("Creative Director repair context exceeds its budget")
-    return context
 
 
-async def _creative_direction_with_fallback(
-    session: AsyncSession,
-    *,
-    business_id: UUID,
-    strategy: CreativeStrategyProposal,
-    research: CreativeResearchBundle,
-    context: PublicCreativeResearchContext,
-    provider: AIAgentProvider | None,
-    max_output_tokens: int,
-    story_mode: CreativeStoryMode = "offering_proof",
-    authoritative_context: AuthoritativeCreativeContext | None = None,
-    owner_intent: OwnerCreativeIntent | None = None,
-    value: CreativeAsset | None = None,
-    persist_progress: bool = False,
-    image_attempt: int = 1,
-    previous_direction: CreativeDirectionPlan | None = None,
-) -> tuple[CreativeDirectionPlan, AIAgentProviderMetadata]:
-    """Initial synthesis plus ONE text repair, shared across the entire epoch.
 
-    Reserve each call durably before dispatch. An interrupted call with unknown
-    outcome fails closed on recovery. Save the plan per raw-image attempt so a
-    checkpoint is always reviewed/composed against the direction that produced it.
-    No arbitrary model feedback is forwarded to the next request.
-    """
-    if value is not None and value.business_id != business_id:
-        raise MarketingNotFoundError
-    if (
-        authoritative_context is not None
-        and authoritative_context.business_id != business_id
-    ):
-        raise MarketingNotFoundError
-    epoch = _image_generation_epoch(value) if value is not None else None
-    raw_state = (
-        (value.creative_metadata or {}).get("director_state")
-        if value is not None else None
-    )
-    if isinstance(raw_state, dict) and raw_state.get("epoch") == epoch:
-        state = deepcopy(raw_state)
-        if state.get("mode") != story_mode:
-            raise MarketingAIError
-    else:
-        if (
-            value is not None and epoch is not None
-            and _image_generation_started_attempt(value, generation_epoch=epoch)
-        ):
-            # Old/incomplete metadata cannot establish which concept produced an
-            # existing paid checkpoint. Do not synthesize a replacement for it.
-            logger.info("creative_direction_rejected reason=missing_direction_checkpoint")
-            raise MarketingAIError
-        state = {
-            "checkpoint_version": _CREATIVE_DIRECTOR_CHECKPOINT_VERSION,
-            "epoch": epoch, "mode": story_mode, "calls": 0,
-            "pending": False, "plans": {},
-        }
-    if state.get("checkpoint_version") not in {
-        None,
-        _CREATIVE_DIRECTOR_CHECKPOINT_VERSION,
-    }:
-        raise MarketingAIError
-    state.setdefault(
-        "checkpoint_version",
-        _CREATIVE_DIRECTOR_CHECKPOINT_VERSION,
-    )
-    calls = state.get("calls")
-    if type(calls) is not int or not 0 <= calls <= _MAX_CREATIVE_DIRECTOR_CALLS:
-        raise MarketingAIError
-    if not isinstance(state.get("plans"), dict):
-        raise MarketingAIError
-    empty_metadata = AIAgentProviderMetadata()
 
-    async def save() -> None:
-        if value is None:
-            return
-        if _image_generation_epoch(value) != epoch:
-            raise MarketingStateError
-        metadata = {
-            **(value.creative_metadata or {}), "director_state": deepcopy(state),
-        }
-        try:
-            metadata_bytes = _guard_creative_metadata_size(metadata)
-        except MarketingPersistenceError:
-            await _rollback_session(session)
-            raise
-        value.creative_metadata = metadata
-        await _flush_creative_direction_state(
-            session,
-            metadata_bytes=metadata_bytes,
-        )
-        if persist_progress:
-            await _commit_creative_direction_state(
-                session,
-                metadata_bytes=metadata_bytes,
-            )
 
-    def materially_allowed(direction: CreativeDirectionPlan) -> bool:
-        return (
-            previous_direction is None
-            or creative_directions_materially_differ(previous_direction, direction)
-        )
 
-    def viable(direction: CreativeDirectionPlan) -> bool:
-        return (
-            creative_direction_meets_hard_eligibility(direction)
-            and materially_allowed(direction)
-        )
 
-    def direction_rank(direction: CreativeDirectionPlan) -> tuple[int, ...]:
-        score = direction.selected_concept.scorecard
-        return (
-            score.overall_score,
-            score.marketing_idea_strength,
-            score.visual_storytelling,
-            score.commercial_sophistication,
-            score.business_specific_relevance,
-            score.product_relevance,
-            -score.genericness_risk,
-            -score.replaceable_brand_risk,
-        )
 
-    async def remember(direction: CreativeDirectionPlan) -> None:
-        state["rejected"] = False
-        state.pop("rejected_scene", None)
-        state.pop("repair_deficiencies", None)
-        if value is None:
-            # This path is used only by non-persisted unit-level direction tests.
-            state["plans"][str(image_attempt)] = direction.model_dump(mode="json")
-        else:
-            state["plans"][str(image_attempt)] = CreativeDirectionCheckpoint(
-                generation_epoch=epoch,
-                image_attempt=image_attempt,
-                selected_concept=CreativeConceptProposal.model_validate(
-                    direction.selected_concept.model_dump(exclude={"scorecard"})
-                ),
-                research_fingerprint=direction.research_fingerprint,
-                used_live_research=direction.used_live_research,
-                used_ai_synthesis=direction.used_ai_synthesis,
-            ).model_dump(mode="json")
-        await save()
 
-    cached = state["plans"].get(str(image_attempt))
-    if cached is not None:
-        if not isinstance(cached, dict):
-            raise MarketingAIError
-        try:
-            if cached.get("checkpoint_version") == _CREATIVE_DIRECTOR_CHECKPOINT_VERSION:
-                checkpoint = CreativeDirectionCheckpoint.model_validate(cached)
-                if (
-                    checkpoint.generation_epoch != epoch
-                    or checkpoint.image_attempt != image_attempt
-                ):
-                    raise ValueError("Creative direction checkpoint identity changed")
-                # Never treat persisted numeric scores as authority after recovery.
-                direction = revalidate_selected_creative_concept(
-                    selected_concept=checkpoint.selected_concept,
-                    strategy=strategy,
-                    research=research,
-                    context=context,
-                    story_mode=story_mode,
-                    authoritative_context=authoritative_context,
-                    research_fingerprint=checkpoint.research_fingerprint,
-                    used_live_research=checkpoint.used_live_research,
-                    used_ai_synthesis=checkpoint.used_ai_synthesis,
-                )
-                cached_selected = checkpoint.selected_concept.model_dump()
-            else:
-                # Read older full-plan checkpoints for a safe rolling upgrade,
-                # but immediately replace them with the compact selected-only
-                # form. Persisted scorecards are never used as authority.
-                cached_plan = CreativeDirectionPlan.model_validate(cached)
-                direction = build_creative_direction(
-                    strategy=strategy, research=research, context=context,
-                    story_mode=story_mode,
-                    authoritative_context=authoritative_context,
-                    synthesis=CreativeDirectorSynthesis(candidates=tuple(
-                        CreativeConceptProposal.model_validate(
-                            candidate.model_dump(exclude={"scorecard"})
-                        )
-                        for candidate in cached_plan.candidates
-                    )),
-                )
-                cached_selected = cached_plan.selected_concept.model_dump(
-                    exclude={"scorecard"}
-                )
-        except (ValidationError, ValueError):
-            raise MarketingAIError from None
-        if (
-            not viable(direction)
-            or direction.selected_concept.model_dump(exclude={"scorecard"})
-            != cached_selected
-        ):
-            # A changed winner cannot be attached to an already purchased image.
-            raise MarketingAIError
-        if cached.get("checkpoint_version") != _CREATIVE_DIRECTOR_CHECKPOINT_VERSION:
-            state["plans"][str(image_attempt)] = CreativeDirectionCheckpoint(
-                generation_epoch=epoch,
-                image_attempt=image_attempt,
-                selected_concept=CreativeConceptProposal.model_validate(
-                    direction.selected_concept.model_dump(exclude={"scorecard"})
-                ),
-                research_fingerprint=direction.research_fingerprint,
-                used_live_research=direction.used_live_research,
-                used_ai_synthesis=direction.used_ai_synthesis,
-            ).model_dump(mode="json")
-            await save()
-        return direction.model_copy(update={
-            "used_ai_synthesis": (
-                direction.used_ai_synthesis
-                if cached.get("checkpoint_version") == _CREATIVE_DIRECTOR_CHECKPOINT_VERSION
-                else cached_plan.used_ai_synthesis
-            ),
-        }), empty_metadata
-    if state.get("pending") or state.get("rejected"):
-        raise MarketingAIError
 
-    async def fallback(source: str) -> tuple[CreativeDirectionPlan, AIAgentProviderMetadata]:
-        try:
-            direction = _require_viable_creative_direction(
-                build_grounded_creative_rescue(
-                    strategy=strategy, research=research, context=context,
-                    story_mode=story_mode,
-                    authoritative_context=authoritative_context,
-                    owner_intent=owner_intent,
-                ),
-                provider=provider, source=source,
-            )
-            if not materially_allowed(direction):
-                raise MarketingAIError
-        except (MarketingAIError, ValueError):
-            state["rejected"] = True
-            await save()
-            logger.info(
-                "creative_hard_gate_failed",
-                extra={"failure_codes": ("grounded_rescue_unavailable",)},
-            )
-            raise MarketingAIError from None
-        await remember(direction)
-        logger.info(
-            "creative_grounded_rescue_selected",
-            extra={
-                "source": source,
-                "director_calls": state["calls"],
-                **_creative_direction_quality_log_fields(direction),
-            },
-        )
-        return direction, empty_metadata
 
-    if provider is None:
-        if previous_direction is not None or calls:
-            raise MarketingAIError
-        return await fallback("deterministic_fallback")
 
-    if previous_direction is not None:
-        rejected = previous_direction.selected_concept
-        state["rejected_scene"] = {
-            "hero": rejected.hero_subject, "story": rejected.product_story,
-        }
-        state["repair_deficiencies"] = [
-            *creative_direction_hard_failure_codes(previous_direction),
-            *creative_direction_soft_deficiencies(previous_direction),
-            "not_materially_different",
-        ][:8]
-    best_hard_eligible: tuple[
-        CreativeDirectionPlan,
-        AIAgentProviderMetadata,
-    ] | None = None
-    for call_index in range(calls, _MAX_CREATIVE_DIRECTOR_CALLS):
-        repair = call_index > 0 or previous_direction is not None
-        if repair:
-            logger.info("director_repair_started", extra={"director_call_number": call_index + 1})
-        task = None
-        try:
-            task = build_creative_plan_task(
-                strategy=strategy, research=research, context=context,
-                story_mode=story_mode, repair=repair,
-                owner_intent=owner_intent,
-            )
-            repair_context = (
-                _creative_director_repair_context(
-                    state.get("rejected_scene"),
-                    state.get("repair_deficiencies", ()),
-                )
-                if repair else None
-            )
-            request = await _build_cmo_execution_request(session, business_id, task)
-        except ValueError as error:
-            if repair:
-                diagnostics = {
-                    "director_call_number": call_index + 1,
-                    "max_task_length": MAX_AGENT_TASK_LENGTH,
-                }
-                if task is not None:
-                    diagnostics["task_length"] = len(task)
-                if isinstance(error, CreativeDirectorTaskBudgetError):
-                    diagnostics.update(
-                        task_length=error.task_length,
-                        mandatory_length=error.mandatory_length,
-                    )
-                logger.warning("director_repair_task_invalid", extra=diagnostics)
-            raise MarketingAIError from None
-        if repair:
-            logger.info("director_repair_task_built", extra={
-                "task_length": len(task), "director_call_number": call_index + 1,
-            })
-        state.update(calls=call_index + 1, pending=True)
-        await save()
-        if repair:
-            # Dispatch to the trusted runtime only after construction and the
-            # durable call reservation succeed. This is not an HTTP success log.
-            logger.info("director_repair_dispatched", extra={
-                "task_length": len(task), "director_call_number": call_index + 1,
-            })
-        try:
-            execution = await execute_ai_agent_typed_with_metadata(
-                session, business_id, request, provider, CreativePlan,
-                max_output_tokens=max_output_tokens,
-                server_context=repair_context,
-            )
-        except AIAgentError:
-            state["pending"] = False
-            await save()
-            logger.warning("creative_director_degraded reason=provider_or_schema_failure")
-            if best_hard_eligible is not None:
-                selected, metadata = best_hard_eligible
-                await remember(selected)
-                logger.info(
-                    "creative_soft_quality_below_target_proceeding_to_render",
-                    extra={
-                        "decision_category": "repair_provider_failed_use_initial",
-                        **_creative_direction_quality_log_fields(selected),
-                    },
-                )
-                return selected, metadata
-            return await fallback("provider_failure_grounded_rescue")
-        state["pending"] = False
-        if isinstance(execution.output, CreativePlan):
-            direction = build_creative_direction(
-                strategy=strategy,
-                research=research,
-                context=context,
-                story_mode=story_mode,
-                authoritative_context=authoritative_context,
-                plan=execution.output,
-            )
-        else:
-            # Keep already-deployed in-process callers readable during the
-            # rolling contract transition. New provider calls are typed as
-            # CreativePlan above; persisted legacy checkpoints are adapted in
-            # the recovery branch before this provider boundary.
-            direction = build_creative_direction(
-                strategy=strategy,
-                research=research,
-                context=context,
-                story_mode=story_mode,
-                authoritative_context=authoritative_context,
-                synthesis=execution.output,
-            )
-        hard_failure_codes = list(
-            creative_direction_hard_failure_codes(direction)
-        )
-        if not materially_allowed(direction):
-            hard_failure_codes.append("not_materially_different")
-        hard_eligible = not hard_failure_codes
-        soft_quality_met = creative_direction_meets_quality_floor(direction)
-        if hard_eligible:
-            logger.info(
-                "creative_hard_gate_passed",
-                extra={
-                    "director_call_number": call_index + 1,
-                    **_creative_direction_quality_log_fields(direction),
-                },
-            )
-        else:
-            logger.info(
-                "creative_hard_gate_failed",
-                extra={
-                    "director_call_number": call_index + 1,
-                    "failure_codes": tuple(hard_failure_codes[:8]),
-                    **_creative_direction_quality_log_fields(direction),
-                },
-            )
 
-        if hard_eligible and soft_quality_met:
-            await remember(direction)
-            logger.info(
-                "director_repair_succeeded" if repair else "creative_director_succeeded",
-                extra={"director_call_number": call_index + 1},
-            )
-            return direction, execution.provider_metadata
 
-        if hard_eligible and (
-            best_hard_eligible is None
-            or direction_rank(direction) > direction_rank(best_hard_eligible[0])
-        ):
-            best_hard_eligible = (direction, execution.provider_metadata)
 
-        quality_fields = _creative_direction_quality_log_fields(direction)
-        quality_event = (
-            "director_repair_failed_quality"
-            if repair
-            else "director_initial_failed_quality"
-        )
-        # Preserve the stable event name for tests/monitoring, while emitting a
-        # second Render-visible line with only bounded numeric diagnostics.
-        logger.info(
-            quality_event,
-            extra={
-                "director_call_number": call_index + 1,
-                **quality_fields,
-            },
-        )
-        logger.info(
-            (
-                "creative_direction_quality_scores event=%s call=%d "
-                "overall=%d business=%d mechanism=%d idea=%d visual=%d "
-                "commercial=%d generic=%d replaceable=%d"
-            ),
-            quality_event,
-            call_index + 1,
-            quality_fields["selected_overall_score"],
-            quality_fields["business_specificity"],
-            quality_fields["product_service_mechanism"],
-            quality_fields["marketing_idea_strength"],
-            quality_fields["visual_proof"],
-            quality_fields["commercial_readiness"],
-            quality_fields["genericness_risk"],
-            quality_fields["replaceable_brand_risk"],
-        )
-        rejected = direction.selected_concept
-        state["rejected_scene"] = {
-            "hero": rejected.hero_subject, "story": rejected.product_story,
-        }
-        state["repair_deficiencies"] = list(dict.fromkeys((
-            *hard_failure_codes,
-            *creative_direction_soft_deficiencies(direction),
-        )))[:8]
-        await save()
-        if not repair:
-            logger.info(
-                "creative_soft_quality_repair_requested",
-                extra={
-                    "director_call_number": call_index + 1,
-                    "deficiencies": tuple(state["repair_deficiencies"]),
-                },
-            )
-            continue
 
-        if best_hard_eligible is not None:
-            selected, metadata = best_hard_eligible
-            await remember(selected)
-            logger.info(
-                "creative_soft_quality_below_target_proceeding_to_render",
-                extra={
-                    "decision_category": "best_hard_eligible_after_repair",
-                    **_creative_direction_quality_log_fields(selected),
-                },
-            )
-            return selected, metadata
-        break
 
-    try:
-        return await fallback("bounded_grounded_rescue")
-    except MarketingAIError:
-        logger.info("creative_direction_rejected reason=hard_eligibility_failed")
-        raise
 
 
-def _require_viable_creative_direction(
-    direction: CreativeDirectionPlan,
-    *,
-    provider: AIAgentProvider | None,
-    source: str,
-) -> CreativeDirectionPlan:
-    """Apply only the server-owned hard media-spend gate."""
-    if creative_direction_meets_hard_eligibility(direction):
-        return direction
-    logger.info(
-        "creative_direction_rejected source=%s",
-        source,
-        extra={
-            "provider": _safe_provider_attribute(provider, "provider_name"),
-            "reason": "hard_eligibility_failed",
-            "source": source,
-            "failure_codes": creative_direction_hard_failure_codes(direction),
-            **_creative_direction_quality_log_fields(direction),
-        },
-    )
-    raise MarketingAIError
 
 
-def _provider_usage_audit_value(
-    metadata: AIAgentProviderMetadata,
-) -> str | None:
-    fields: list[str] = []
-    request_id = _safe_ai_diagnostic_identifier(metadata.provider_request_id)
-    if request_id is not None:
-        fields.append(f"provider_request_id={request_id}")
-    if metadata.input_tokens is not None:
-        fields.append(f"input_tokens={metadata.input_tokens}")
-    if metadata.output_tokens is not None:
-        fields.append(f"output_tokens={metadata.output_tokens}")
-    return ";".join(fields) or None
 
 
-_ACTIVE_IMAGE_GENERATION_STATUSES = frozenset({
-    "queued",
-    "generating",
-    "reviewing",
-    "repairing",
-})
 
 
-async def queue_creative_asset_generation(
-    session: AsyncSession,
-    *,
-    business_id: UUID,
-    creative_asset_id: UUID,
-    actor_user_id: UUID,
-) -> CreativeAsset:
-    """Queue one logical image generation and return its truthful asset state."""
-    value = await _lock_creative_asset(
-        session,
-        business_id=business_id,
-        creative_asset_id=creative_asset_id,
-    )
-    return await _queue_creative_asset_value(
-        session,
-        business_id=business_id,
-        value=value,
-        actor_user_id=actor_user_id,
-    )
 
 
-async def queue_creative_asset_regeneration(
-    session: AsyncSession,
-    *,
-    business_id: UUID,
-    creative_asset_id: UUID,
-    actor_user_id: UUID,
-    variation_mode: CreativeVariationMode | None = None,
-) -> CreativeAsset:
-    """Create an immutable creative revision and queue its first generation."""
-    source = await _lock_creative_asset(
-        session,
-        business_id=business_id,
-        creative_asset_id=creative_asset_id,
-    )
-    if (
-        source.media_type != "image"
-        or source.generation_status != "ready"
-        or source.source_type != "future_provider"
-    ):
-        raise MarketingStateError
-    if not source.visual_direction:
-        raise MarketingValidationError
 
-    source_metadata = dict(source.creative_metadata or {})
-    raw_revision_version = source_metadata.get("creative_revision_sequence")
-    revision_version = (
-        raw_revision_version + 1
-        if isinstance(raw_revision_version, int)
-        and not isinstance(raw_revision_version, bool)
-        and 0 <= raw_revision_version < _MAX_CREATIVE_GENERATION_EPOCH
-        else 1
-    )
-    source_metadata["creative_revision_sequence"] = revision_version
-    source.creative_metadata = source_metadata
 
-    variation_identity = variation_mode or "regenerate"
-    revision = CreativeAsset(
-        id=uuid4(),
-        business_id=business_id,
-        campaign_id=source.campaign_id,
-        content_id=source.content_id,
-        asset_type=source.asset_type,
-        media_type="image",
-        source_type="ai_brief",
-        instructions=source.instructions,
-        visual_direction=source.visual_direction,
-        generation_status="brief_ready",
-        storage_reference=None,
-        width=source.width,
-        height=source.height,
-        aspect_ratio=source.aspect_ratio,
-        alt_text=source.alt_text,
-        creative_metadata={
-            "revision_of": str(source.id),
-            "revision_version": revision_version,
-            "variation_mode": variation_identity,
-        },
-    )
-    session.add(revision)
-    await _flush(session)
-    record_audit(
-        session,
-        business_id=business_id,
-        actor_user_id=actor_user_id,
-        event_type="marketing.creative_revision_created",
-        entity_type="marketing_creative_asset",
-        entity_id=revision.id,
-        summary=(
-            "Created a new creative revision from an existing grounded strategy; "
-            "the previous final artwork remains unchanged."
-        ),
-    )
-    return await _queue_creative_asset_value(
-        session,
-        business_id=business_id,
-        value=revision,
-        actor_user_id=actor_user_id,
-    )
 
 
-async def _queue_creative_asset_value(
-    session: AsyncSession,
-    *,
-    business_id: UUID,
-    value: CreativeAsset,
-    actor_user_id: UUID,
-) -> CreativeAsset:
-    if value.business_id != business_id:
-        raise MarketingNotFoundError
-    if value.media_type != "image" or value.source_type not in {
-        "ai_brief",
-        "future_provider",
-    }:
-        raise MarketingStateError
-    if not value.visual_direction:
-        raise MarketingValidationError
 
-    metadata = dict(value.creative_metadata or {})
-    already_active = value.generation_status in _ACTIVE_IMAGE_GENERATION_STATUSES
-    if already_active:
-        generation_epoch = _image_generation_epoch(value)
-        if generation_epoch is None:
-            raise MarketingStateError
-    else:
-        if value.generation_status not in {
-            "brief_ready",
-            "provider_required",
-            "failed",
-        }:
-            raise MarketingStateError
-        generation_epoch = _next_image_generation_epoch(value)
-        metadata = dict(value.creative_metadata or {})
-        metadata["image_generation_version"] = generation_epoch
-        metadata["image_generation_started_attempt"] = 0
-        metadata.pop("image_generation_failure_stage", None)
 
-    variation_identity = metadata.get("variation_mode", "initial")
-    if not isinstance(variation_identity, str) or not variation_identity:
-        variation_identity = "initial"
-    generation_version = metadata.get("image_generation_version")
-    if (
-        not isinstance(generation_version, int)
-        or isinstance(generation_version, bool)
-        or generation_version != generation_epoch
-    ):
-        generation_version = generation_epoch
 
-    metadata.update({
-        "image_generation_epoch": generation_epoch,
-        "image_generation_version": generation_version,
-        "image_generation_variation": variation_identity,
-    })
-    if not already_active or not isinstance(
-        metadata.get("generation_requested_by_user_id"),
-        str,
-    ):
-        metadata["generation_requested_by_user_id"] = str(actor_user_id)
-    value.creative_metadata = metadata
-    value.source_type = "ai_brief"
-    if not already_active:
-        value.generation_status = "queued"
-    value.storage_reference = None
-    await _flush(session)
 
-    try:
-        await enqueue_job(
-            session,
-            business_id=business_id,
-            job_type="generate_creative_asset",
-            idempotency_key=creative_asset_generation_job_key(
-                value.id,
-                generation_epoch,
-                generation_version,
-                variation_identity,
-            ),
-            creative_asset_id=value.id,
-        )
-    except BackgroundJobValidationError:
-        raise MarketingStateError from None
-    except BackgroundJobPersistenceError:
-        raise MarketingPersistenceError from None
 
-    record_audit(
-        session,
-        business_id=business_id,
-        actor_user_id=actor_user_id,
-        event_type="marketing.creative_generation_queued",
-        entity_type="marketing_creative_asset",
-        entity_id=value.id,
-        summary=(
-            "Queued one durable creative generation from the saved grounded "
-            "strategy; nothing was published."
-        ),
-    )
-    return value
 
 
-async def generate_creative_asset(
-    session: AsyncSession,
-    *,
-    business_id: UUID,
-    creative_asset_id: UUID,
-    actor_user_id: UUID,
-    provider: CreativeGenerationProvider,
-    storage: ObjectStorage,
-    research_engine: CreativeResearchEngine | None = None,
-    director_provider: AIAgentProvider | None = None,
-    director_max_output_tokens: int = 4_000,
-    visual_review_provider: CreativeVisualReviewProvider | None = None,
-    max_visual_review_calls: int = 2,
-    max_image_attempts: int = 2,
-    max_composition_attempts: int = 5,
-    quality_threshold: int = 82,
-    require_semantic_review: bool = False,
-    generation_epoch: int | None = None,
-    persist_progress: bool = False,
-) -> CreativeAsset:
-    """
-    Turn grounded Creative Intelligence into a final branded PNG.
 
-    Provider failures are persisted as truthful asset states and returned
-    normally. They are intentionally not raised as MarketingAIError because
-    the API mutation helper rolls exceptions back.
 
-    Raw provider bytes remain transient. No social provider is contacted and
-    nothing is published.
-    """
-    value = await _get(
-        session,
-        CreativeAsset,
-        business_id,
-        creative_asset_id,
-    )
 
-    return await _generate_creative_asset_value(
-        session,
-        business_id=business_id,
-        value=value,
-        actor_user_id=actor_user_id,
-        provider=provider,
-        storage=storage,
-        research_engine=research_engine,
-        director_provider=director_provider,
-        director_max_output_tokens=director_max_output_tokens,
-        visual_review_provider=visual_review_provider,
-        max_visual_review_calls=max_visual_review_calls,
-        max_image_attempts=max_image_attempts,
-        max_composition_attempts=max_composition_attempts,
-        quality_threshold=quality_threshold,
-        require_semantic_review=require_semantic_review,
-        generation_epoch=generation_epoch,
-        persist_progress=persist_progress,
-    )
 
 
-async def regenerate_creative_asset(
-    session: AsyncSession,
-    *,
-    business_id: UUID,
-    creative_asset_id: UUID,
-    actor_user_id: UUID,
-    provider: CreativeGenerationProvider,
-    storage: ObjectStorage,
-    research_engine: CreativeResearchEngine | None = None,
-    director_provider: AIAgentProvider | None = None,
-    director_max_output_tokens: int = 4_000,
-    visual_review_provider: CreativeVisualReviewProvider | None = None,
-    max_visual_review_calls: int = 2,
-    max_image_attempts: int = 2,
-    max_composition_attempts: int = 5,
-    quality_threshold: int = 82,
-    variation_mode: CreativeVariationMode | None = None,
-    require_semantic_review: bool = False,
-) -> CreativeAsset:
-    """Create and generate a new immutable creative revision."""
-    source = await _get(
-        session,
-        CreativeAsset,
-        business_id,
-        creative_asset_id,
-    )
-    if (
-        source.media_type != "image"
-        or source.generation_status != "ready"
-        or source.source_type != "future_provider"
-    ):
-        raise MarketingStateError
-    if not source.visual_direction:
-        raise MarketingValidationError
 
-    revision = CreativeAsset(
-        id=uuid4(),
-        business_id=business_id,
-        campaign_id=source.campaign_id,
-        content_id=source.content_id,
-        asset_type=source.asset_type,
-        media_type="image",
-        source_type="ai_brief",
-        instructions=source.instructions,
-        visual_direction=source.visual_direction,
-        generation_status="brief_ready",
-        storage_reference=None,
-        width=source.width,
-        height=source.height,
-        aspect_ratio=source.aspect_ratio,
-        alt_text=source.alt_text,
-        creative_metadata={
-            "revision_of": str(source.id),
-            **(
-                {"variation_mode": variation_mode}
-                if variation_mode is not None
-                else {}
-            ),
-        },
-    )
-    session.add(revision)
-    await _flush(session)
-    record_audit(
-        session,
-        business_id=business_id,
-        actor_user_id=actor_user_id,
-        event_type="marketing.creative_revision_created",
-        entity_type="marketing_creative_asset",
-        entity_id=revision.id,
-        summary=(
-            "Created a new creative revision from an existing grounded strategy; "
-            "the previous final artwork remains unchanged."
-        ),
-    )
-    return await _generate_creative_asset_value(
-        session,
-        business_id=business_id,
-        value=revision,
-        actor_user_id=actor_user_id,
-        provider=provider,
-        storage=storage,
-        research_engine=research_engine,
-        director_provider=director_provider,
-        director_max_output_tokens=director_max_output_tokens,
-        visual_review_provider=visual_review_provider,
-        max_visual_review_calls=max_visual_review_calls,
-        max_image_attempts=max_image_attempts,
-        max_composition_attempts=max_composition_attempts,
-        quality_threshold=quality_threshold,
-        require_semantic_review=require_semantic_review,
-    )
 
 
-async def run_queued_creative_asset_generation(
-    session: AsyncSession,
-    *,
-    business_id: UUID,
-    creative_asset_id: UUID,
-    provider: CreativeGenerationProvider,
-    storage: ObjectStorage,
-    research_engine: CreativeResearchEngine | None = None,
-    director_provider: AIAgentProvider | None = None,
-    director_max_output_tokens: int = 4_000,
-    visual_review_provider: CreativeVisualReviewProvider | None = None,
-    max_visual_review_calls: int = 2,
-    max_image_attempts: int = 2,
-    max_composition_attempts: int = 5,
-    quality_threshold: int = 82,
-    require_semantic_review: bool = True,
-) -> CreativeAsset:
-    """Run one persisted creative job without changing its logical epoch."""
-    value = await _lock_creative_asset(
-        session,
-        business_id=business_id,
-        creative_asset_id=creative_asset_id,
-    )
-    if value.generation_status == "ready":
-        if value.source_type == "future_provider" and value.storage_reference:
-            return value
-        raise MarketingStateError
-    if value.generation_status not in _ACTIVE_IMAGE_GENERATION_STATUSES | {"failed"}:
-        raise MarketingStateError
 
-    generation_epoch = _image_generation_epoch(value)
-    if generation_epoch is None:
-        raise MarketingValidationError
-    metadata = dict(value.creative_metadata or {})
-    requested_by = metadata.get("generation_requested_by_user_id")
-    try:
-        actor_user_id = UUID(requested_by) if isinstance(requested_by, str) else None
-    except ValueError:
-        actor_user_id = None
-    if actor_user_id is None:
-        raise MarketingValidationError
 
-    metadata.pop("image_generation_failure_stage", None)
-    value.creative_metadata = metadata
-    await _persist_creative_generation_progress(
-        session,
-        value,
-        status="generating",
-        commit=True,
-    )
-    return await _generate_creative_asset_value(
-        session,
-        business_id=business_id,
-        value=value,
-        actor_user_id=actor_user_id,
-        provider=provider,
-        storage=storage,
-        research_engine=research_engine,
-        director_provider=director_provider,
-        director_max_output_tokens=director_max_output_tokens,
-        visual_review_provider=visual_review_provider,
-        max_visual_review_calls=max_visual_review_calls,
-        max_image_attempts=max_image_attempts,
-        max_composition_attempts=max_composition_attempts,
-        quality_threshold=quality_threshold,
-        require_semantic_review=require_semantic_review,
-        generation_epoch=generation_epoch,
-        persist_progress=True,
-    )
 
 
-async def _generate_creative_asset_value(
-    session: AsyncSession,
-    *,
-    business_id: UUID,
-    value: CreativeAsset,
-    actor_user_id: UUID,
-    provider: CreativeGenerationProvider,
-    storage: ObjectStorage,
-    research_engine: CreativeResearchEngine | None,
-    director_provider: AIAgentProvider | None,
-    director_max_output_tokens: int,
-    visual_review_provider: CreativeVisualReviewProvider | None,
-    max_visual_review_calls: int,
-    max_image_attempts: int,
-    max_composition_attempts: int,
-    quality_threshold: int,
-    require_semantic_review: bool,
-    generation_epoch: int | None = None,
-    persist_progress: bool = False,
-) -> CreativeAsset:
-    if value.business_id != business_id:
-        raise MarketingNotFoundError
-    if value.media_type != "image":
-        raise MarketingStateError
-    if value.generation_status in {"ready", "archived"}:
-        raise MarketingStateError
 
-    if value.generation_status not in {
-        "brief_ready",
-        "provider_required",
-        "failed",
-    } | _ACTIVE_IMAGE_GENERATION_STATUSES:
-        raise MarketingStateError
 
-    if value.source_type not in {"ai_brief", "future_provider"}:
-        raise MarketingStateError
 
-    if not value.visual_direction:
-        raise MarketingValidationError
 
-    try:
-        strategy = CreativeStrategyProposal.model_validate_json(
-            value.visual_direction
-        )
-    except ValidationError:
-        # Legacy/unstructured briefs remain preserved but are not silently
-        # trusted for provider generation. A new grounded strategy is required.
-        raise MarketingValidationError from None
-    owner_intent = _parse_owner_creative_intent(value.instructions)
-    strategy = _apply_owner_copy_locks(strategy, owner_intent)
 
-    try:
-        target_width, target_height = resolve_final_dimensions(
-            value.asset_type,
-            value.width,
-            value.height,
-            value.aspect_ratio,
-        )
-    except CreativeCompositionError:
-        raise MarketingValidationError from None
 
-    business = await _business(session, business_id)
-    authoritative_context: AuthoritativeCreativeContext | None = None
-    if isinstance(session, AsyncSession):
-        try:
-            authoritative_context = await assemble_authoritative_creative_context(
-                session,
-                business_id=business_id,
-                business_type=business.business_type,
-            )
-        except (AIContextAssemblyError, ValueError):
-            # Creative authority is required for operational capability claims;
-            # an unavailable or malformed source set must never fall through to
-            # generated strategy text or persistent memory as a substitute.
-            raise MarketingPersistenceError from None
-    content = (
-        await get_content(
-            session,
-            business_id=business_id,
-            content_id=value.content_id,
-        )
-        if value.content_id is not None
-        else None
-    )
-    branding = await _creative_branding(session, business_id)
-    logo_content = await _creative_logo_content(
-        storage,
-        business_id=business_id,
-        branding=branding,
-    )
 
-    brand_identity = build_creative_brand_identity(
-        business=business,
-        branding=branding,
-        sanitized_logo_content=logo_content,
-    )
 
-    if (
-        not 1 <= max_image_attempts <= 2
-        or not 1 <= max_composition_attempts <= 5
-        or not 60 <= quality_threshold <= 95
-        or not 1_000 <= director_max_output_tokens <= 4_000
-        or not 0 <= max_visual_review_calls <= 2
-    ):
-        raise MarketingValidationError
-
-    if require_semantic_review and (
-        visual_review_provider is None
-        or max_visual_review_calls == 0
-    ):
-        logger.warning(
-            "creative_visual_review_required_but_unavailable",
-            extra={
-                "provider": (
-                    _safe_provider_attribute(
-                        visual_review_provider,
-                        "provider_name",
-                    )
-                    if visual_review_provider is not None
-                    else "unconfigured"
-                ),
-                "reason": (
-                    "review_disabled"
-                    if max_visual_review_calls == 0
-                    else "provider_unavailable"
-                ),
-            },
-        )
-        return await _fail_creative_generation(
-            session,
-            business_id=business_id,
-            value=value,
-            actor_user_id=actor_user_id,
-            stage="semantic_review",
-        )
-
-    if generation_epoch is None:
-        generation_epoch = _next_image_generation_epoch(value)
-    elif _image_generation_epoch(value) != generation_epoch:
-        raise MarketingStateError
-
-    campaign_context_id = value.campaign_id or (
-        content.campaign_id if content is not None else None
-    )
-    creative_story_mode = await _creative_story_mode(
-        session,
-        business_id=business_id,
-        campaign_id=campaign_context_id,
-    )
-
-    channel = (
-        content.channel if content is not None else strategy.recommended_channel
-    )
-    research_context = derive_public_research_context(
-        business_type=business.business_type,
-        channel=channel,
-        asset_type=value.asset_type,
-        strategy_text=(
-            f"{value.instructions or ''} {strategy.marketing_goal} "
-            f"{strategy.campaign_angle}"
-        ),
-        visual_text=(
-            f"{strategy.visual_concept} {strategy.mood} "
-            f"{strategy.brand_treatment}"
-        ),
-    )
-    if research_engine is None:
-        fallback_request = build_research_request(
-            research_context,
-            max_results=12,
-        )
-        research = degraded_research_bundle(
-            fallback_request,
-            provider="internal_patterns",
-        )
-    else:
-        research = await research_engine.research(research_context)
-
-    if research.degraded:
-        logger.info(
-            "creative_research_degraded_continuing",
-            extra={
-                "provider": research.provider,
-                "reference_count": research.reference_count,
-            },
-        )
-
-    record_audit(
-        session,
-        business_id=business_id,
-        actor_user_id=actor_user_id,
-        event_type="marketing.creative_research_completed",
-        entity_type="marketing_creative_asset",
-        entity_id=value.id,
-        summary=(
-            f"Creative research completed with {research.reference_count} public "
-            f"references across {len(research.reference_domains)} domains; only "
-            "abstract design principles were used."
-        ),
-    )
-    try:
-        direction, director_metadata = await _creative_direction_with_fallback(
-            session, business_id=business_id, strategy=strategy, research=research,
-            context=research_context, provider=director_provider,
-            max_output_tokens=director_max_output_tokens, story_mode=creative_story_mode,
-            authoritative_context=authoritative_context,
-            owner_intent=owner_intent,
-            value=value, persist_progress=persist_progress,
-        )
-    except MarketingAIError:
-        logger.info("concept_failure_before_image")
-        return await _fail_creative_generation(
-            session, business_id=business_id, value=value,
-            actor_user_id=actor_user_id, stage="direction_quality",
-        )
-    record_audit(
-        session,
-        business_id=business_id,
-        actor_user_id=actor_user_id,
-        event_type="marketing.creative_direction_selected",
-        entity_type="marketing_creative_asset",
-        entity_id=value.id,
-        summary=(
-            f"Selected {direction.selected_concept.concept_name} from "
-            f"{len(direction.candidates)} original scored concepts using "
-            f"{'AI synthesis' if direction.used_ai_synthesis else 'the deterministic fallback'}."
-        ),
-        after_value=_provider_usage_audit_value(director_metadata),
-    )
-
-    final: CreativeCompositionResult | None = None
-    quality: CreativeQualityAssessment | None = None
-    correction = _creative_variation_direction(
-        value.creative_metadata,
-        story_mode=creative_story_mode,
-    )
-    visual_review_calls = 0
-    for image_attempt in range(1, max_image_attempts + 1):
-        state = deepcopy((value.creative_metadata or {})["director_state"])
-        attempt_plan = state["plans"].get(str(image_attempt))
-        if image_attempt > 1 and attempt_plan is not None:
-            try:
-                direction, _ = await _creative_direction_with_fallback(
-                    session, business_id=business_id, strategy=strategy,
-                    research=research, context=research_context,
-                    provider=director_provider, max_output_tokens=director_max_output_tokens,
-                    story_mode=creative_story_mode,
-                    authoritative_context=authoritative_context,
-                    owner_intent=owner_intent, value=value,
-                    persist_progress=persist_progress, image_attempt=image_attempt,
-                )
-            except MarketingAIError:
-                return await _fail_creative_generation(
-                    session, business_id=business_id, value=value,
-                    actor_user_id=actor_user_id, stage="direction_quality",
-                )
-        elif attempt_plan is None:
-            state["plans"][str(image_attempt)] = CreativeDirectionCheckpoint(
-                generation_epoch=generation_epoch,
-                image_attempt=image_attempt,
-                selected_concept=CreativeConceptProposal.model_validate(
-                    direction.selected_concept.model_dump(exclude={"scorecard"})
-                ),
-                research_fingerprint=direction.research_fingerprint,
-                used_live_research=direction.used_live_research,
-                used_ai_synthesis=direction.used_ai_synthesis,
-            ).model_dump(mode="json")
-            metadata = {
-                **(value.creative_metadata or {}), "director_state": state,
-            }
-            try:
-                _guard_creative_metadata_size(metadata)
-            except MarketingPersistenceError:
-                await _rollback_session(session)
-                raise
-            value.creative_metadata = metadata
-        elif (
-            isinstance(attempt_plan, dict)
-            and attempt_plan.get("checkpoint_version")
-            != _CREATIVE_DIRECTOR_CHECKPOINT_VERSION
-        ):
-            # A legacy caller or an older worker may have supplied a full plan
-            # without passing through the checkpoint upgrader above. Compact it
-            # before the next creative metadata flush.
-            state["checkpoint_version"] = _CREATIVE_DIRECTOR_CHECKPOINT_VERSION
-            state["plans"][str(image_attempt)] = CreativeDirectionCheckpoint(
-                generation_epoch=generation_epoch,
-                image_attempt=image_attempt,
-                selected_concept=CreativeConceptProposal.model_validate(
-                    direction.selected_concept.model_dump(exclude={"scorecard"})
-                ),
-                research_fingerprint=direction.research_fingerprint,
-                used_live_research=direction.used_live_research,
-                used_ai_synthesis=direction.used_ai_synthesis,
-            ).model_dump(mode="json")
-            metadata = {
-                **(value.creative_metadata or {}), "director_state": state,
-            }
-            try:
-                _guard_creative_metadata_size(metadata)
-            except MarketingPersistenceError:
-                await _rollback_session(session)
-                raise
-            value.creative_metadata = metadata
-        logger.info("creative_image_attempt attempt=%d", image_attempt,
-                    extra={"image_attempt_number": image_attempt})
-        if image_attempt > 1:
-            await _persist_creative_generation_progress(
-                session,
-                value,
-                status="repairing",
-                commit=persist_progress,
-            )
-        master_plan = build_creative_master_plan(
-            strategy=strategy,
-            direction=direction,
-            aspect_ratio=(value.aspect_ratio or f"{target_width}:{target_height}"),
-            territory_key=direction.selected_concept.concept_name,
-        )
-        instructions = _creative_visual_generation_instructions(
-            strategy,
-            direction,
-            research_context=research_context,
-            aspect_ratio=(
-                value.aspect_ratio
-                or f"{target_width}:{target_height}"
-            ),
-            brand_identity=brand_identity,
-            story_mode=creative_story_mode,
-            correction=correction,
-            authoritative_context=authoritative_context,
-            master_plan=master_plan,
-        )
-        result: CreativeGenerationResult | None = None
-        checkpoint_key: str | None = None
-
-        # Production storage implementations inherit ObjectStorage. Existing
-        # lightweight unit-test doubles intentionally continue through the
-        # established provider path; dedicated storage tests cover checkpoint IO.
-        if isinstance(storage, ObjectStorage):
-            checkpoint_key = _creative_raw_checkpoint_key(
-                business_id=business_id,
-                creative_asset_id=value.id,
-                generation_epoch=generation_epoch,
-                image_attempt=image_attempt,
-            )
-            try:
-                checkpoint_content = await _load_creative_raw_checkpoint(
-                    storage,
-                    checkpoint_key,
-                )
-            except StorageError:
-                # Never spend another provider call when durable checkpoint
-                # storage itself cannot be read reliably.
-                await _record_creative_generation_dependency_failure(
-                    session,
-                    business_id=business_id,
-                    value=value,
-                    actor_user_id=actor_user_id,
-                    stage="checkpoint_read",
-                    commit=persist_progress,
-                )
-                raise MarketingPersistenceError from None
-
-            if checkpoint_content is not None:
-                result = CreativeGenerationResult(
-                    content=checkpoint_content,
-                    width=target_width,
-                    height=target_height,
-                    provider_request_id=None,
-                )
-                logger.info(
-                    "creative_image_checkpoint_reused attempt=%d",
-                    image_attempt,
-                    extra={
-                        "attempt_number": image_attempt,
-                        "source": "durable_checkpoint",
-                    },
-                )
-
-        if result is None:
-            started_attempt = _image_generation_started_attempt(
-                value,
-                generation_epoch=generation_epoch,
-            )
-            if started_attempt >= image_attempt:
-                return await _fail_creative_generation(
-                    session,
-                    business_id=business_id,
-                    value=value,
-                    actor_user_id=actor_user_id,
-                    stage="provider_outcome_uncertain",
-                )
-            metadata = dict(value.creative_metadata or {})
-            metadata["image_generation_started_attempt"] = image_attempt
-            value.creative_metadata = metadata
-            if persist_progress:
-                await _flush(session)
-                try:
-                    await session.commit()
-                except SQLAlchemyError:
-                    await _rollback_session(session)
-                    raise MarketingPersistenceError from None
-            try:
-                result = await provider.generate_draft(
-                    CreativeGenerationRequest(
-                        business_id=business_id,
-                        creative_asset_id=value.id,
-                        instructions=instructions,
-                        width=target_width,
-                        height=target_height,
-                        aspect_ratio=value.aspect_ratio,
-                    )
-                )
-            except CreativeProviderNotConfiguredError:
-                await _set_creative_generation_state(
-                    session,
-                    value,
-                    status="provider_required",
-                )
-                record_audit(
-                    session,
-                    business_id=business_id,
-                    actor_user_id=actor_user_id,
-                    event_type="marketing.creative_generation_provider_required",
-                    entity_type="marketing_creative_asset",
-                    entity_id=value.id,
-                    summary=(
-                        "Creative visual generation requires a configured image provider; "
-                        "no image was created and nothing was published."
-                    ),
-                )
-                return value
-            except ValueError:
-                raise MarketingValidationError from None
-            except CreativeProviderError:
-                return await _fail_creative_generation(
-                    session,
-                    business_id=business_id,
-                    value=value,
-                    actor_user_id=actor_user_id,
-                    stage="provider",
-                )
-
-            # This is deliberately the first operation after a successful paid
-            # provider result. Composition and semantic review happen only after
-            # the raw visual has a durable recovery copy.
-            if checkpoint_key is not None:
-                try:
-                    await _store_creative_raw_checkpoint(
-                        storage,
-                        checkpoint_key,
-                        result.content,
-                    )
-                except StorageError:
-                    return await _fail_creative_generation(
-                        session,
-                        business_id=business_id,
-                        value=value,
-                        actor_user_id=actor_user_id,
-                        stage="checkpoint_storage",
-                    )
-                logger.info(
-                    "creative_image_checkpoint_stored attempt=%d",
-                    image_attempt,
-                    extra={
-                        "attempt_number": image_attempt,
-                        "source": "provider_result",
-                    },
-                )
-
-        try:
-            composition_input = CreativeCompositionInput(
-                raw_visual=result.content,
-                target_width=target_width,
-                target_height=target_height,
-                asset_type=value.asset_type,
-                headline=strategy.headline,
-                supporting_copy=_supporting_copy_for_composition(
-                    strategy.supporting_message,
-                    headline=strategy.headline,
-                    offer=strategy.offer,
-                ),
-                offer=strategy.offer,
-                cta=strategy.cta,
-                business_name=brand_identity.business_name,
-                primary_color=brand_identity.primary_color,
-                secondary_color=brand_identity.secondary_color,
-                accent_color=brand_identity.accent_color,
-                canvas_color=brand_identity.canvas_color,
-                canvas_text_color=brand_identity.canvas_text_color,
-                cta_fill_color=brand_identity.cta_fill_color,
-                cta_text_color=brand_identity.cta_text_color,
-                muted_surface_color=brand_identity.muted_surface_color,
-                border_color=brand_identity.border_color,
-                logo_content=logo_content,
-                composition_direction=direction.selected_concept.layout_intent,
-                negative_space=direction.selected_concept.text_zone,
-                channel=channel,
-                offer_treatment=direction.selected_concept.offer_treatment,
-                cta_treatment=direction.selected_concept.cta_treatment,
-                concept_name=direction.selected_concept.concept_name,
-                visual_density=direction.selected_concept.visual_density,
-                focal_area=direction.selected_concept.focal_area,
-                brand_expression=direction.selected_concept.brand_expression,
-                composition_family=master_plan.composition.family,
-                composition_plan=master_plan.composition,
-            )
-            compositor = CreativeCompositor(
-                max_candidates=max_composition_attempts,
-            )
-            composed_values = await asyncio.to_thread(
-                compositor.compose_candidates,
-                composition_input,
-            )
-            if not composed_values or any(
-                not isinstance(candidate, CreativeCompositionResult)
-                for candidate in composed_values
-            ):
-                raise CreativeCompositionError(
-                    "Compositor returned an invalid candidate set"
-                )
-        except CreativeCompositionError as exc:
-            if (
-                image_attempt < max_image_attempts
-                and _is_retryable_raw_visual_failure(exc)
-            ):
-                correction = (
-                    "Return a valid, quieter raw visual with one clear subject and "
-                    "an uncluttered copy corridor; keep all typography absent."
-                )
-                logger.info(
-                    "creative_quality_retry attempt=%d reason=raw_visual "
-                    "source=composition_exception",
-                    image_attempt,
-                    extra={
-                        "attempt_number": image_attempt,
-                        "reason": "raw_visual",
-                        "source": "composition_exception",
-                    },
-                )
-                continue
-            return await _fail_creative_generation(
-                session,
-                business_id=business_id,
-                value=value,
-                actor_user_id=actor_user_id,
-                stage="composition",
-            )
-
-        candidates = composed_values
-        semantic_review_available = (
-            visual_review_provider is not None and max_visual_review_calls > 0
-        )
-        eligible_candidates: list[
-            tuple[CreativeCompositionResult, CreativeQualityAssessment]
-        ] = []
-        candidate_failure_kinds: list[str | None] = []
-        for candidate in candidates:
-            assessment = assess_creative_quality(
-                candidate,
-                threshold=quality_threshold,
-            )
-            if assessment.approved_for_delivery or (
-                semantic_review_available
-                and assessment.eligible_for_semantic_review
-            ):
-                eligible_candidates.append((candidate, assessment))
-            else:
-                candidate_failure_kinds.append(assessment.failure_kind)
-
-        # The compositor already ranks post-render layout evidence. Re-rank the
-        # technically valid subset by the complete deterministic assessment,
-        # preserving compositor order when scores tie.
-        eligible_candidates.sort(
-            key=lambda item: item[1].overall_score,
-            reverse=True,
-        )
-
-        if not eligible_candidates:
-            all_failed_from_raw_visual = bool(candidate_failure_kinds) and all(
-                kind == "raw_visual" for kind in candidate_failure_kinds
-            )
-            deterministic_decision = route_creative_failure(
-                raw_media_failure=all_failed_from_raw_visual,
-                composition_failure=not all_failed_from_raw_visual,
-            )
-            if (
-                deterministic_decision.action == "regenerate_media"
-                and image_attempt < max_image_attempts
-            ):
-                correction = _raw_visual_regeneration_correction(
-                    story_mode=creative_story_mode,
-                )
-                logger.info(
-                    "creative_quality_retry attempt=%d reason=raw_visual "
-                    "source=deterministic_quality",
-                    image_attempt,
-                    extra={
-                        "attempt_number": image_attempt,
-                        "reason": "raw_visual",
-                        "source": "deterministic_quality",
-                    },
-                )
-                continue
-            return await _fail_creative_generation(
-                session,
-                business_id=business_id,
-                value=value,
-                actor_user_id=actor_user_id,
-                stage="quality",
-            )
-
-        if visual_review_provider is None or max_visual_review_calls == 0:
-            if require_semantic_review:
-                return await _fail_creative_generation(
-                    session,
-                    business_id=business_id,
-                    value=value,
-                    actor_user_id=actor_user_id,
-                    stage="semantic_review",
-                )
-
-            final, quality = eligible_candidates[0]
-
-            if visual_review_provider is None:
-                logger.info(
-                    "creative_visual_review_degraded provider=unconfigured",
-                    extra={"provider": "unconfigured", "reason": "unavailable"},
-                )
-
-            break
-
-        await _persist_creative_generation_progress(
-            session,
-            value,
-            status="reviewing",
-            commit=persist_progress,
-        )
-
-        critic_raw_failure = False
-        critic_concept_failure = False
-        for candidate, assessment in eligible_candidates:
-            if visual_review_calls >= max_visual_review_calls:
-                safe_review_provider = (
-                    _safe_provider_attribute(
-                        visual_review_provider,
-                        "provider_name",
-                    )
-                    or "unknown"
-                )
-                logger.warning(
-                    "creative_visual_review_degraded provider=%s "
-                    "reason=budget_exhausted",
-                    safe_review_provider,
-                    extra={
-                        "provider": safe_review_provider,
-                        "reason": "budget_exhausted",
-                    },
-                )
-                # The global semantic-call ceiling remains authoritative.
-                # Required-review callers must fail closed rather than promote
-                # an image that has never passed semantic approval.
-                if require_semantic_review:
-                    return await _fail_creative_generation(
-                        session,
-                        business_id=business_id,
-                        value=value,
-                        actor_user_id=actor_user_id,
-                        stage="semantic_review",
-                    )
-
-                # Explicitly optional low-level callers retain the prior
-                # deterministic-QA degradation behavior.
-                if assessment.approved_for_delivery:
-                    final, quality = candidate, assessment
-                    break
-                continue
-            visual_review_calls += 1
-            review_request = CreativeVisualReviewRequest(
-                final_png=candidate.content,
-                campaign_objective=research_context.campaign_objective,
-                channel=research_context.channel,
-                concept_name=direction.selected_concept.concept_name,
-                concept_expectations=_visual_review_concept_expectations(
-                    direction,
-                    master_plan=master_plan,
-                ),
-                expected_headline=strategy.headline,
-                expected_offer=strategy.offer,
-                expected_cta=strategy.cta,
-                brand_expectations=_visual_review_brand_expectations(brand_identity),
-                quality_threshold=quality_threshold,
-                review_mode=creative_story_mode,
-            )
-            try:
-                review_result = await visual_review_provider.review(review_request)
-                if not isinstance(review_result, CreativeVisualReviewResult):
-                    raise TypeError("Visual reviewer returned an invalid result")
-                review = validate_visual_review_for_mode(
-                    review_result.review,
-                    story_mode=creative_story_mode,
-                )
-            except Exception:
-                # The semantic critic is optional. A provider, timeout, or
-                # validation failure safely falls back to the already-passed
-                # deterministic candidate without exposing exception text.
-                logger.warning(
-                    "creative_visual_review_degraded provider=%s",
-                    _safe_provider_attribute(
-                        visual_review_provider,
-                        "provider_name",
-                    )
-                    or "unknown",
-                    extra={
-                        "provider": _safe_provider_attribute(
-                            visual_review_provider,
-                            "provider_name",
-                        ),
-                        "reason": "provider_or_schema_failure",
-                    },
-                )
-                if require_semantic_review:
-                    return await _fail_creative_generation(
-                        session,
-                        business_id=business_id,
-                        value=value,
-                        actor_user_id=actor_user_id,
-                        stage="semantic_review",
-                    )
-
-                if assessment.approved_for_delivery:
-                    final, quality = candidate, assessment
-                    break
-                continue
-
-            # Operational diagnosis only. These values are bounded typed
-            # classifications from the visual-review schema. Never log image
-            # bytes, prompts, Business Brain context, arbitrary repair text,
-            # credentials, provider payloads, or tenant storage identifiers.
-            logger.info(
-                "creative_visual_review_completed "
-                "mode=%s repair_class=%s approved=%s score=%d hard_failures=%s",
-                creative_story_mode,
-                review.repair_class,
-                review.approved,
-                semantic_visual_quality_score(review),
-                ",".join(review.hard_failures) or "none",
-                extra={
-                    "review_mode": creative_story_mode,
-                    "repair_class": review.repair_class,
-                    "approved": review.approved,
-                    "semantic_score": semantic_visual_quality_score(review),
-                    "hard_failures": ",".join(review.hard_failures) or "none",
-                },
-            )
-
-            record_audit(
-                session,
-                business_id=business_id,
-                actor_user_id=actor_user_id,
-                event_type="marketing.creative_visual_review_completed",
-                entity_type="marketing_creative_asset",
-                entity_id=value.id,
-                summary=(
-                    "Semantic visual review completed for one deterministic "
-                    f"candidate with decision {review.repair_class}; hard failures: "
-                    f"{','.join(review.hard_failures) or 'none'}."
-                ),
-                after_value=_provider_usage_audit_value(review_result.metadata),
-            )
-            if semantic_visual_review_meets_threshold(
-                review,
-                threshold=quality_threshold,
-            ):
-                final, quality = candidate, assessment
-                break
-            if review.approved:
-                # The typed response clears the fixed per-dimension floor, but
-                # this candidate missed the server-owned overall quality target.
-                # Continue locally without converting the miss into a raw-image
-                # repair or allowing this reviewed candidate to degrade later.
-                continue
-            repair_decision = route_creative_failure(
-                concept_failure=semantic_review_has_concept_failure(review),
-                raw_media_failure=review.repair_class == "raw_visual",
-                composition_failure=review.repair_class == "layout",
-                branding_typography_failure=review.repair_class == "layout",
-                codes=review.hard_failures,
-            )
-            logger.info(
-                "creative_repair_routed action=%s failure_class=%s media_spend=%s",
-                repair_decision.action,
-                repair_decision.failure_class,
-                repair_decision.media_spend_allowed,
-                extra={
-                    "repair_action": repair_decision.action,
-                    "failure_class": repair_decision.failure_class,
-                    "media_spend_allowed": repair_decision.media_spend_allowed,
-                },
-            )
-            if repair_decision.action == "reselect_concept":
-                critic_concept_failure = True
-                break
-            if repair_decision.action == "regenerate_media":
-                critic_raw_failure = True
-                correction = _raw_visual_regeneration_correction(
-                    review,
-                    story_mode=creative_story_mode,
-                )
-                break
-            # A layout rejection intentionally falls through to the next local
-            # candidate. It never consumes another raw-image generation call.
-
-        if final is not None:
-            break
-        if (
-            require_semantic_review and visual_review_calls >= max_visual_review_calls
-            and (critic_concept_failure or critic_raw_failure)
-        ):
-            # A new image cannot be delivered without an available final review.
-            logger.warning("creative_visual_review_degraded reason=budget_exhausted")
-            return await _fail_creative_generation(
-                session, business_id=business_id, value=value,
-                actor_user_id=actor_user_id, stage="semantic_review",
-            )
-        if critic_concept_failure and image_attempt < max_image_attempts:
-            logger.info("semantic_concept_repair", extra={"image_attempt_number": image_attempt})
-            try:
-                direction, _ = await _creative_direction_with_fallback(
-                    session, business_id=business_id, strategy=strategy, research=research,
-                    context=research_context, provider=director_provider,
-                    max_output_tokens=director_max_output_tokens, story_mode=creative_story_mode,
-                    authoritative_context=authoritative_context,
-                    owner_intent=owner_intent,
-                    value=value, persist_progress=persist_progress,
-                    image_attempt=image_attempt + 1, previous_direction=direction,
-                )
-            except MarketingAIError:
-                return await _fail_creative_generation(
-                    session, business_id=business_id, value=value,
-                    actor_user_id=actor_user_id, stage="quality",
-                )
-            correction = None
-            continue
-        if critic_raw_failure and image_attempt < max_image_attempts:
-            logger.info("raw_visual_retry", extra={"image_attempt_number": image_attempt})
-            logger.info(
-                "creative_quality_retry attempt=%d reason=raw_visual "
-                "source=semantic_review",
-                image_attempt,
-                extra={
-                    "attempt_number": image_attempt,
-                    "reason": "raw_visual",
-                    "source": "semantic_review",
-                },
-            )
-            continue
-        return await _fail_creative_generation(
-            session,
-            business_id=business_id,
-            value=value,
-            actor_user_id=actor_user_id,
-            stage="quality",
-        )
-
-    if final is None:
-        return await _fail_creative_generation(
-            session,
-            business_id=business_id,
-            value=value,
-            actor_user_id=actor_user_id,
-            stage="quality",
-        )
-
-    value = await _lock_creative_asset(
-        session,
-        business_id=business_id,
-        creative_asset_id=value.id,
-    )
-    if value.generation_status == "ready":
-        if value.source_type == "future_provider" and value.storage_reference:
-            return value
-        raise MarketingStateError
-    if value.generation_status not in {
-        "brief_ready",
-        "provider_required",
-        "failed",
-    } | _ACTIVE_IMAGE_GENERATION_STATUSES:
-        raise MarketingStateError
-    if value.source_type not in {"ai_brief", "future_provider"}:
-        raise MarketingStateError
-
-    object_key = _final_creative_storage_key(
-        business_id=business_id,
-        creative_asset_id=value.id,
-        generation_epoch=generation_epoch,
-    )
-    put_attempted = False
-    try:
-        put_attempted = True
-        await storage.put(object_key, final.content, "image/png")
-        public_reference = storage.public_url(object_key)
-        if (
-            not isinstance(public_reference, str)
-            or not public_reference.strip()
-            or len(public_reference) > 1024
-        ):
-            raise StorageError("Invalid final creative reference")
-    except (StorageError, ValueError):
-        if put_attempted:
-            await _best_effort_delete(storage, object_key)
-        return await _fail_creative_generation(
-            session,
-            business_id=business_id,
-            value=value,
-            actor_user_id=actor_user_id,
-            stage="storage",
-        )
-    except Exception:
-        if put_attempted:
-            await _best_effort_delete(storage, object_key)
-        raise
-
-    previous = (
-        value.source_type,
-        value.generation_status,
-        value.storage_reference,
-        value.width,
-        value.height,
-    )
-    value.source_type = "future_provider"
-    value.generation_status = "ready"
-    value.storage_reference = public_reference
-    value.width = final.width
-    value.height = final.height
-
-    # The object store and database cannot share a transaction. Retain a
-    # transaction-local compensation hook until the API commit succeeds so a
-    # failed commit does not strand tenant artwork in storage.
-    _register_creative_storage_compensation(session, storage, object_key)
-
-    try:
-        await _flush(session)
-    except MarketingPersistenceError:
-        (
-            value.source_type,
-            value.generation_status,
-            value.storage_reference,
-            value.width,
-            value.height,
-        ) = previous
-        _remove_creative_storage_compensation(session, object_key)
-        await _best_effort_delete(storage, object_key)
-        raise
-
-    record_audit(
-        session,
-        business_id=business_id,
-        actor_user_id=actor_user_id,
-        event_type="marketing.creative_generated",
-        entity_type="marketing_creative_asset",
-        entity_id=value.id,
-        summary=(
-            f"Generated and stored a validated {final.width}x{final.height} final "
-            f"branded creative using the {final.selected_layout} layout"
-            f"{f' at deterministic quality score {quality.overall_score}' if quality else ''}; nothing "
-            "was published externally."
-        ),
-    )
-
-    if quality is not None:
-        logger.info(
-            "creative_deterministic_quality_selected score=%d layout=%s",
-            quality.overall_score,
-            final.selected_layout,
-            extra={
-                "safe_quality_score": quality.overall_score,
-                "selected_layout": final.selected_layout,
-            },
-        )
-
-    return value
-
-
-def _visual_review_concept_expectations(
-    direction: CreativeDirectionPlan,
-    *,
-    master_plan: CreativeMasterPlan | None = None,
-) -> str:
-    """
-    Give the semantic critic the commercial logic it must visually verify.
-
-    Only the already-approved selected concept is included. No private Business
-    Brain source text, research URLs, credentials, storage identifiers, provider
-    metadata, or hidden reasoning enters this boundary.
-
-    The result is deterministically bounded to the existing critic field budget.
-    """
-    concept = direction.selected_concept
-
-    fields: tuple[tuple[str, str, int], ...] = (
-        ("Idea", concept.marketing_idea, 118),
-        ("Customer", concept.customer_care_reason, 104),
-        ("Hero", concept.hero_subject, 92),
-        ("Why hero", concept.hero_relevance, 92),
-        ("Mechanism", concept.product_story, 118),
-        ("Hook", concept.scroll_stopping_hook, 76),
-    )
-
-    if master_plan is not None:
-        fields += (
-            ("Composition", master_plan.composition.family, 48),
-            ("Negative space", master_plan.composition.negative_space_strategy, 84),
-        )
-
-    parts: list[str] = []
-
-    for label, value, budget in fields:
-        normalized = " ".join(str(value).split()).strip()
-
-        if not normalized:
-            continue
-
-        if len(normalized) > budget:
-            normalized = normalized[: budget - 1].rstrip() + "…"
-
-        parts.append(f"{label}: {normalized}")
-
-    result = " | ".join(parts)
-
-    # CreativeVisualReviewRequest already uses a 600-character bounded field.
-    # Keep this helper independently defensive so future call-site changes do
-    # not accidentally widen the provider privacy boundary.
-    return result[:600]
-
-
-def _visual_review_brand_expectations(
-    brand_identity: CreativeBrandIdentity,
-) -> str:
-    """
-    Return only provider-safe tenant identity expectations.
-
-    No logo bytes, storage identifiers, logo URLs, or private metadata leave the
-    application boundary.
-    """
-    palette = ", ".join(
-        dict.fromkeys(
-            (
-                brand_identity.primary_color,
-                brand_identity.secondary_color,
-                brand_identity.accent_color,
-            )
-        )
-    )
-
-    logo_expectation = (
-        "the exact tenant logo should appear as a controlled deterministic identity layer"
-        if brand_identity.has_tenant_logo
-        else "the business-name fallback should provide the controlled identity layer"
-    )
-
-    return (
-        f"Visible identity must clearly belong to this business. Controlled palette: "
-        f"{palette}. {logo_expectation}. The palette should feel intentionally integrated "
-        "with the campaign rather than pasted onto an unrelated stock image. Do not infer "
-        "or invent any additional brand claims."
-    )
-
-
-def _raw_visual_regeneration_correction(
-    review: CreativeVisualReview | None = None,
-    *,
-    story_mode: CreativeStoryMode = "offering_proof",
-) -> str:
-    """Map typed semantic failures to server-owned retry instructions."""
-    if story_mode not in {"offering_proof", "brand_offer"}:
-        raise ValueError("Creative story mode is invalid")
-
-    if review is not None and review.accidental_generated_text:
-        return (
-            "Regenerate a true non-typographic hero visual with no letters, words, "
-            "numbers, badges, offer copy, UI labels, watermarks, or signs. Keep all "
-            "typography absent and preserve a quiet copy corridor."
-        )
-
-    if review is not None and review.irrelevant_visual:
-        if story_mode == "brand_offer":
-            return (
-                "Regenerate one campaign-relevant hero subject with a clear focal "
-                "point, restrained background, and quiet copy corridor. Use only "
-                "grounded campaign, category, audience, offer, and brand context. "
-                "Do not invent a product, service, package, app, application, "
-                "interface, feature, workflow, integration, fulfillment process, "
-                "fulfillment path, customer fact, or unsupported outcome. Keep "
-                "typography absent."
-            )
-
-        return (
-            "Regenerate one objective-relevant hero subject with a clear focal point, "
-            "a restrained background, and a quiet copy corridor. Keep all typography "
-            "absent."
-        )
-
-    if review is not None and (
-        review.replaceable_brand_creative
-        or review.generic_template_output
-        or review.decorative_abstraction_dominates
-    ):
-        if story_mode == "brand_offer":
-            return (
-                "Regenerate a campaign-specific, brand-owned commercial scene that "
-                "would stop making sense if an unrelated company replaced the brand. "
-                "Create one meaningful visual mechanism from grounded campaign, "
-                "audience, category, offer, and brand context only. Do not invent a "
-                "product, service, package, app, application, interface, feature, "
-                "workflow, integration, fulfillment process, fulfillment path, customer "
-                "fact, or unsupported outcome. Reject generic stock imagery and "
-                "decorative gradients, rings, circles, waves, or arbitrary geometry. "
-                "Keep typography absent and preserve a quiet copy corridor."
-            )
-
-        return (
-            "Regenerate a business-specific campaign scene that would stop making "
-            "sense if an unrelated company replaced the brand. Show the supported "
-            "product or service doing meaningful work for its customer. Do not use "
-            "gradients, rings, circles, waves, or arbitrary geometry as the central "
-            "idea. Keep all typography absent and preserve a quiet copy corridor."
-        )
-
-    if review is not None and (
-        review.no_product_service_story
-        or review.meaningless_focal_story
-        or review.commercially_weak
-        or review.irrelevant_decorative_art
-    ):
-        if story_mode == "brand_offer":
-            return (
-                "Regenerate an art-directed campaign story with one grounded visual "
-                "mechanism and one clear campaign-relevant tension, contrast, reveal, "
-                "occasion, transition, or consequence when supported. Remove generic "
-                "stock-template cues and decorative filler. Do not invent a product, "
-                "service, package, app, application, interface, feature, workflow, "
-                "integration, fulfillment process, fulfillment path, customer fact, or "
-                "unsupported outcome. Keep typography absent and preserve a quiet "
-                "copy corridor."
-            )
-
-        return (
-            "Regenerate an art-directed commercial story with one credible product "
-            "or service moment and a visible customer-relevant outcome. Remove "
-            "decorative filler and generic stock-template cues. Keep all typography "
-            "absent and preserve a quiet copy corridor."
-        )
-
-    return (
-        "Reduce background noise and competing focal points. Keep one clear subject, "
-        "a large low-detail copy zone, and keep all typography absent."
-    )
-
-
-def _creative_variation_direction(
-    metadata: dict[str, object] | None,
-    *,
-    story_mode: CreativeStoryMode = "offering_proof",
-) -> str | None:
-    if story_mode not in {"offering_proof", "brand_offer"}:
-        raise ValueError("Creative story mode is invalid")
-
-    mode = (metadata or {}).get("variation_mode")
-
-    if story_mode == "brand_offer":
-        if mode == "product_led":
-            return (
-                "Use the strongest grounded campaign or brand subject as the hero "
-                "without inventing a product or service. Build one distinctive "
-                "campaign-specific commercial idea rather than generic stock imagery."
-            )
-
-        if mode == "outcome_led":
-            return (
-                "Lead with a grounded viewer tension, contrast, reveal, occasion, or "
-                "consequence only when supported by campaign context. Do not invent "
-                "a product, service, workflow, customer fact, or unsupported outcome."
-            )
-
-    return {
-        "alternate_metaphor": (
-            "Use a materially different business-specific marketing metaphor and "
-            "hero story, not a recolor or crop of the previous direction."
-        ),
-        "product_led": (
-            "Make the supported product or service unmistakably lead the visual story."
-        ),
-        "outcome_led": (
-            "Lead with a credible customer-relevant outcome caused by the supported offering."
-        ),
-        "minimal": (
-            "Use a restrained editorial composition with one relevant hero and no decorative filler."
-        ),
-        "cinematic": (
-            "Use an art-directed cinematic commercial scene with credible depth and a specific story."
-        ),
-        "alternate_composition": (
-            "Change the spatial rhythm, camera framing, hero placement, and copy corridor materially."
-        ),
-    }.get(mode if isinstance(mode, str) else "")
-
-
-def _is_retryable_raw_visual_failure(
-    exception: CreativeCompositionError,
-) -> bool:
-    current: BaseException | None = exception
-    for _depth in range(5):
-        if current is None:
-            break
-        message = str(current).casefold()
-        if any(
-            marker in message
-            for marker in (
-                "raw visual is invalid",
-                "raw visual format is unsupported",
-                "image dimensions exceed safe limits",
-                "animated raw visuals",
-            )
-        ):
-            return True
-        current = current.__cause__
-    return False
-
-
-async def _lock_creative_asset(
-    session: AsyncSession,
-    *,
-    business_id: UUID,
-    creative_asset_id: UUID,
-) -> CreativeAsset:
-    """Lock a freshly reloaded tenant asset for a state-changing operation."""
-    statement = (
-        select(CreativeAsset)
-        .where(
-            CreativeAsset.id == creative_asset_id,
-            CreativeAsset.business_id == business_id,
-        )
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    try:
-        value = await session.scalar(statement)
-    except SQLAlchemyError:
-        raise MarketingPersistenceError from None
-    if value is None:
-        raise MarketingNotFoundError
-    if value.business_id != business_id:
-        raise MarketingNotFoundError
-    return value
-
-
-async def _creative_branding(
-    session: AsyncSession,
-    business_id: UUID,
-) -> BusinessBranding | None:
-    try:
-        branding = await session.scalar(
-            select(BusinessBranding).where(BusinessBranding.business_id == business_id)
-        )
-    except SQLAlchemyError:
-        raise MarketingPersistenceError from None
-    if branding is not None and not isinstance(branding, BusinessBranding):
-        raise MarketingPersistenceError
-    return branding
-
-
-async def _creative_logo_content(
-    storage: ObjectStorage,
-    *,
-    business_id: UUID,
-    branding: BusinessBranding | None,
-) -> bytes | None:
-    object_key = validated_business_logo_key(branding, business_id=business_id)
-    if object_key is None:
-        return None
-    try:
-        content = await storage.get(object_key, max_bytes=MAX_LOGO_UPLOAD_BYTES)
-        return sanitize_logo_bytes(content).content
-    except (StorageError, LogoError, ValueError):
-        # A logo is optional presentation data. Invalid or unavailable logo
-        # bytes never cause a tenant's otherwise valid creative to disappear.
-        return None
-
-
-def _image_generation_epoch(value: CreativeAsset) -> int | None:
-    metadata = value.creative_metadata or {}
-    raw_epoch = metadata.get("image_generation_epoch")
-    return (
-        raw_epoch
-        if isinstance(raw_epoch, int)
-        and not isinstance(raw_epoch, bool)
-        and 1 <= raw_epoch <= _MAX_CREATIVE_GENERATION_EPOCH
-        else None
-    )
-
-
-def _next_image_generation_epoch(value: CreativeAsset) -> int:
-    metadata = dict(value.creative_metadata or {})
-    current = _image_generation_epoch(value) or 0
-    if current >= _MAX_CREATIVE_GENERATION_EPOCH:
-        raise MarketingStateError
-    epoch = current + 1
-    metadata["image_generation_epoch"] = epoch
-    metadata["image_generation_started_attempt"] = 0
-    metadata.pop("director_state", None)
-    value.creative_metadata = metadata
-    return epoch
-
-
-def _image_generation_started_attempt(
-    value: CreativeAsset,
-    *,
-    generation_epoch: int,
-) -> int:
-    if _image_generation_epoch(value) != generation_epoch:
-        raise MarketingStateError
-    raw_attempt = (value.creative_metadata or {}).get(
-        "image_generation_started_attempt"
-    )
-    return (
-        raw_attempt
-        if isinstance(raw_attempt, int)
-        and not isinstance(raw_attempt, bool)
-        and 0 <= raw_attempt <= 2
-        else 0
-    )
-
-
-def _creative_raw_checkpoint_key(
-    *,
-    business_id: UUID,
-    creative_asset_id: UUID,
-    generation_epoch: int,
-    image_attempt: int,
-) -> str:
-    if not 1 <= generation_epoch <= _MAX_CREATIVE_GENERATION_EPOCH:
-        raise ValueError("Creative generation epoch is invalid")
-    if not 1 <= image_attempt <= 2:
-        raise ValueError("Creative image attempt is invalid")
-    return (
-        f"businesses/{business_id}/marketing/creatives/"
-        f"{creative_asset_id}/raw/"
-        f"generation-{generation_epoch}/attempt-{image_attempt}.png"
-    )
-
-
-async def _load_creative_raw_checkpoint(
-    storage: ObjectStorage,
-    object_key: str,
-) -> bytes | None:
-    try:
-        content = await storage.get(
-            object_key,
-            max_bytes=_CREATIVE_RAW_CHECKPOINT_MAX_BYTES,
-        )
-    except ObjectNotFoundError:
-        return None
-
-    if not isinstance(content, bytes) or not content:
-        raise StorageError("Stored creative checkpoint is invalid")
-    return content
-
-
-async def _store_creative_raw_checkpoint(
-    storage: ObjectStorage,
-    object_key: str,
-    content: bytes,
-) -> None:
-    if (
-        not isinstance(content, bytes)
-        or not content
-        or len(content) > _CREATIVE_RAW_CHECKPOINT_MAX_BYTES
-    ):
-        raise StorageError("Creative checkpoint exceeds the safe storage boundary")
-    await storage.put(object_key, content, "image/png")
-
-
-async def _set_creative_generation_state(
-    session: AsyncSession,
-    value: CreativeAsset,
-    *,
-    status: str,
-) -> None:
-    value.source_type = "ai_brief"
-    value.generation_status = status
-    value.storage_reference = None
-    await _flush(session)
-
-
-async def _persist_creative_generation_progress(
-    session: AsyncSession,
-    value: CreativeAsset,
-    *,
-    status: str,
-    commit: bool,
-) -> None:
-    await _set_creative_generation_state(session, value, status=status)
-    if commit:
-        try:
-            await session.commit()
-        except SQLAlchemyError:
-            await _rollback_session(session)
-            raise MarketingPersistenceError from None
-
-
-async def _record_creative_generation_dependency_failure(
-    session: AsyncSession,
-    *,
-    business_id: UUID,
-    value: CreativeAsset,
-    actor_user_id: UUID,
-    stage: str,
-    commit: bool,
-) -> None:
-    metadata = dict(value.creative_metadata or {})
-    metadata["image_generation_failure_stage"] = stage
-    value.creative_metadata = metadata
-    record_audit(
-        session,
-        business_id=business_id,
-        actor_user_id=actor_user_id,
-        event_type="marketing.creative_generation_deferred",
-        entity_type="marketing_creative_asset",
-        entity_id=value.id,
-        summary=(
-            f"Creative generation was deferred safely during {stage}; no "
-            "additional image provider call was made."
-        ),
-    )
-    await _flush(session)
-    if commit:
-        try:
-            await session.commit()
-        except SQLAlchemyError:
-            await _rollback_session(session)
-            raise MarketingPersistenceError from None
-
-
-async def _fail_creative_generation(
-    session: AsyncSession,
-    *,
-    business_id: UUID,
-    value: CreativeAsset,
-    actor_user_id: UUID,
-    stage: str,
-) -> CreativeAsset:
-    metadata = dict(value.creative_metadata or {})
-    metadata["image_generation_failure_stage"] = stage
-    value.creative_metadata = metadata
-    await _set_creative_generation_state(session, value, status="failed")
-    record_audit(
-        session,
-        business_id=business_id,
-        actor_user_id=actor_user_id,
-        event_type="marketing.creative_generation_failed",
-        entity_type="marketing_creative_asset",
-        entity_id=value.id,
-        summary=(
-            f"Final creative generation failed safely during {stage}; no usable "
-            "asset was attached and nothing was published."
-        ),
-    )
-    return value
 
 
 async def _best_effort_delete(storage: ObjectStorage, object_key: str) -> None:
@@ -6783,18 +3590,6 @@ async def compensate_pending_creative_storage(
         await _best_effort_delete(storage, object_key)
 
 
-def _final_creative_storage_key(
-    *,
-    business_id: UUID,
-    creative_asset_id: UUID,
-    generation_epoch: int,
-) -> str:
-    if not 1 <= generation_epoch <= _MAX_CREATIVE_GENERATION_EPOCH:
-        raise ValueError("Creative generation epoch is invalid")
-    return (
-        f"businesses/{business_id}/marketing/creatives/"
-        f"{creative_asset_id}/final/generation-{generation_epoch}.png"
-    )
 
 
 async def list_creative_assets(session: AsyncSession, *, business_id: UUID, campaign_id: UUID | None, content_id: UUID | None, root_content_id: UUID | None = None) -> list[CreativeAsset]:

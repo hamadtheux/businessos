@@ -13,25 +13,14 @@ import type {
 } from "../services/integrations.ts";
 import {
   AUDIENCE_GUIDANCE_MAX,
-  CREATIVE_GENERATION_POLL_MS,
   CONTENT_PROMPT_MAX,
   OWNER_GOAL_MAX,
   SHARED_DIRECTION_MAX,
   channelGenerationNotice,
-  createCreativeWithRecovery,
-  creativeFormatForContent,
-  creativePhaseForDisplay,
-  creativeWorkspaceForDisplay,
-  creativeResultNotice,
   generateCampaignChannelDrafts,
-  isCreativeGenerationActive,
   isCreativePreviewFailureCurrent,
   publishingCapability,
-  recommendedCreativeMediaForContent,
-  runCreativeOperationWithRecovery,
   safeCreativeMediaUrl,
-  videoFormatForContent,
-  type CreativeProgress,
 } from "./cmo-ux.ts";
 
 type PrivateCreativeAssetKeys = Extract<
@@ -42,27 +31,6 @@ const privateCreativeAssetKeysStayServerSide: PrivateCreativeAssetKeys extends n
   ? true
   : never = true;
 void privateCreativeAssetKeysStayServerSide;
-
-test("creative polling is bounded to active generation states", () => {
-  assert.equal(CREATIVE_GENERATION_POLL_MS, 3_000);
-  for (const generation_status of [
-    "queued",
-    "generating",
-    "reviewing",
-    "repairing",
-  ] as const) {
-    assert.equal(isCreativeGenerationActive({ generation_status }), true);
-  }
-  for (const generation_status of [
-    "brief_ready",
-    "provider_required",
-    "ready",
-    "failed",
-    "archived",
-  ] as const) {
-    assert.equal(isCreativeGenerationActive({ generation_status }), false);
-  }
-});
 
 test("creative preview failure is cleared only by a different asset or URL", () => {
   const failure = {
@@ -116,63 +84,6 @@ const publicCreativeAsset: CreativeAsset = {
   created_at: "2026-09-06T00:00:00Z",
   updated_at: "2026-09-06T00:00:00Z",
 };
-
-test("active creative stays authoritative over a stale failed creative", () => {
-  const failedCreative: CreativeAsset = {
-    ...publicCreativeAsset,
-    id: "creative-old-failed",
-    generation_status: "failed",
-    updated_at: "2026-09-06T00:01:00Z",
-  };
-  const generatingCreative: CreativeAsset = {
-    ...publicCreativeAsset,
-    id: "creative-new-generating",
-    generation_status: "generating",
-    updated_at: "2026-09-06T00:02:00Z",
-  };
-
-  const beforeExactPoll = creativeWorkspaceForDisplay(
-    [failedCreative],
-    generatingCreative.id,
-  );
-
-  assert.equal(
-    beforeExactPoll.creative,
-    undefined,
-    "an old failed creative must never replace an unresolved active generation",
-  );
-  assert.deepEqual(
-    beforeExactPoll.creatives,
-    [],
-    "stale creative history must not become the displayed fallback while the active asset resolves",
-  );
-
-  const afterExactPoll = creativeWorkspaceForDisplay(
-    [failedCreative],
-    generatingCreative.id,
-    generatingCreative,
-  );
-
-  assert.equal(afterExactPoll.creative?.id, generatingCreative.id);
-  assert.deepEqual(
-    afterExactPoll.creatives?.map((item) => item.id),
-    [generatingCreative.id, failedCreative.id],
-  );
-
-  assert.equal(
-    creativePhaseForDisplay(
-      {
-        phase: "visual",
-        contentId: generatingCreative.content_id || undefined,
-        assetId: generatingCreative.id,
-      },
-      generatingCreative.content_id || undefined,
-      generatingCreative.id,
-    ),
-    "visual",
-  );
-});
-
 
 function content(
   channel: MarketingChannel,
@@ -490,98 +401,6 @@ test("over-limit audience guidance fails locally before generation", async () =>
   assert.equal(generationCalls, 0);
 });
 
-test("creative creation refreshes a saved brief after generation fails", async () => {
-  const phases: CreativeProgress[] = [];
-  let savedBrief: { id: string } | null = null;
-  let discoveredBrief: { id: string } | null = null;
-
-  await assert.rejects(
-    createCreativeWithRecovery({
-      contentId: "content-instagram",
-      createBrief: async () => {
-        savedBrief = { id: "brief-one" };
-        return savedBrief;
-      },
-      generate: async () => {
-        throw new Error("network interrupted after brief creation");
-      },
-      refresh: async () => {
-        discoveredBrief = savedBrief;
-      },
-      onProgress: (progress) => phases.push(progress),
-    }),
-    /network interrupted/,
-  );
-
-  assert.deepEqual(discoveredBrief, { id: "brief-one" });
-  assert.deepEqual(phases, [
-    { phase: "strategy", contentId: "content-instagram" },
-    { phase: "visual", contentId: "content-instagram" },
-    null,
-  ]);
-});
-
-test("creative regeneration refreshes immutable history after interruption", async () => {
-  let refreshes = 0;
-  await assert.rejects(
-    runCreativeOperationWithRecovery({
-      progress: {
-        phase: "visual",
-        contentId: "content-instagram",
-        assetId: "creative-one",
-      },
-      operation: async () => {
-        throw new Error("response interrupted after revision creation");
-      },
-      refresh: async () => {
-        refreshes += 1;
-      },
-      onProgress: () => undefined,
-    }),
-    /response interrupted/,
-  );
-  assert.equal(refreshes, 1);
-});
-
-test("creative progress is visible only for its matching item", () => {
-  const progress = {
-    phase: "visual",
-    contentId: "content-one",
-    assetId: "asset-one",
-  } as const;
-  assert.equal(
-    creativePhaseForDisplay(progress, "content-one", "asset-one"),
-    "visual",
-  );
-  assert.equal(
-    creativePhaseForDisplay(progress, "content-two", "asset-one"),
-    null,
-  );
-  assert.equal(
-    creativePhaseForDisplay(progress, "content-one", "asset-two"),
-    null,
-  );
-});
-
-test("creative format mapping stays within supported deterministic formats", () => {
-  assert.deepEqual(
-    creativeFormatForContent({ channel: "tiktok", content_type: "social_post" }),
-    { asset_type: "story_reel", aspect_ratio: "9:16", width: 1080, height: 1920 },
-  );
-  assert.deepEqual(
-    creativeFormatForContent({ channel: "google_ads", content_type: "ad_copy" }),
-    { asset_type: "landscape_ad", aspect_ratio: "1200:628", width: 1200, height: 628 },
-  );
-  assert.deepEqual(
-    creativeFormatForContent({ channel: "email", content_type: "email_draft" }),
-    { asset_type: "display_banner", aspect_ratio: "1200:628", width: 1200, height: 628 },
-  );
-  assert.deepEqual(
-    creativeFormatForContent({ channel: "linkedin", content_type: "social_post" }),
-    { asset_type: "social_square", aspect_ratio: "1:1", width: 1080, height: 1080 },
-  );
-});
-
 test("public creative assets contain only the approved response fields", () => {
   assert.deepEqual(Object.keys(publicCreativeAsset).sort(), [
     "alt_text",
@@ -603,48 +422,6 @@ test("public creative assets contain only the approved response fields", () => {
     "visual_direction",
     "width",
   ]);
-});
-
-test("creative media recommendation is deterministic and user-overridable", () => {
-  assert.equal(
-    recommendedCreativeMediaForContent({ channel: "tiktok", content_type: "social_post" }),
-    "video",
-  );
-  assert.equal(
-    recommendedCreativeMediaForContent({ channel: "tiktok", content_type: "blog_draft" }),
-    "image",
-  );
-  assert.equal(
-    recommendedCreativeMediaForContent({ channel: "instagram", content_type: "social_post" }),
-    "image",
-  );
-  assert.equal(
-    recommendedCreativeMediaForContent({ channel: "email", content_type: "email_draft" }),
-    "image",
-  );
-});
-
-test("video format mapping reflects both channel and content type", () => {
-  assert.deepEqual(
-    videoFormatForContent({ channel: "instagram", content_type: "social_post" }),
-    { aspect_ratio: "1:1", duration_seconds: 15 },
-  );
-  assert.deepEqual(
-    videoFormatForContent({ channel: "tiktok", content_type: "social_post" }),
-    { aspect_ratio: "9:16", duration_seconds: 15 },
-  );
-  assert.deepEqual(
-    videoFormatForContent({ channel: "website", content_type: "landing_page_copy" }),
-    { aspect_ratio: "16:9", duration_seconds: 30 },
-  );
-  assert.deepEqual(
-    videoFormatForContent({ channel: "google_ads", content_type: "cta" }),
-    { aspect_ratio: "16:9", duration_seconds: 8 },
-  );
-  assert.deepEqual(
-    videoFormatForContent({ channel: "linkedin", content_type: "social_post" }),
-    { aspect_ratio: "1:1", duration_seconds: 15 },
-  );
 });
 
 test("publishing derives readiness from current connector capabilities and fails closed", () => {
@@ -748,25 +525,6 @@ test("publishing derives readiness from current connector capabilities and fails
     publishingCapability({ channel: "linkedin" }).state,
     "unsupported",
   );
-});
-
-test("provider-required creative copy stays customer-facing", () => {
-  const notice = creativeResultNotice({
-    generation_status: "provider_required",
-    media_type: "video",
-  } as CreativeAsset);
-
-  assert.match(notice, /isn’t connected yet/);
-  assert.match(notice, /strategy and storyboard are saved/);
-  for (const forbidden of [
-    "provider job",
-    "job reference",
-    "reconciliation",
-    "pipeline",
-    "internal state",
-  ]) {
-    assert.equal(notice.toLowerCase().includes(forbidden.toLowerCase()), false);
-  }
 });
 
 test("creative media URL validation allows only supported relative media routes", () => {

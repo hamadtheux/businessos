@@ -15,7 +15,6 @@ os.environ.setdefault('AIBOS_AUTH_SECRET_KEY', 'x' * 32)
 
 from app.api.dependencies.auth import get_current_user
 from app.api.dependencies.ai_agent import get_ai_agent_provider
-from app.api.dependencies.creative import get_creative_generation_provider
 from app.core.config import settings
 from app.db.session import get_db_session
 from app.exceptions.business import BusinessBrandingPersistenceError
@@ -23,7 +22,6 @@ from app.main import app
 from app.models.business_branding import BusinessBranding
 from app.schemas.business import BusinessOnboardingInput
 from app.services.business_branding import materialize_business_branding_response
-from app.services.marketing import _creative_logo_content
 from app.storage.base import StorageOperationError
 from app.storage.factory import get_object_storage
 from app.storage.local import LocalObjectStorage
@@ -151,25 +149,8 @@ def test_local_logo_uses_existing_media_route():
         assert value.logo_url == 'https://old.invalid/logo.png'
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize('key', INVALID_KEYS)
-async def test_creative_logo_loading_rejects_invalid_keys_before_object_access(key):
-    storage = Mock()
-    storage.get = AsyncMock()
-    assert await _creative_logo_content(storage, business_id=BUSINESS_ID, branding=branding(key=key)) is None
-    storage.get.assert_not_awaited()
-    storage.presentation_url.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_creative_logo_reads_object_bytes_without_browser_urls():
-    storage = Mock()
-    storage.get = AsyncMock(return_value=logo_fixtures._image_bytes('PNG'))
-    result = await _creative_logo_content(storage, business_id=BUSINESS_ID, branding=branding())
-    assert result
-    storage.get.assert_awaited_once_with(KEY, max_bytes=logo_fixtures.MAX_LOGO_UPLOAD_BYTES)
-    storage.presentation_url.assert_not_called()
-    storage.public_url.assert_not_called()
 
 
 class BusinessLogoPresentationApiTests(unittest.IsolatedAsyncioTestCase):
@@ -196,7 +177,6 @@ class BusinessLogoPresentationApiTests(unittest.IsolatedAsyncioTestCase):
             get_db_session: db,
             get_object_storage: lambda: self.storage,
             get_ai_agent_provider: self.no_provider,
-            get_creative_generation_provider: self.no_provider,
         })
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://testserver')
         self.path = f'/api/v1/businesses/{self.business.id}/branding'

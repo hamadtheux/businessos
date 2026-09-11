@@ -11,6 +11,8 @@ from app.exceptions.logo import LogoTooLargeError, LogoValidationError
 MAX_LOGO_UPLOAD_BYTES = 5_000_000
 MAX_LOGO_DIMENSION = 4096
 MAX_LOGO_PIXELS = 16_000_000
+GOOGLE_ADS_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+GOOGLE_ADS_LOGO_TARGET_MAX_DIMENSION = 1200
 _READ_CHUNK_BYTES = 64 * 1024
 _SUPPORTED_FORMATS = frozenset({"PNG", "JPEG", "WEBP"})
 
@@ -128,6 +130,102 @@ def sanitize_logo_bytes(content: bytes) -> SanitizedLogo:
         width=width,
         height=height,
     )
+
+
+def google_ads_square_logo_bytes(content: bytes) -> bytes:
+    """
+    Preserve the authorized logo artwork while formatting it into Google's
+    required square logo canvas.
+
+    No generated artwork or synthetic branding is introduced. Non-square
+    logos are centered with transparent padding.
+    """
+    sanitized = sanitize_logo_bytes(content)
+
+    try:
+        with Image.open(BytesIO(sanitized.content)) as decoded:
+            decoded.load()
+            image = ImageOps.exif_transpose(decoded).convert("RGBA")
+    except (
+        UnidentifiedImageError,
+        OSError,
+        SyntaxError,
+        ValueError,
+    ):
+        raise LogoValidationError("Invalid logo image") from None
+
+    width, height = image.size
+    longest = max(width, height)
+
+    if longest > GOOGLE_ADS_LOGO_TARGET_MAX_DIMENSION:
+        scale = (
+            GOOGLE_ADS_LOGO_TARGET_MAX_DIMENSION
+            / float(longest)
+        )
+        image = image.resize(
+            (
+                max(1, round(width * scale)),
+                max(1, round(height * scale)),
+            ),
+            Image.Resampling.LANCZOS,
+        )
+
+    side = max(128, image.width, image.height)
+
+    canvas = Image.new(
+        "RGBA",
+        (side, side),
+        (255, 255, 255, 0),
+    )
+    canvas.alpha_composite(
+        image,
+        (
+            (side - image.width) // 2,
+            (side - image.height) // 2,
+        ),
+    )
+
+    output = BytesIO()
+    canvas.save(
+        output,
+        format="PNG",
+        optimize=True,
+        compress_level=9,
+    )
+    result = output.getvalue()
+
+    if len(result) <= GOOGLE_ADS_IMAGE_MAX_BYTES:
+        return result
+
+    # Extremely complex transparent logos can produce large PNGs. Flattening
+    # onto white preserves the complete logo while remaining a supported
+    # Google Ads image format.
+    flattened = Image.new(
+        "RGB",
+        canvas.size,
+        "white",
+    )
+    flattened.paste(
+        canvas,
+        mask=canvas.getchannel("A"),
+    )
+
+    output = BytesIO()
+    flattened.save(
+        output,
+        format="JPEG",
+        quality=88,
+        optimize=True,
+        progressive=True,
+    )
+    result = output.getvalue()
+
+    if len(result) > GOOGLE_ADS_IMAGE_MAX_BYTES:
+        raise LogoTooLargeError(
+            "Logo exceeds Google Ads image limit"
+        )
+
+    return result
 
 
 def _validate_dimensions(width: int, height: int) -> None:

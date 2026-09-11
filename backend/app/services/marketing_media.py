@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 
 from fastapi import UploadFile
+from PIL import Image, ImageOps
 
 from app.exceptions.logo import LogoError
 from app.exceptions.marketing import MarketingValidationError
@@ -28,6 +30,83 @@ class PreparedMarketingMedia:
     height: int | None
     duration_seconds: int | None
     original_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedMarketingImageVariant:
+    key: str
+    content: bytes
+    content_type: str
+    extension: str
+    width: int
+    height: int
+    aspect_ratio: str
+
+
+_MARKETING_IMAGE_VARIANTS = (
+    ("square_1_1", 1200, 1200, "1:1"),
+    ("landscape_1_91_1", 1200, 628, "1.91:1"),
+    ("portrait_4_5", 1080, 1350, "4:5"),
+    ("vertical_9_16", 1080, 1920, "9:16"),
+)
+
+
+def build_marketing_image_variants(
+    media: PreparedMarketingMedia,
+) -> tuple[PreparedMarketingImageVariant, ...]:
+    """
+    Create deterministic platform derivatives without modifying the original.
+
+    We use containment instead of cropping so uploaded artwork, logos and text
+    cannot be silently cut off. JPEG derivatives use a neutral white canvas
+    for broad advertising-platform compatibility.
+    """
+    if media.media_type != "image":
+        return ()
+
+    try:
+        with Image.open(BytesIO(media.content)) as opened:
+            source = ImageOps.exif_transpose(opened).convert("RGB")
+            source.load()
+    except (OSError, ValueError):
+        raise MarketingValidationError("marketing_media_unreadable") from None
+
+    variants: list[PreparedMarketingImageVariant] = []
+
+    for key, width, height, aspect_ratio in _MARKETING_IMAGE_VARIANTS:
+        rendered = ImageOps.pad(
+            source,
+            (width, height),
+            method=Image.Resampling.LANCZOS,
+            color=(255, 255, 255),
+            centering=(0.5, 0.5),
+        )
+        output = BytesIO()
+        rendered.save(
+            output,
+            format="JPEG",
+            quality=92,
+            optimize=True,
+            progressive=True,
+        )
+        content = output.getvalue()
+
+        if not content:
+            raise MarketingValidationError("marketing_media_unreadable")
+
+        variants.append(
+            PreparedMarketingImageVariant(
+                key=key,
+                content=content,
+                content_type="image/jpeg",
+                extension="jpg",
+                width=width,
+                height=height,
+                aspect_ratio=aspect_ratio,
+            )
+        )
+
+    return tuple(variants)
 
 
 async def read_marketing_media(

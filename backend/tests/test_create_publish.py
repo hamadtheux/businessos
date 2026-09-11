@@ -477,8 +477,20 @@ class CreatePublishFlowTests(unittest.IsolatedAsyncioTestCase):
                 storage=storage,
             )
 
-        storage.put.assert_awaited_once()
-        storage.delete.assert_awaited_once_with(storage.put.await_args.args[0])
+        self.assertEqual(storage.put.await_count, 5)
+
+        stored_keys = [
+            call.args[0]
+            for call in storage.put.await_args_list
+        ]
+        self.assertEqual(len(set(stored_keys)), 5)
+
+        self.assertEqual(storage.delete.await_count, 5)
+        deleted_keys = [
+            call.args[0]
+            for call in storage.delete.await_args_list
+        ]
+        self.assertEqual(deleted_keys, list(reversed(stored_keys)))
         self.assertEqual(session.rollback_calls, 1)
         self.assertEqual(
             session.info.get("pending_creative_storage_compensations"),

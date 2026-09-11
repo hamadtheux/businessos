@@ -361,6 +361,146 @@ class AdvertisingProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload.network, "search")
         self.assertIsNone(payload.merchant_account_ref)
 
+    async def test_uploaded_google_image_prepares_standard_pmax_not_search(self) -> None:
+        business_id = uuid4()
+        campaign_id = uuid4()
+        asset_id = uuid4()
+
+        campaign = SimpleNamespace(
+            id=campaign_id,
+            channels=["google_ads"],
+            campaign_type=None,
+            normalized_proposal={},
+            name="Spring growth",
+            objective="Drive qualified traffic",
+            planned_budget=Decimal("20"),
+            currency="USD",
+            budget_mode="daily",
+            landing_destination=(
+                "https://shop.example/spring"
+            ),
+            geographic_targeting=["US"],
+            audience_hypothesis_id=None,
+            audience_definition="US buyers",
+            proposed_copy=(
+                "Discover the spring collection built for everyday use."
+            ),
+            description=(
+                "Explore trusted products from our current collection."
+            ),
+            creative_brief=(
+                "Use the approved customer-uploaded campaign image."
+            ),
+            measurement_plan=(
+                "Measure recorded conversion outcomes."
+            ),
+        )
+
+        media = SimpleNamespace(
+            id=asset_id,
+            media_type="image",
+        )
+        business = SimpleNamespace(
+            id=business_id,
+            name="Acme Store",
+            description=(
+                "Trusted products for everyday customers."
+            ),
+        )
+        branding = SimpleNamespace(
+            business_id=business_id,
+            logo_storage_key=(
+                f"businesses/{business_id}/"
+                "branding/logo/current.png"
+            ),
+        )
+
+        session = AsyncMock()
+        session.execute.return_value = SimpleNamespace(
+            all=lambda: []
+        )
+        session.scalar.side_effect = [
+            business,
+            branding,
+        ]
+
+        expected = {"proposal": "prepared"}
+
+        with patch(
+            "app.services.marketing_actions.get_campaign",
+            new=AsyncMock(
+                return_value=campaign
+            ),
+        ), patch(
+            "app.services.marketing_actions._existing_link",
+            new=AsyncMock(return_value=None),
+        ), patch(
+            "app.services.marketing_actions._trusted_campaign_audience",
+            new=AsyncMock(
+                return_value=(
+                    ["US"],
+                    None,
+                    None,
+                )
+            ),
+        ), patch(
+            "app.services.marketing_actions._campaign_uploaded_media_asset",
+            new=AsyncMock(
+                return_value=media
+            ),
+        ), patch(
+            "app.services.marketing_actions._materialize_governed_proposal",
+            new=AsyncMock(
+                return_value=expected
+            ),
+        ) as materialize:
+            result = await prepare_campaign_action(
+                session,
+                business_id=business_id,
+                campaign_id=campaign_id,
+                requested_by_user_id=uuid4(),
+                channel="google_ads",
+            )
+
+        self.assertEqual(
+            result,
+            expected,
+        )
+        payload = (
+            materialize.await_args.kwargs[
+                "action"
+            ].action_payload
+        )
+        self.assertEqual(
+            payload.network,
+            "performance_max",
+        )
+        self.assertIsNone(
+            payload.merchant_account_ref
+        )
+        self.assertEqual(
+            payload.business_name,
+            "Acme Store",
+        )
+        self.assertTrue(
+            payload.business_logo_ref.startswith(
+                "business_logo:"
+            )
+        )
+        self.assertGreaterEqual(
+            len(payload.headlines),
+            3,
+        )
+        self.assertGreaterEqual(
+            len(payload.long_headlines),
+            1,
+        )
+        self.assertGreaterEqual(
+            len(payload.descriptions),
+            2,
+        )
+
+
     def test_google_retail_pmax_has_complete_listing_group_tree(self) -> None:
         payload = CreateGoogleAdsCampaignPayload(
             campaign_name="Egg growth", objective="sales", budget=Decimal("20"),

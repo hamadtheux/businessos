@@ -96,6 +96,13 @@ async def enqueue_job(
 ) -> BackgroundJob:
     """Enqueue one server-defined job without accepting arbitrary payloads."""
     policy = require_job_policy(job_type)
+
+    if job_type == "generate_creative_asset":
+        # Historical rows remain readable, but the retired creative engine
+        # must never receive new work.
+        raise BackgroundJobValidationError(
+            "creative_generation_retired"
+        )
     normalized_key = idempotency_key.strip()
     if not normalized_key or len(normalized_key) > 200:
         raise BackgroundJobValidationError("idempotency_key_invalid")

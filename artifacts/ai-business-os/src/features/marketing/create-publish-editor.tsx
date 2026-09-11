@@ -5,7 +5,6 @@ import {
   ChevronDown,
   ImagePlus,
   LoaderCircle,
-  RefreshCw,
   Send,
   Sparkles,
   Upload,
@@ -45,17 +44,18 @@ type EditorProps = {
   draftState: "saved" | "saving" | "error";
   publishProgress: PublishProgress;
   actionPending: boolean;
+  campaignPending: boolean;
+  campaignAvailable: boolean;
   canApproveExternal: boolean;
   onPlatformChange: (platform: CreatePublishPlatform) => void;
   onSave: (content: MarketingContent, fields: EditablePlatformFields) => void;
   onRewrite: (content: MarketingContent, instruction: string) => void;
-  onTryVisual: (content: MarketingContent) => void;
-  onRetryVisual: (media: CreativeAsset) => void;
   onUseMedia: (media: CreativeAsset | null) => void;
   onUpload: (file: File, durationSeconds?: number) => Promise<void>;
   onConnect: () => void;
   onSchedule: () => void;
   onPublish: () => void;
+  onPublishAndCampaign: () => void;
 };
 
 export function CreatePublishEditor({
@@ -69,17 +69,18 @@ export function CreatePublishEditor({
   draftState,
   publishProgress,
   actionPending,
+  campaignPending,
+  campaignAvailable,
   canApproveExternal,
   onPlatformChange,
   onSave,
   onRewrite,
-  onTryVisual,
-  onRetryVisual,
   onUseMedia,
   onUpload,
   onConnect,
   onSchedule,
   onPublish,
+  onPublishAndCampaign,
 }: EditorProps) {
   const content =
     contents.find((item) => contentPlatform(item) === activePlatform) || contents[0];
@@ -143,11 +144,15 @@ export function CreatePublishEditor({
         <div className="create-publish-media-column">
           <MediaFrame
             media={media}
-            fallbackMedia={mediaHistory.find((asset) => asset.id !== media?.id && asset.generation_status === "ready") || null}
+            fallbackMedia={mediaHistory.find(
+              (asset) =>
+                asset.id !== media?.id &&
+                asset.source_type === "import" &&
+                asset.generation_status === "ready" &&
+                Boolean(asset.storage_reference),
+            ) || null}
             loading={mediaLoading}
             previewUrl={mediaPreviewUrl}
-            onTryVisual={() => onTryVisual(content)}
-            onRetry={() => media && onRetryVisual(media)}
             onUseMedia={onUseMedia}
             onChooseUpload={() => fileRef.current?.click()}
           />
@@ -164,12 +169,11 @@ export function CreatePublishEditor({
           />
           {media?.generation_status === "ready" && (
             <div className="create-publish-media-tools">
-              {media.source_type !== "import" && (
-                <Button variant="tertiary" className="btn-sm" onClick={() => onTryVisual(content)}>
-                  <RefreshCw /> Try another visual
-                </Button>
-              )}
-              <Button variant="tertiary" className="btn-sm" onClick={() => fileRef.current?.click()}>
+              <Button
+                variant="tertiary"
+                className="btn-sm"
+                onClick={() => fileRef.current?.click()}
+              >
                 <Upload /> Replace media
               </Button>
             </div>
@@ -295,11 +299,56 @@ export function CreatePublishEditor({
         {!publishableCount && platforms.some((platform) => readiness[platform].state === "disconnected") && (
           <Button variant="tertiary" onClick={onConnect}>Manage connections</Button>
         )}
-        <Button variant="secondary" onClick={onSchedule} disabled={actionPending || dirty || draftState !== "saved"} data-testid="schedule-post">
+        <Button
+          variant="secondary"
+          onClick={onSchedule}
+          disabled={
+            actionPending ||
+            dirty ||
+            draftState !== "saved"
+          }
+          data-testid="schedule-post"
+        >
           <CalendarClock /> Schedule
         </Button>
-        <Button variant="primary" onClick={onPublish} disabled={actionPending || dirty || draftState !== "saved" || !publishableCount || !canApproveExternal} data-testid="publish-now">
-          <Send /> {actionPending ? "Publishing…" : "Publish Now"}
+
+        <Button
+          variant="secondary"
+          onClick={onPublish}
+          disabled={
+            actionPending ||
+            dirty ||
+            draftState !== "saved" ||
+            !publishableCount ||
+            !canApproveExternal
+          }
+          data-testid="publish-only"
+        >
+          <Send /> Publish only
+        </Button>
+
+        <Button
+          variant="primary"
+          onClick={onPublishAndCampaign}
+          disabled={
+            actionPending ||
+            dirty ||
+            draftState !== "saved" ||
+            !publishableCount ||
+            !canApproveExternal ||
+            !campaignAvailable
+          }
+          title={
+            campaignAvailable
+              ? "Publish organically, then prepare a paid campaign for your review."
+              : "Upload and select media before preparing a paid campaign."
+          }
+          data-testid="publish-run-campaign"
+        >
+          <Sparkles />{" "}
+          {campaignPending
+            ? "Publishing & preparing…"
+            : "Publish + Run Campaign"}
         </Button>
       </div>
     </section>
@@ -311,8 +360,6 @@ function MediaFrame({
   fallbackMedia,
   loading,
   previewUrl,
-  onTryVisual,
-  onRetry,
   onUseMedia,
   onChooseUpload,
 }: {
@@ -320,36 +367,25 @@ function MediaFrame({
   fallbackMedia: CreativeAsset | null;
   loading: boolean;
   previewUrl?: string | null;
-  onTryVisual: () => void;
-  onRetry: () => void;
   onUseMedia: (media: CreativeAsset | null) => void;
   onChooseUpload: () => void;
 }) {
   const source = media?.storage_reference || previewUrl;
-  if (loading || (media && ["queued", "generating", "reviewing", "repairing", "brief_ready", "strategy_ready"].includes(media.generation_status))) {
-    const label = media?.generation_status === "reviewing" ? "Finalizing…" : media?.generation_status === "repairing" ? "Applying your brand…" : "Creating visual…";
+
+  if (loading) {
     return (
-      <div className="create-publish-media-frame create-publish-media-working" role="status">
+      <div
+        className="create-publish-media-frame create-publish-media-working"
+        role="status"
+      >
         <div className="create-publish-media-skeleton" />
-        <span><LoaderCircle /> {label}</span>
+        <span>
+          <LoaderCircle /> Loading media…
+        </span>
       </div>
     );
   }
-  if (media && ["failed", "provider_required"].includes(media.generation_status)) {
-    return (
-      <div className="create-publish-media-frame create-publish-media-failed" role="alert" data-testid="compact-image-failure">
-        <AlertTriangle />
-        <strong>We couldn&apos;t finish this visual.</strong>
-        <p>Your post and settings are safe.</p>
-        <div>
-          <Button variant="secondary" className="btn-sm" onClick={onRetry}><RefreshCw /> Try again</Button>
-          <Button variant="tertiary" className="btn-sm" onClick={onChooseUpload}><Upload /> Upload media instead</Button>
-          {fallbackMedia && <Button variant="tertiary" className="btn-sm" onClick={() => onUseMedia(fallbackMedia)}>Use previous</Button>}
-          <Button variant="tertiary" className="btn-sm" onClick={() => onUseMedia(null)}>Continue without image</Button>
-        </div>
-      </div>
-    );
-  }
+
   if (media?.generation_status === "ready" && source) {
     return (
       <div className="create-publish-media-frame create-publish-media-ready">
@@ -361,14 +397,62 @@ function MediaFrame({
       </div>
     );
   }
+
+  if (media && media.generation_status !== "ready") {
+    return (
+      <div
+        className="create-publish-media-frame create-publish-media-failed"
+        role="alert"
+      >
+        <AlertTriangle />
+        <strong>This media is not available for publishing.</strong>
+        <p>Upload an image or video to continue.</p>
+
+        <div>
+          <Button
+            variant="secondary"
+            className="btn-sm"
+            onClick={onChooseUpload}
+          >
+            <Upload /> Upload media
+          </Button>
+
+          {fallbackMedia && (
+            <Button
+              variant="tertiary"
+              className="btn-sm"
+              onClick={() => onUseMedia(fallbackMedia)}
+            >
+              Use previous upload
+            </Button>
+          )}
+
+          <Button
+            variant="tertiary"
+            className="btn-sm"
+            onClick={() => onUseMedia(null)}
+          >
+            Continue without media
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="create-publish-media-frame create-publish-media-empty">
       <ImagePlus />
-      <strong>No media yet</strong>
-      <p>Create one with AI or upload your own.</p>
+      <strong>Upload your post media</strong>
+      <p>Add the image or video you want 9D Brain to market and publish.</p>
+
       <div>
-        <Button variant="secondary" className="btn-sm" onClick={onTryVisual}><Sparkles /> Create with AI</Button>
-        <Button variant="tertiary" className="btn-sm" onClick={onChooseUpload}><Upload /> Upload</Button>
+        <Button
+          variant="secondary"
+          className="btn-sm"
+          onClick={onChooseUpload}
+        >
+          <Upload /> Upload media
+        </Button>
       </div>
     </div>
   );
@@ -407,8 +491,8 @@ function PublishResults({
 
 function creativeHistoryStatus(status: CreativeAsset["generation_status"]) {
   if (status === "ready") return "Ready";
-  if (status === "failed" || status === "provider_required") return "Needs attention";
-  return "In progress";
+  if (status === "archived") return "Archived";
+  return "Unavailable";
 }
 
 async function uploadWithDuration(

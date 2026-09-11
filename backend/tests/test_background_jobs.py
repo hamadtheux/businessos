@@ -323,7 +323,7 @@ class BackgroundJobServiceTests(unittest.IsolatedAsyncioTestCase):
             business_id=BUSINESS_ID,
         )
 
-    async def test_creative_enqueue_is_tenant_checked_and_idempotent(self) -> None:
+    async def test_creative_enqueue_is_rejected_after_retirement(self) -> None:
         creative_asset_id = uuid4()
         key = creative_asset_generation_job_key(
             creative_asset_id,
@@ -331,39 +331,27 @@ class BackgroundJobServiceTests(unittest.IsolatedAsyncioTestCase):
             1,
             "initial",
         )
-        existing = BackgroundJob(
-            id=uuid4(),
-            business_id=BUSINESS_ID,
-            job_type="generate_creative_asset",
-            status="queued",
-            priority=60,
-            idempotency_key=key,
-            attempt_count=0,
-            max_attempts=3,
-            available_at=NOW,
-            creative_asset_id=creative_asset_id,
-            created_at=NOW,
-            updated_at=NOW,
-        )
-        session = _Session(scalar_values=[None, existing])
+        session = _Session()
+
         with patch(
             "app.services.background_jobs._require_tenant_reference",
             new=AsyncMock(),
         ) as require_reference:
-            result = await enqueue_job(
-                session,  # type: ignore[arg-type]
-                business_id=BUSINESS_ID,
-                job_type="generate_creative_asset",
-                idempotency_key=key,
-                creative_asset_id=creative_asset_id,
-            )
-        self.assertIs(result, existing)
-        require_reference.assert_awaited_once_with(
-            session,
-            field="creative_asset_id",
-            reference_id=creative_asset_id,
-            business_id=BUSINESS_ID,
+            with self.assertRaises(BackgroundJobValidationError) as raised:
+                await enqueue_job(
+                    session,  # type: ignore[arg-type]
+                    business_id=BUSINESS_ID,
+                    job_type="generate_creative_asset",
+                    idempotency_key=key,
+                    creative_asset_id=creative_asset_id,
+                )
+
+        self.assertEqual(
+            str(raised.exception),
+            "creative_generation_retired",
         )
+        require_reference.assert_not_awaited()
+
 
     async def test_cross_tenant_opportunity_reference_is_rejected(self) -> None:
         with self.assertRaises(BackgroundJobValidationError):

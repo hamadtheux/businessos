@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
@@ -35,9 +35,6 @@ import {
   WorkspaceDrawer,
 } from "@/components/product-ui";
 import {
-  CmoCreativePanel,
-} from "@/features/marketing/cmo-creative-panel";
-import {
   AIDetailsDisclosure,
   ChannelCapabilityCard,
   ContentLibraryCard,
@@ -47,23 +44,14 @@ import {
 import { CmoContentGeneratorDrawer } from "@/features/marketing/cmo-content-generator-drawer";
 import {
   channelGenerationNotice,
-  createCreativeWithRecovery,
-  CREATIVE_GENERATION_POLL_MS,
-  creativeFormatForContent,
-  creativePhaseForDisplay,
-  creativeWorkspaceForDisplay,
-  creativeResultNotice,
   generateCampaignChannelDrafts,
-  isCreativeGenerationActive,
   publishingCapability,
-  runCreativeOperationWithRecovery,
-  videoFormatForContent,
   type CampaignGenerationInput,
   type CreativeMediaType,
-  type CreativeProgress,
 } from "@/lib/cmo-ux";
 import { humanizeApiError } from "@/services/api-client";
 import { catalogApi } from "@/services/catalog";
+import { commerceApi } from "@/services/commerce";
 import { integrationsApi } from "@/services/integrations";
 import type {
   CampaignStatus,
@@ -274,6 +262,153 @@ function proposalValue(value: unknown, fallback?: string) {
   return empty;
 }
 
+type CampaignCatalogReviewProduct = {
+  catalogItemId: string;
+  offerId: string | null;
+  name: string;
+  price: string | null;
+  currency: string | null;
+  availability: string | null;
+};
+
+type CampaignCatalogReview = {
+  scope: "selected" | "all" | "recommended" | null;
+  products: CampaignCatalogReviewProduct[];
+  hasCatalogSelection: boolean;
+  integrityOk: boolean;
+  recommendationMethod: string | null;
+};
+
+function campaignReviewRecord(
+  value: unknown,
+): Record<string, unknown> | null {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value)
+  ) {
+    return null;
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function campaignReviewString(
+  value: unknown,
+): string | null {
+  return typeof value === "string" && value.trim()
+    ? value
+    : null;
+}
+
+function campaignCatalogReview(
+  campaign: MarketingCampaign,
+): CampaignCatalogReview {
+  const proposal =
+    campaignReviewRecord(
+      campaign.normalized_proposal,
+    ) ?? {};
+
+  const rawProducts = Array.isArray(
+    proposal.selected_products,
+  )
+    ? proposal.selected_products
+    : [];
+
+  const products: CampaignCatalogReviewProduct[] = [];
+
+  for (const rawProduct of rawProducts) {
+    const product =
+      campaignReviewRecord(rawProduct);
+
+    if (!product) continue;
+
+    const catalogItemId =
+      campaignReviewString(
+        product.catalog_item_id,
+      );
+
+    const name =
+      campaignReviewString(product.name);
+
+    if (!catalogItemId || !name) continue;
+
+    products.push({
+      catalogItemId,
+      offerId: campaignReviewString(
+        product.offer_id,
+      ),
+      name,
+      price: campaignReviewString(
+        product.price,
+      ),
+      currency: campaignReviewString(
+        product.currency,
+      ),
+      availability: campaignReviewString(
+        product.availability,
+      ),
+    });
+  }
+
+  const durableIds = [
+    ...new Set(
+      campaign.catalog_item_ids ?? [],
+    ),
+  ].sort();
+
+  const snapshotIds = [
+    ...new Set(
+      products.map(
+        (product) => product.catalogItemId,
+      ),
+    ),
+  ].sort();
+
+  const rawScope = proposal.catalog_scope;
+
+  const scope =
+    rawScope === "selected" ||
+    rawScope === "all" ||
+    rawScope === "recommended"
+      ? rawScope
+      : durableIds.length > 0
+        ? "selected"
+        : null;
+
+  const hasCatalogSelection =
+    scope !== null ||
+    durableIds.length > 0 ||
+    products.length > 0;
+
+  const integrityOk =
+    !hasCatalogSelection ||
+    (
+      durableIds.length === snapshotIds.length &&
+      snapshotIds.length === products.length &&
+      durableIds.every(
+        (id, index) =>
+          id === snapshotIds[index],
+      )
+    );
+
+  const productGroup =
+    campaignReviewRecord(
+      proposal.product_group,
+    );
+
+  return {
+    scope,
+    products,
+    hasCatalogSelection,
+    integrityOk,
+    recommendationMethod:
+      campaignReviewString(
+        productGroup?.recommendation_method,
+      ),
+  };
+}
+
 function CampaignProposalReview({
   campaign,
   preflight,
@@ -282,6 +417,50 @@ function CampaignProposalReview({
   preflight?: CampaignPreflight;
 }) {
   const proposal = campaign.normalized_proposal ?? {};
+  const catalogReview =
+    campaignCatalogReview(campaign);
+
+  const catalogScopeLabel =
+    catalogReview.scope === "recommended"
+      ? "Recommended by 9D Brain"
+      : catalogReview.scope === "all"
+        ? "All eligible products"
+        : catalogReview.scope === "selected"
+          ? "Owner-selected products"
+          : "Product catalog";
+
+  const campaignProductPrice = (
+    product: CampaignCatalogReviewProduct,
+  ) => {
+    if (!product.price) {
+      return "Price unavailable";
+    }
+
+    const numericPrice =
+      Number(product.price);
+
+    const currency =
+      product.currency ||
+      campaign.currency ||
+      "USD";
+
+    if (!Number.isFinite(numericPrice)) {
+      return `${product.price} ${currency}`;
+    }
+
+    try {
+      return new Intl.NumberFormat(
+        undefined,
+        {
+          style: "currency",
+          currency,
+        },
+      ).format(numericPrice);
+    } catch {
+      return `${product.price} ${currency}`;
+    }
+  };
+
   return (
     <>
       <SectionTitle
@@ -296,6 +475,172 @@ function CampaignProposalReview({
           </Badge>
         }
       />
+      {catalogReview.hasCatalogSelection && (
+        <Card>
+          <SectionTitle
+            title="Product approval scope"
+            action={
+              <Badge
+                tone={
+                  catalogReview.integrityOk
+                    ? "success"
+                    : "warning"
+                }
+              >
+                {catalogReview.integrityOk
+                  ? "Selection verified"
+                  : "Selection mismatch"}
+              </Badge>
+            }
+          />
+
+          <div className="recommendation-strip">
+            {catalogReview.integrityOk ? (
+              <ShieldCheck />
+            ) : (
+              <AlertCircle />
+            )}
+
+            <div>
+              <div className="eyebrow">
+                {catalogScopeLabel}
+              </div>
+
+              <p>
+                {catalogReview.products.length} exact
+                product
+                {catalogReview.products.length === 1
+                  ? ""
+                  : "s"}{" "}
+                are stored in this proposal and are the
+                products being reviewed for external
+                advertising.
+              </p>
+
+              <p>
+                {catalogReview.integrityOk
+                  ? "The proposal snapshot matches the durable campaign product selection."
+                  : "The proposal snapshot does not match the durable campaign product selection. External execution is blocked."}
+              </p>
+            </div>
+          </div>
+
+          {catalogReview.products.length > 0 && (
+            <div
+              className="table-scroll"
+              style={{ marginTop: 12 }}
+            >
+              <table>
+                <thead>
+                  <tr>
+                    <th>Product</th>
+                    <th>Price</th>
+                    <th>Availability</th>
+                    <th>Reference</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {catalogReview.products.map(
+                    (product) => (
+                      <tr
+                        key={
+                          product.catalogItemId
+                        }
+                      >
+                        <td>
+                          <strong>
+                            {product.name}
+                          </strong>
+                        </td>
+
+                        <td>
+                          {campaignProductPrice(
+                            product,
+                          )}
+                        </td>
+
+                        <td>
+                          <Badge
+                            tone={
+                              product.availability ===
+                              "in_stock"
+                                ? "success"
+                                : product.availability ===
+                                      "preorder" ||
+                                    product.availability ===
+                                      "backorder"
+                                  ? "warning"
+                                  : "neutral"
+                            }
+                          >
+                            {product.availability
+                              ? product.availability.replaceAll(
+                                  "_",
+                                  " ",
+                                )
+                              : "Unknown"}
+                          </Badge>
+                        </td>
+
+                        <td>
+                          {product.offerId ||
+                            product.catalogItemId}
+                        </td>
+                      </tr>
+                    ),
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {catalogReview.scope ===
+            "recommended" && (
+            <div
+              className="recommendation-strip"
+              style={{ marginTop: 12 }}
+            >
+              <Sparkles />
+
+              <div>
+                <div className="eyebrow">
+                  Selection evidence
+                </div>
+
+                <p>
+                  {catalogReview.recommendationMethod ===
+                  "first_party_orders_then_provider_attribution_then_catalog_quality"
+                    ? "9D Brain ranked these products using first-party paid-order evidence first, provider-attributed advertising outcomes second, and authoritative catalog quality third."
+                    : "These exact products were persisted by the recommendation engine for owner review."}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {!catalogReview.integrityOk && (
+            <div
+              className="recommendation-strip"
+              style={{ marginTop: 12 }}
+            >
+              <AlertCircle />
+
+              <div>
+                <div className="eyebrow">
+                  External action blocked
+                </div>
+
+                <p>
+                  Regenerate or repair this campaign
+                  before sending a Meta or Google
+                  advertising action for approval.
+                </p>
+              </div>
+            </div>
+          )}
+        </Card>
+      )}
+
       <div className="analysis-grid">
         <Card>
           <div className="eyebrow">Products & feed</div>
@@ -380,7 +725,12 @@ function CampaignProposalReview({
 export function CampaignsPage() {
   const { activeBusinessId, activeBusiness } = useBusiness();
   const queryClient = useQueryClient();
-  const [selectedId, setSelectedId] = useState("");
+  const [selectedId, setSelectedId] = useState(
+    () =>
+      new URLSearchParams(
+        window.location.search,
+      ).get("campaign") || "",
+  );
   const [creating, setCreating] = useState(() =>
     new URLSearchParams(window.location.search).has("new"),
   );
@@ -392,12 +742,119 @@ export function CampaignsPage() {
   const [error, setError] = useState("");
   const promotedProductId =
     new URLSearchParams(window.location.search).get("product") || "";
+
+  const [promotionSource, setPromotionSource] = useState<
+    "business" | "catalog"
+  >(() => (promotedProductId ? "catalog" : "business"));
+
+  const [catalogScope, setCatalogScope] = useState<
+    "recommended" | "all" | "selected"
+  >(() => (promotedProductId ? "selected" : "recommended"));
+
+  const [selectedCatalogProductIds, setSelectedCatalogProductIds] =
+    useState<string[]>(() =>
+      promotedProductId ? [promotedProductId] : [],
+    );
+
+  const [catalogSearch, setCatalogSearch] = useState("");
+
   const promotedProduct = useQuery({
     queryKey: ["catalog", activeBusinessId, "promote", promotedProductId],
     queryFn: () =>
       catalogApi.getCatalogItem(activeBusinessId, promotedProductId),
     enabled: Boolean(activeBusinessId && promotedProductId),
   });
+
+  const campaignCatalog = useQuery({
+    queryKey: [
+      "catalog",
+      activeBusinessId,
+      "campaign-selector",
+    ],
+    queryFn: ({ signal }) =>
+      catalogApi.listCatalogItems(
+        activeBusinessId,
+        {
+          itemType: "product",
+          status: "active",
+        },
+        signal,
+      ),
+    enabled: Boolean(
+      activeBusinessId &&
+        creating &&
+        !manualCampaign &&
+        promotionSource === "catalog",
+    ),
+    retry: false,
+  });
+
+  const eligibleCampaignCatalogProducts = useMemo(
+    () =>
+      (campaignCatalog.data ?? []).filter(
+        (item) =>
+          item.business_id === activeBusinessId &&
+          item.item_type === "product" &&
+          item.status === "active" &&
+          item.published,
+      ),
+    [activeBusinessId, campaignCatalog.data],
+  );
+
+  const eligibleCampaignCatalogProductIds = useMemo(
+    () =>
+      new Set(
+        eligibleCampaignCatalogProducts.map(
+          (item) => item.id,
+        ),
+      ),
+    [eligibleCampaignCatalogProducts],
+  );
+
+  const visibleCampaignCatalogProducts = useMemo(() => {
+    const query = catalogSearch.trim().toLowerCase();
+
+    if (!query) return eligibleCampaignCatalogProducts;
+
+    return eligibleCampaignCatalogProducts.filter((item) =>
+      [
+        item.name,
+        item.sku ?? "",
+        item.brand ?? "",
+        item.vendor ?? "",
+      ].some((value) =>
+        value.toLowerCase().includes(query),
+      ),
+    );
+  }, [
+    catalogSearch,
+    eligibleCampaignCatalogProducts,
+  ]);
+
+  const invalidSelectedCatalogProduct =
+    campaignCatalog.isSuccess &&
+    catalogScope === "selected" &&
+    selectedCatalogProductIds.some(
+      (id) =>
+        !eligibleCampaignCatalogProductIds.has(id),
+    );
+
+  useEffect(() => {
+    setCatalogSearch("");
+
+    if (promotedProductId) {
+      setPromotionSource("catalog");
+      setCatalogScope("selected");
+      setSelectedCatalogProductIds([
+        promotedProductId,
+      ]);
+      return;
+    }
+
+    setPromotionSource("business");
+    setCatalogScope("recommended");
+    setSelectedCatalogProductIds([]);
+  }, [activeBusinessId, promotedProductId]);
 
   const list = useQuery({
     queryKey: ["marketing", activeBusinessId, "campaigns", filter, page],
@@ -498,6 +955,59 @@ export function CampaignsPage() {
       event.preventDefault();
       const form = new FormData(event.currentTarget);
       const selected = selectedChannels(form);
+
+      const effectiveCatalogScope:
+        | "none"
+        | "selected"
+        | "all"
+        | "recommended" =
+        !manualCampaign &&
+        promotionSource === "catalog"
+          ? catalogScope
+          : "none";
+
+      const catalogItemIds =
+        effectiveCatalogScope === "selected"
+          ? selectedCatalogProductIds
+          : [];
+
+      if (
+        effectiveCatalogScope === "selected" &&
+        catalogItemIds.length === 0
+      ) {
+        throw new Error(
+          "Choose at least one eligible product.",
+        );
+      }
+
+      if (
+        effectiveCatalogScope === "selected" &&
+        catalogItemIds.length > 100
+      ) {
+        throw new Error(
+          "You can select up to 100 products.",
+        );
+      }
+
+      if (
+        effectiveCatalogScope !== "none" &&
+        campaignCatalog.isSuccess &&
+        eligibleCampaignCatalogProducts.length === 0
+      ) {
+        throw new Error(
+          "No eligible published products are available.",
+        );
+      }
+
+      if (
+        effectiveCatalogScope === "selected" &&
+        invalidSelectedCatalogProduct
+      ) {
+        throw new Error(
+          "A selected product is no longer eligible. Review your selection.",
+        );
+      }
+
       const input = {
         name: String(form.get("name")) || null,
         goal: String(form.get("objective")),
@@ -507,7 +1017,8 @@ export function CampaignsPage() {
         budget_mode: String(form.get("budget_mode")) as "daily" | "lifetime",
         start_date: String(form.get("start_date")) || null,
         end_date: String(form.get("end_date")) || null,
-        catalog_item_ids: promotedProductId ? [promotedProductId] : [],
+        catalog_scope: effectiveCatalogScope,
+        catalog_item_ids: catalogItemIds,
         offer: String(form.get("offer")) || null,
         offer_authorized: form.get("offer_authorized") === "on",
       };
@@ -691,6 +1202,69 @@ export function CampaignsPage() {
   });
 
   const selected = detail.data;
+
+  const syncMetaProductSet = useMutation({
+    mutationFn: ({
+      productGroupId,
+      destinationId,
+    }: {
+      productGroupId: string;
+      destinationId: string;
+    }) =>
+      commerceApi.productGroups.sync(
+        activeBusinessId,
+        productGroupId,
+        destinationId,
+      ),
+    onSuccess: async () => {
+      setNotice(
+        "Meta product set synchronized for this exact campaign selection. No campaign was launched and no ad spend occurred.",
+      );
+      setError("");
+
+      await Promise.all([
+        preflight.refetch(),
+        detail.refetch(),
+        queryClient.invalidateQueries({
+          queryKey: ["commerce", activeBusinessId],
+        }),
+      ]);
+    },
+    onError: (reason) =>
+      setError(
+        humanizeApiError(
+          reason,
+          "The exact Meta product set could not be synchronized. No campaign was launched and no spend occurred.",
+        ),
+      ),
+  });
+
+  const metaProductSetSyncRequired =
+    Boolean(
+      selected?.campaign_type === "catalog_sales" &&
+        preflight.data?.issues.some(
+          (issue) =>
+            issue.code ===
+            "campaign_product_set_sync_required",
+        ),
+    );
+
+  const metaProductSetSyncAvailable =
+    Boolean(
+      preflight.data?.product_group_id &&
+        preflight.data?.feed_destination_id,
+    );
+
+  const selectedCatalogReview =
+    selected
+      ? campaignCatalogReview(selected)
+      : null;
+
+  const catalogSelectionIntegrityBlocked =
+    Boolean(
+      selectedCatalogReview?.hasCatalogSelection &&
+        !selectedCatalogReview.integrityOk,
+    );
   const money = (value: string) =>
     new Intl.NumberFormat(undefined, {
       style: "currency",
@@ -922,6 +1496,341 @@ export function CampaignsPage() {
                 </div>
               </div>
             )}
+            {!manualCampaign && (
+              <div className="form-grid section-gap">
+                <div className="field full">
+                  <label>
+                    What do you want to promote?
+                  </label>
+
+                  <div className="checkbox-row">
+                    <label>
+                      <input
+                        type="radio"
+                        name="promotion_source"
+                        checked={
+                          promotionSource === "business"
+                        }
+                        onChange={() =>
+                          setPromotionSource("business")
+                        }
+                      />{" "}
+                      Business / service
+                    </label>
+
+                    <label>
+                      <input
+                        type="radio"
+                        name="promotion_source"
+                        checked={
+                          promotionSource === "catalog"
+                        }
+                        onChange={() =>
+                          setPromotionSource("catalog")
+                        }
+                      />{" "}
+                      Product catalog
+                    </label>
+                  </div>
+                </div>
+
+                {promotionSource === "catalog" && (
+                  <>
+                    <div className="field full">
+                      <label>
+                        Product selection
+                      </label>
+
+                      <div className="checkbox-row">
+                        <label>
+                          <input
+                            type="radio"
+                            name="catalog_scope"
+                            checked={
+                              catalogScope ===
+                              "recommended"
+                            }
+                            onChange={() =>
+                              setCatalogScope(
+                                "recommended",
+                              )
+                            }
+                          />{" "}
+                          Recommended by 9D Brain
+                        </label>
+
+                        <label>
+                          <input
+                            type="radio"
+                            name="catalog_scope"
+                            checked={
+                              catalogScope === "all"
+                            }
+                            onChange={() =>
+                              setCatalogScope("all")
+                            }
+                          />{" "}
+                          All products
+                        </label>
+
+                        <label>
+                          <input
+                            type="radio"
+                            name="catalog_scope"
+                            checked={
+                              catalogScope ===
+                              "selected"
+                            }
+                            onChange={() =>
+                              setCatalogScope(
+                                "selected",
+                              )
+                            }
+                          />{" "}
+                          Choose products
+                        </label>
+                      </div>
+                    </div>
+
+                    {campaignCatalog.isLoading && (
+                      <div className="recommendation-strip">
+                        <RefreshCw className="spin" />
+                        <div>
+                          <strong>
+                            Loading catalog…
+                          </strong>
+                        </div>
+                      </div>
+                    )}
+
+                    {campaignCatalog.isError && (
+                      <div className="recommendation-strip">
+                        <AlertCircle />
+                        <div>
+                          <strong>
+                            Catalog unavailable
+                          </strong>
+                          <p>
+                            Campaign generation is
+                            blocked until the catalog
+                            can be loaded.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {campaignCatalog.isSuccess &&
+                      eligibleCampaignCatalogProducts.length ===
+                        0 && (
+                        <div className="recommendation-strip">
+                          <AlertCircle />
+                          <div>
+                            <strong>
+                              No eligible products
+                            </strong>
+                            <p>
+                              Add or restore an active
+                              published product before
+                              creating a catalog
+                              campaign.
+                            </p>
+                          </div>
+                        </div>
+                      )}
+
+                    {campaignCatalog.isSuccess &&
+                      eligibleCampaignCatalogProducts.length >
+                        0 &&
+                      catalogScope ===
+                        "recommended" && (
+                        <div className="recommendation-strip">
+                          <Sparkles />
+                          <div>
+                            <strong>
+                              Evidence-backed selection
+                            </strong>
+                            <p>
+                              9D Brain will select up
+                              to 12 exact products from
+                              this business using
+                              first-party order
+                              evidence,
+                              provider-attributed
+                              performance, and catalog
+                              quality. You will review
+                              the final products before
+                              external execution.
+                            </p>
+                          </div>
+                        </div>
+                      )}
+
+                    {campaignCatalog.isSuccess &&
+                      eligibleCampaignCatalogProducts.length >
+                        0 &&
+                      catalogScope === "all" && (
+                        <div className="recommendation-strip">
+                          <Target />
+                          <div>
+                            <strong>
+                              All eligible products
+                            </strong>
+                            <p>
+                              {
+                                eligibleCampaignCatalogProducts.length
+                              }{" "}
+                              active published product
+                              {eligibleCampaignCatalogProducts.length ===
+                              1
+                                ? ""
+                                : "s"}{" "}
+                              currently qualify.
+                            </p>
+                          </div>
+                        </div>
+                      )}
+
+                    {campaignCatalog.isSuccess &&
+                      eligibleCampaignCatalogProducts.length >
+                        0 &&
+                      catalogScope ===
+                        "selected" && (
+                        <>
+                          <div className="field full">
+                            <label>
+                              Search products
+                            </label>
+                            <input
+                              type="search"
+                              value={catalogSearch}
+                              onChange={(event) =>
+                                setCatalogSearch(
+                                  event.target.value,
+                                )
+                              }
+                              placeholder="Search name, SKU, brand, or vendor…"
+                            />
+                          </div>
+
+                          <div className="field full">
+                            <label>
+                              Choose products ·{" "}
+                              {
+                                selectedCatalogProductIds.length
+                              }{" "}
+                              selected · maximum 100
+                            </label>
+
+                            <div className="checkbox-row">
+                              {visibleCampaignCatalogProducts.map(
+                                (item) => {
+                                  const checked =
+                                    selectedCatalogProductIds.includes(
+                                      item.id,
+                                    );
+
+                                  return (
+                                    <label key={item.id}>
+                                      <input
+                                        type="checkbox"
+                                        checked={
+                                          checked
+                                        }
+                                        disabled={
+                                          !checked &&
+                                          selectedCatalogProductIds.length >=
+                                            100
+                                        }
+                                        onChange={() =>
+                                          setSelectedCatalogProductIds(
+                                            (
+                                              current,
+                                            ) =>
+                                              current.includes(
+                                                item.id,
+                                              )
+                                                ? current.filter(
+                                                    (
+                                                      id,
+                                                    ) =>
+                                                      id !==
+                                                      item.id,
+                                                  )
+                                                : current.length <
+                                                    100
+                                                  ? [
+                                                      ...current,
+                                                      item.id,
+                                                    ]
+                                                  : current,
+                                          )
+                                        }
+                                      />{" "}
+                                      {item.name}
+                                      {" · "}
+                                      {item.price
+                                        ? new Intl.NumberFormat(
+                                            undefined,
+                                            {
+                                              style:
+                                                "currency",
+                                              currency:
+                                                item.currency ||
+                                                activeBusiness?.currency ||
+                                                "USD",
+                                            },
+                                          ).format(
+                                            Number(
+                                              item.price,
+                                            ),
+                                          )
+                                        : "Price unavailable"}
+                                      {" · "}
+                                      {item.availability.replaceAll(
+                                        "_",
+                                        " ",
+                                      )}
+                                    </label>
+                                  );
+                                },
+                              )}
+                            </div>
+                          </div>
+
+                          {!visibleCampaignCatalogProducts.length && (
+                            <div className="recommendation-strip">
+                              <AlertCircle />
+                              <div>
+                                <p>
+                                  No products match
+                                  this search.
+                                </p>
+                              </div>
+                            </div>
+                          )}
+
+                          {invalidSelectedCatalogProduct && (
+                            <div className="recommendation-strip">
+                              <AlertCircle />
+                              <div>
+                                <strong>
+                                  Selection changed
+                                </strong>
+                                <p>
+                                  One selected product
+                                  is no longer eligible.
+                                  Review the selection.
+                                </p>
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                  </>
+                )}
+              </div>
+            )}
+
             <div className="form-grid">
               <div className="field full">
                 <label>Business goal</label>
@@ -1052,7 +1961,19 @@ export function CampaignsPage() {
                 type="submit"
                 disabled={
                   create.isPending ||
-                  (Boolean(promotedProductId) && !promotedProduct.data)
+                  (Boolean(promotedProductId) &&
+                    !promotedProduct.data) ||
+                  (!manualCampaign &&
+                    promotionSource === "catalog" &&
+                    (campaignCatalog.isLoading ||
+                      campaignCatalog.isError ||
+                      eligibleCampaignCatalogProducts.length ===
+                        0)) ||
+                  (!manualCampaign &&
+                    promotionSource === "catalog" &&
+                    catalogScope === "selected" &&
+                    (selectedCatalogProductIds.length === 0 ||
+                      invalidSelectedCatalogProduct))
                 }
               >
                 <Sparkles />{" "}
@@ -1105,11 +2026,50 @@ export function CampaignsPage() {
                   >
                     <Copy /> Advanced · Edit
                   </Button>
+                  {selected.channels.includes("meta") &&
+                    metaProductSetSyncRequired && (
+                      <Button
+                        className="btn-sm"
+                        disabled={
+                          syncMetaProductSet.isPending ||
+                          catalogSelectionIntegrityBlocked ||
+                          !metaProductSetSyncAvailable
+                        }
+                        onClick={() => {
+                          const productGroupId =
+                            preflight.data?.product_group_id;
+                          const destinationId =
+                            preflight.data?.feed_destination_id;
+
+                          if (
+                            !productGroupId ||
+                            !destinationId
+                          ) {
+                            setError(
+                              "The exact Meta product-set repair target is unavailable. Refresh campaign preflight before continuing.",
+                            );
+                            return;
+                          }
+
+                          syncMetaProductSet.mutate({
+                            productGroupId,
+                            destinationId,
+                          });
+                        }}
+                      >
+                        <RefreshCw />{" "}
+                        {syncMetaProductSet.isPending
+                          ? "Syncing Meta product set…"
+                          : "Sync Meta product set"}
+                      </Button>
+                    )}
+
                   {selected.channels.includes("meta") && (
                     <Button
                       variant="primary"
                       disabled={
                         prepareAction.isPending ||
+                          catalogSelectionIntegrityBlocked ||
                         (selected.campaign_type === "catalog_sales" &&
                           !preflight.data?.ready)
                       }
@@ -1131,6 +2091,7 @@ export function CampaignsPage() {
                       variant="primary"
                       disabled={
                         prepareAction.isPending ||
+                          catalogSelectionIntegrityBlocked ||
                         (selected.campaign_type === "retail_performance_max" &&
                           !preflight.data?.ready)
                       }
@@ -1148,6 +2109,19 @@ export function CampaignsPage() {
                     </Button>
                   )}
                 </div>
+                {metaProductSetSyncRequired &&
+                  !metaProductSetSyncAvailable && (
+                    <div
+                      className="ai-banner"
+                      style={{ marginBottom: 18 }}
+                    >
+                      <AlertCircle />
+                      The exact campaign-owned Meta product
+                      set cannot be resolved safely. External
+                      Meta preparation remains blocked.
+                    </div>
+                  )}
+
                 {selected.ai_generated && (
                   <>
                     <SectionTitle
@@ -1475,7 +2449,7 @@ const contentTransitions: Record<
   archived: [],
 };
 
-type PostWorkspaceMode = "overview" | "edit" | "creative_brief";
+type PostWorkspaceMode = "overview" | "edit";
 
 type ContentVersionFormValues = {
   contentId: string;
@@ -1489,16 +2463,7 @@ type ContentScheduleFormValues = {
   scheduledFor: string;
 };
 
-type CreativeBriefFormValues = {
-  campaignId: string | null;
-  contentId: string;
-  assetType: string;
-  instructions: string;
-  aspectRatio: string | null;
-  width: number | null;
-  height: number | null;
-  altText: string | null;
-};
+
 
 export function SocialManagementPage() {
   const [location] = useLocation();
@@ -1513,17 +2478,12 @@ export function SocialManagementPage() {
   const [schedule, setSchedule] = useState<MarketingContent | null>(null);
   const [postWorkspaceMode, setPostWorkspaceMode] =
     useState<PostWorkspaceMode>("overview");
-  const [creativeBriefMedia, setCreativeBriefMedia] =
-    useState<CreativeMediaType>("image");
-  const [creativeProgress, setCreativeProgress] = useState<CreativeProgress>(null);
-  const [activeCreativeGeneration, setActiveCreativeGeneration] = useState<{
-    businessId: string;
-    assetId: string;
-    contentId?: string;
-  } | null>(null);
-  const [creativeActionError, setCreativeActionError] = useState("");
+
+
+
+
   const [advancedRequestHandled, setAdvancedRequestHandled] = useState(false);
-  const creativeOperationLock = useRef(false);
+
   const [calendarDays, setCalendarDays] = useState<1 | 7 | 30>(7);
   const [calendarChannel, setCalendarChannel] = useState<MarketingChannel | "">(
     "",
@@ -1624,27 +2584,6 @@ export function SocialManagementPage() {
       ),
     enabled: Boolean(activeBusinessId && selected),
   });
-  const activeCreativeAsset = useQuery({
-    queryKey: [
-      "marketing",
-      activeBusinessId,
-      "creative-asset",
-      activeCreativeGeneration?.assetId,
-    ],
-    queryFn: ({ signal }) => marketingApi.creative.get(
-      activeCreativeGeneration!.businessId,
-      activeCreativeGeneration!.assetId,
-      signal,
-    ),
-    enabled: Boolean(
-      activeCreativeGeneration &&
-      activeCreativeGeneration.businessId === activeBusinessId,
-    ),
-    refetchInterval: (query) =>
-      !query.state.data || isCreativeGenerationActive(query.state.data)
-        ? CREATIVE_GENERATION_POLL_MS
-        : false,
-  });
   const libraryAssets = useQuery({
     queryKey: ["marketing", activeBusinessId, "creative-assets", "content-library"],
     queryFn: ({ signal }) =>
@@ -1661,136 +2600,10 @@ export function SocialManagementPage() {
     queryClient.invalidateQueries({
       queryKey: ["marketing", activeBusinessId],
     });
-  const refreshCreatives = () => queryClient.invalidateQueries({
-    queryKey: ["marketing", activeBusinessId, "creative-assets"],
-  });
-  const refreshCreativeRecord = async (asset: CreativeAsset) => {
-    const refreshed = await queryClient.fetchQuery({
-      queryKey: ["marketing", activeBusinessId, "creative-asset", asset.id],
-      queryFn: ({ signal }) => marketingApi.creative.get(
-        activeBusinessId,
-        asset.id,
-        signal,
-      ),
-      staleTime: 0,
-    });
-    queryClient.setQueriesData<CreativeAsset[]>(
-      { queryKey: ["marketing", activeBusinessId, "creative-assets"] },
-      (current) => current?.map((item) => item.id === refreshed.id ? refreshed : item),
-    );
-    return refreshed;
-  };
   const refreshPublishingReadiness = () => queryClient.invalidateQueries({
     queryKey: ["integrations", activeBusinessId],
   });
-  const observeCreativeGeneration = (asset: CreativeAsset) => {
-    if (
-      !isCreativeGenerationActive(asset) ||
-      asset.business_id !== activeBusinessId
-    ) {
-      return;
-    }
-
-    queryClient.setQueryData<CreativeAsset>(
-      ["marketing", activeBusinessId, "creative-asset", asset.id],
-      asset,
-    );
-
-    setActiveCreativeGeneration({
-      businessId: activeBusinessId,
-      assetId: asset.id,
-      contentId: asset.content_id || undefined,
-    });
-    setCreativeProgress({
-      phase: asset.media_type === "video" ? "video_generation" : "visual",
-      contentId: asset.content_id || undefined,
-      assetId: asset.id,
-    });
-  };
   useEffect(() => {
-    setActiveCreativeGeneration((current) =>
-      current?.businessId === activeBusinessId ? current : null,
-    );
-  }, [activeBusinessId]);
-  useEffect(() => {
-    if (activeCreativeGeneration) return;
-    const active = [...(assets.data || []), ...(libraryAssets.data || [])].find(
-      isCreativeGenerationActive,
-    );
-    if (active) observeCreativeGeneration(active);
-  }, [activeCreativeGeneration, assets.data, libraryAssets.data]);
-
-  useEffect(() => {
-    const asset = activeCreativeAsset.data;
-    if (
-      !activeCreativeGeneration ||
-      !asset ||
-      activeCreativeGeneration.businessId !== activeBusinessId ||
-      asset.id !== activeCreativeGeneration.assetId ||
-      asset.business_id !== activeBusinessId ||
-      (
-        activeCreativeGeneration.contentId &&
-        asset.content_id !== activeCreativeGeneration.contentId
-      )
-    ) {
-      return;
-    }
-
-    const merge = (current: CreativeAsset[] | undefined) => [
-      asset,
-      ...(current ?? []).filter((item) => item.id !== asset.id),
-    ];
-
-    if (asset.content_id) {
-      queryClient.setQueryData<CreativeAsset[]>(
-        ["marketing", activeBusinessId, "creative-assets", asset.content_id],
-        merge,
-      );
-    }
-
-    queryClient.setQueryData<CreativeAsset[]>(
-      ["marketing", activeBusinessId, "creative-assets", "content-library"],
-      merge,
-    );
-  }, [
-    activeCreativeAsset.data,
-    activeCreativeGeneration,
-    activeBusinessId,
-    queryClient,
-  ]);
-
-  useEffect(() => {
-    const asset = activeCreativeAsset.data;
-    if (
-      !activeCreativeGeneration ||
-      !asset ||
-      activeCreativeGeneration.businessId !== activeBusinessId ||
-      asset.id !== activeCreativeGeneration.assetId ||
-      asset.business_id !== activeCreativeGeneration.businessId ||
-      (
-        activeCreativeGeneration.contentId &&
-        asset.content_id !== activeCreativeGeneration.contentId
-      ) ||
-      isCreativeGenerationActive(asset)
-    ) {
-      return;
-    }
-    setActiveCreativeGeneration(null);
-    setCreativeProgress(null);
-    setNotice(creativeResultNotice(asset));
-    setCreativeActionError(
-      asset.generation_status === "failed"
-        ? "The creative could not be completed. Its grounded strategy remains ready to retry."
-        : "",
-    );
-    void refreshCreatives();
-  }, [
-    activeCreativeAsset.data,
-    activeCreativeGeneration,
-    activeBusinessId,
-  ]);
-  useEffect(() => {
-    setCreativeActionError("");
     if (
       !advancedRequestHandled ||
       advancedRequest.contentId !== selected?.id
@@ -1807,10 +2620,6 @@ export function SocialManagementPage() {
     );
     if (!requestedContent) return;
     setSelected(requestedContent);
-    if (advancedRequest.media) {
-      setCreativeBriefMedia(advancedRequest.media);
-      setPostWorkspaceMode("creative_brief");
-    }
     setAdvancedRequestHandled(true);
   }, [advancedRequest, advancedRequestHandled, content.data]);
   const move = useMutation({
@@ -1956,174 +2765,6 @@ export function SocialManagementPage() {
     onError: (reason) =>
       setError(humanizeApiError(reason, "Calendar item could not be removed.")),
   });
-  const createBrief = useMutation({
-    mutationFn: (values: CreativeBriefFormValues) =>
-      marketingApi.creative.brief(activeBusinessId, {
-        campaign_id: values.campaignId,
-        content_id: values.contentId,
-        asset_type: values.assetType,
-        instructions: values.instructions,
-        aspect_ratio: values.aspectRatio,
-        width: values.width,
-        height: values.height,
-        alt_text: values.altText,
-      }),
-    onSuccess: () => {
-      setPostWorkspaceMode("overview");
-      setNotice(
-        "Creative strategy was saved and is ready for visual generation.",
-      );
-      setError("");
-    },
-    onError: (reason) =>
-      setError(
-        humanizeApiError(
-          reason,
-          "The creative strategy could not be prepared. Refresh to see saved progress before retrying.",
-        ),
-      ),
-    onSettled: () => refreshCreatives(),
-  });
-  const createVideoBrief = useMutation({
-    mutationFn: ({ item, instructions, duration, aspectRatio, style, audio, motion }: {
-      item: MarketingContent;
-      instructions: string;
-      duration: 6 | 8 | 15 | 30;
-      aspectRatio: "9:16" | "16:9" | "1:1";
-      style?: string;
-      audio?: string;
-      motion?: string;
-    }) => marketingApi.creative.videoStrategy(activeBusinessId, {
-      campaign_id: item.campaign_id,
-      content_id: item.id,
-      duration_seconds: duration,
-      aspect_ratio: aspectRatio,
-      instructions,
-      style: style || null,
-      audio_preference: audio || null,
-      motion_preference: motion || null,
-    }),
-    onSuccess: () => {
-      setPostWorkspaceMode("overview");
-      setNotice("Video strategy and storyboard were saved. No final video was rendered or published.");
-      setError("");
-    },
-    onError: (reason) => setError(humanizeApiError(reason, "The grounded video strategy could not be prepared.")),
-    onSettled: () => refreshCreatives(),
-  });
-  const createCreative = useMutation({
-    mutationFn: (item: MarketingContent) => createCreativeWithRecovery({
-      contentId: item.id,
-      createBrief: () => marketingApi.creative.brief(activeBusinessId, {
-        campaign_id: item.campaign_id,
-        content_id: item.id,
-        ...creativeFormatForContent(item),
-        instructions: item.creative_brief || `Create a professional campaign visual for ${item.title}.`,
-        alt_text: `Branded campaign creative for ${item.title}`,
-      }),
-      generate: (brief) => marketingApi.creative.generate(activeBusinessId, brief.id),
-      refresh: refreshCreatives,
-      onProgress: setCreativeProgress,
-    }),
-    onSuccess: (asset) => {
-      observeCreativeGeneration(asset);
-      setNotice(creativeResultNotice(asset));
-      setCreativeActionError("");
-      setError("");
-      void invalidate();
-    },
-    onError: (reason) =>
-      setCreativeActionError(
-        humanizeApiError(
-          reason,
-          "Visual could not be completed. Your post and saved creative progress remain available.",
-        ),
-      ),
-    onSettled: () => {
-      creativeOperationLock.current = false;
-    },
-  });
-  const createVideo = useMutation({
-    mutationFn: async (item: MarketingContent) => {
-      setCreativeProgress({ phase: "video_strategy", contentId: item.id });
-      try {
-        const strategy = await marketingApi.creative.videoStrategy(activeBusinessId, {
-          campaign_id: item.campaign_id,
-          content_id: item.id,
-          ...videoFormatForContent(item),
-          instructions: item.creative_brief || `Create a professional campaign video for ${item.title}.`,
-        });
-        setCreativeProgress({ phase: "video_generation", contentId: item.id, assetId: strategy.id });
-        return await marketingApi.creative.generateVideo(activeBusinessId, strategy.id);
-      } finally {
-        await refreshCreatives();
-        setCreativeProgress(null);
-      }
-    },
-    onSuccess: (asset) => {
-      observeCreativeGeneration(asset);
-      setNotice(creativeResultNotice(asset));
-      setCreativeActionError("");
-      setError("");
-      void invalidate();
-    },
-    onError: (reason) => setCreativeActionError(humanizeApiError(reason, "The video strategy could not be completed.")),
-    onSettled: () => { creativeOperationLock.current = false; },
-  });
-  const generateVisual = useMutation({
-    mutationFn: (asset: CreativeAsset) => runCreativeOperationWithRecovery({
-      progress: { phase: asset.media_type === "video" ? "video_generation" : "visual", contentId: asset.content_id || undefined, assetId: asset.id },
-      operation: () => asset.media_type === "video" ? marketingApi.creative.generateVideo(activeBusinessId, asset.id) : marketingApi.creative.generate(activeBusinessId, asset.id),
-      refresh: refreshCreatives,
-      onProgress: setCreativeProgress,
-    }),
-    onSuccess: (asset) => {
-      observeCreativeGeneration(asset);
-      setNotice(creativeResultNotice(asset));
-      setCreativeActionError("");
-      setError("");
-      void invalidate();
-    },
-    onError: (reason) =>
-      setCreativeActionError(
-        humanizeApiError(
-          reason,
-          "Visual could not be completed. Your post and saved creative progress remain available.",
-        ),
-      ),
-    onSettled: () => {
-      creativeOperationLock.current = false;
-    },
-  });
-  const regenerateVisual = useMutation({
-    mutationFn: ({ asset, mode }: { asset: CreativeAsset; mode?: "alternate_metaphor" | "alternate_composition" }) => runCreativeOperationWithRecovery({
-      progress: { phase: "visual", contentId: asset.content_id || undefined, assetId: asset.id },
-      operation: () => marketingApi.creative.regenerate(activeBusinessId, asset.id, mode),
-      refresh: refreshCreatives,
-      onProgress: setCreativeProgress,
-    }),
-    onSuccess: (asset) => {
-      observeCreativeGeneration(asset);
-      setNotice(
-        asset.generation_status === "ready"
-          ? "A new final creative is ready. Previous artwork remains in history."
-          : `${creativeResultNotice(asset)} The new revision remains in history.`,
-      );
-      setCreativeActionError("");
-      setError("");
-      void invalidate();
-    },
-    onError: (reason) =>
-      setCreativeActionError(
-        humanizeApiError(
-          reason,
-          "A new visual could not be completed. The current creative and earlier versions remain available.",
-        ),
-      ),
-    onSettled: () => {
-      creativeOperationLock.current = false;
-    },
-  });
   const regenerate = useMutation({
     mutationFn: (item: MarketingContent) =>
       marketingApi.content.generate(activeBusinessId, {
@@ -2220,59 +2861,16 @@ export function SocialManagementPage() {
   });
   const selectedProviderWriteReady = selectedPublishCapability.canPrepare;
   const selectedProviderCopy = selectedPublishCapability.copy;
-  const activeCreativeMatchesSelection =
-    activeCreativeGeneration?.businessId === activeBusinessId &&
-    activeCreativeGeneration.contentId === selected?.id;
-
-  const activeCreativeAssetId = activeCreativeMatchesSelection
-    ? activeCreativeGeneration?.assetId
-    : undefined;
-
-  const {
-    creative: workspaceCreative,
-    creatives: workspaceCreatives,
-  } = creativeWorkspaceForDisplay(
-    assets.data,
-    activeCreativeAssetId,
-    activeCreativeAsset.data,
-  );
-
-  const creativePhase = creativePhaseForDisplay(
-    creativeProgress,
-    selected?.id,
-    activeCreativeAssetId ?? workspaceCreative?.id,
-  );
-  const selectedCreativeFormat = selected
-    ? creativeFormatForContent(selected)
-    : creativeFormatForContent({
-        channel: "instagram",
-        content_type: "social_post",
-      });
-  const creativeOperationPending =
-    createCreative.isPending ||
-    createVideo.isPending ||
-    generateVisual.isPending ||
-    regenerateVisual.isPending ||
-    Boolean(activeCreativeGeneration);
   const postWorkspaceBusy =
-    creativeOperationPending ||
     edit.isPending ||
-    createBrief.isPending ||
-    createVideoBrief.isPending ||
     regenerate.isPending ||
     move.isPending ||
     createSchedule.isPending ||
     preparePublish.isPending;
-  const startCreativeOperation = (operation: () => void) => {
-    if (postWorkspaceBusy || creativeOperationLock.current) return;
-    creativeOperationLock.current = true;
-    setCreativeActionError("");
-    operation();
-  };
+
   const closePostWorkspace = () => {
     setSelected(null);
     setPostWorkspaceMode("overview");
-    setCreativeActionError("");
   };
   const returnToPostWorkspace = () => {
     setPostWorkspaceMode("overview");
@@ -2291,35 +2889,6 @@ export function SocialManagementPage() {
       title: String(form.get("title")),
       body: String(form.get("body")),
       cta: String(form.get("cta")) || null,
-    });
-  };
-  const submitCreativeBrief = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!selected) return;
-    const form = new FormData(event.currentTarget);
-    if (creativeBriefMedia === "video") {
-      createVideoBrief.mutate({
-        item: selected,
-        instructions: String(form.get("instructions")),
-        duration: Number(form.get("duration_seconds")) as 6 | 8 | 15 | 30,
-        aspectRatio: String(form.get("aspect_ratio")) as "9:16" | "16:9" | "1:1",
-        style: String(form.get("style") || ""),
-        audio: String(form.get("audio_preference") || ""),
-        motion: String(form.get("motion_preference") || ""),
-      });
-      return;
-    }
-    const width = String(form.get("width") || "");
-    const height = String(form.get("height") || "");
-    createBrief.mutate({
-      campaignId: selected.campaign_id || null,
-      contentId: selected.id,
-      assetType: String(form.get("asset_type")),
-      instructions: String(form.get("instructions")),
-      aspectRatio: String(form.get("aspect_ratio")) || null,
-      width: width ? Number(width) : null,
-      height: height ? Number(height) : null,
-      altText: String(form.get("alt_text")) || null,
     });
   };
   const SelectedPlatformIcon = selected
@@ -2353,38 +2922,6 @@ export function SocialManagementPage() {
           disabled={edit.isPending}
         >
           {edit.isPending ? "Saving…" : "Save new version"}
-        </Button>
-      </div>
-    </div>
-  ) : postWorkspaceMode === "creative_brief" ? (
-    <div className="cmo-post-workspace-footer">
-      <div className="cmo-post-workspace-secondary-actions">
-        <Button
-          type="button"
-          variant="secondary"
-          disabled={createBrief.isPending || createVideoBrief.isPending}
-          onClick={createAnotherContent}
-        >
-          <Plus /> Create another
-        </Button>
-        <Button
-          type="button"
-          variant="secondary"
-          disabled={createBrief.isPending || createVideoBrief.isPending}
-          onClick={returnToPostWorkspace}
-        >
-          Back to post
-        </Button>
-      </div>
-      <div className="cmo-post-workspace-primary-actions">
-        <Button
-          variant="primary"
-          type="submit"
-          form="cmo-creative-brief-form"
-          disabled={createBrief.isPending || createVideoBrief.isPending}
-        >
-          <Sparkles />
-          {createBrief.isPending || createVideoBrief.isPending ? "Preparing…" : `Prepare ${creativeBriefMedia} strategy`}
         </Button>
       </div>
     </div>
@@ -2945,18 +3482,14 @@ export function SocialManagementPage() {
         title={
           postWorkspaceMode === "edit"
             ? "Edit post"
-            : postWorkspaceMode === "creative_brief"
-              ? "Advanced creative brief"
-              : selected?.title || "Post workspace"
+            : selected?.title || "Post workspace"
         }
         description={
           !selected
             ? undefined
             : postWorkspaceMode === "edit"
               ? "Create a new immutable version while preserving the current post in history."
-              : postWorkspaceMode === "creative_brief"
-                ? "Prepare grounded visual direction for this post using the existing creative workflow."
-                : `${readableContentValue(selected.channel)} · ${readableContentValue(selected.status)} · Version ${selected.version}`
+              : `${readableContentValue(selected.channel)} · ${readableContentValue(selected.status)} · Version ${selected.version}`
         }
         onClose={closePostWorkspace}
         closeDisabled={postWorkspaceBusy}
@@ -3006,50 +3539,24 @@ export function SocialManagementPage() {
               </article>
             </section>
 
-            <section className="cmo-post-workspace-section" aria-labelledby="cmo-post-creative-heading">
+            <section
+              className="cmo-post-workspace-section"
+              aria-labelledby="cmo-post-media-heading"
+            >
               <div className="cmo-post-workspace-section-heading">
                 <div>
-                  <div className="eyebrow">Visual creative</div>
-                  <h2 id="cmo-post-creative-heading">Complete the post</h2>
+                  <div className="eyebrow">Post media</div>
+                  <h2 id="cmo-post-media-heading">
+                    Use your uploaded image or video
+                  </h2>
                 </div>
-                <Button
-                  variant="tertiary"
-                  className="btn-sm"
-                  onClick={() => {
-                    setError("");
-                    setCreativeBriefMedia("image");
-                    setPostWorkspaceMode("creative_brief");
-                  }}
-                  disabled={postWorkspaceBusy}
-                >
-                  Advanced brief
-                </Button>
               </div>
-              <CmoCreativePanel
-                creative={workspaceCreative}
-                creatives={workspaceCreatives}
-                isLoading={assets.isLoading}
-                error={assets.isError ? humanizeApiError(assets.error, "Retry loading creative history.") : null}
-                actionError={creativeActionError}
-                isPending={postWorkspaceBusy}
-                phase={creativePhase}
-                contentId={selected.id}
-                channel={selected.channel}
-                contentType={selected.content_type}
-                onCreate={(mediaType) => startCreativeOperation(() => {
-                  if (mediaType === "video") createVideo.mutate(selected);
-                  else createCreative.mutate(selected);
-                })}
-                onEditDirection={(mediaType) => {
-                  setCreativeBriefMedia(mediaType);
-                  setError("");
-                  setPostWorkspaceMode("creative_brief");
-                }}
-                onReload={(asset) => asset ? refreshCreativeRecord(asset) : assets.refetch()}
-                onRetry={(asset) => startCreativeOperation(() => generateVisual.mutate(asset))}
-                onRegenerate={(asset) => startCreativeOperation(() => regenerateVisual.mutate({ asset }))}
-                onVariation={(asset) => startCreativeOperation(() => regenerateVisual.mutate({ asset, mode: "alternate_metaphor" }))}
-              />
+
+              <p className="subtle">
+                Upload your own image or video in Create &amp; Publish.
+                9D Brain uses the approved media for organic publishing
+                and paid campaign preparation.
+              </p>
             </section>
 
             <section className="cmo-post-workspace-section" aria-labelledby="cmo-post-history-heading">
@@ -3157,98 +3664,7 @@ export function SocialManagementPage() {
             </section>
           </div>
         )}
-        {selected && postWorkspaceMode === "creative_brief" && (
-          <div className="cmo-post-workspace" data-testid="cmo-creative-brief-workspace">
-            <section className="cmo-post-workspace-section" aria-labelledby="cmo-creative-brief-heading">
-              <div className="cmo-post-workspace-section-heading">
-                <div>
-                  <div className="eyebrow">Advanced creative brief</div>
-                  <h2 id="cmo-creative-brief-heading">Prepare {creativeBriefMedia} strategy</h2>
-                </div>
-              </div>
-              <form
-                id="cmo-creative-brief-form"
-                className="cmo-drawer-form"
-                onSubmit={submitCreativeBrief}
-              >
-                {error && <p className="form-error" role="alert">{error}</p>}
-                <div className="cmo-drawer-grid">
-                  {creativeBriefMedia === "video" ? (
-                    <>
-                      <div className="field">
-                        <label>Video format</label>
-                        <select name="aspect_ratio" defaultValue={videoFormatForContent(selected).aspect_ratio}>
-                          <option value="9:16">Vertical · 9:16</option>
-                          <option value="16:9">Landscape · 16:9</option>
-                          <option value="1:1">Square · 1:1</option>
-                        </select>
-                      </div>
-                      <div className="field">
-                        <label>Duration</label>
-                        <select name="duration_seconds" defaultValue={videoFormatForContent(selected).duration_seconds}>
-                          <option value="6">6 seconds</option>
-                          <option value="8">8 seconds</option>
-                          <option value="15">15 seconds</option>
-                          <option value="30">30 seconds</option>
-                        </select>
-                      </div>
-                      <div className="field"><label>Style</label><input name="style" maxLength={160} placeholder="Cinematic, editorial, product-led…" /></div>
-                      <div className="field"><label>Audio</label><input name="audio_preference" maxLength={160} placeholder="Voiceover, music, ambient…" /></div>
-                      <div className="field full"><label>Motion</label><input name="motion_preference" maxLength={160} placeholder="Camera and transition preference" /></div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="field">
-                        <label>Asset type</label>
-                        <select name="asset_type" defaultValue={selectedCreativeFormat.asset_type}>
-                          <option value="social_square">Social square</option>
-                          <option value="story_reel">Story / reel</option>
-                          <option value="landscape_ad">Landscape ad</option>
-                          <option value="display_banner">Display banner</option>
-                          <option value="creative_brief">Creative brief only</option>
-                          <option value="other">Other</option>
-                        </select>
-                      </div>
-                      <div className="field"><label>Aspect ratio</label><input name="aspect_ratio" maxLength={16} defaultValue={selectedCreativeFormat.aspect_ratio} /></div>
-                    </>
-                  )}
-                  <div className="field full">
-                    <label>{creativeBriefMedia === "video" ? "Video direction" : "Visual instructions"}</label>
-                    <textarea
-                      name="instructions"
-                      required
-                      maxLength={creativeBriefMedia === "video" ? 2000 : 5000}
-                      placeholder={creativeBriefMedia === "video" ? "Optional campaign idea, story, pacing, and production preferences. AI CMO will complete the professional brief." : "Describe composition, brand treatment, subject, and constraints using trusted product facts."}
-                      defaultValue={creativeBriefMedia === "video" ? selected.creative_brief || `Create a business-specific ${selected.channel.replaceAll("_", " ")} video for “${selected.title}”.` : ""}
-                    />
-                  </div>
-                  {creativeBriefMedia === "image" && <><div className="field">
-                    <label>Width</label>
-                    <input
-                      name="width"
-                      type="number"
-                      min="1"
-                      max="20000"
-                      defaultValue={selectedCreativeFormat.width}
-                    />
-                  </div><div className="field">
-                    <label>Height</label>
-                    <input
-                      name="height"
-                      type="number"
-                      min="1"
-                      max="20000"
-                      defaultValue={selectedCreativeFormat.height}
-                    />
-                  </div><div className="field full">
-                    <label>Alt text</label>
-                    <textarea name="alt_text" maxLength={1000} />
-                  </div></>}
-                </div>
-              </form>
-            </section>
-          </div>
-        )}
+
       </WorkspaceDrawer>
       {schedule && (
         <Modal

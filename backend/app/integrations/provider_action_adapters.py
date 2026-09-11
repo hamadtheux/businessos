@@ -364,6 +364,70 @@ class ProviderConnectorActionAdapter:
         if account is None:
             raise ConnectorRequestNotSentError("ad_account_selection_required")
         if isinstance(payload, CreateMetaCampaignPayload):
+            media_urls = tuple(
+                getattr(payload, "campaign_media_urls", ()) or ()
+            )
+            media_page_ref: str | None = None
+            media_optimization_goal: str | None = None
+
+            if media_urls:
+                if (
+                    len(media_urls) != 3
+                    or any(
+                        not isinstance(url, str)
+                        or not _safe_public_media_url(url)
+                        for url in media_urls
+                    )
+                ):
+                    raise ConnectorRequestNotSentError(
+                        "meta_campaign_media_invalid"
+                    )
+
+                media_page_ref = (
+                    payload.page_ref
+                    or _resource(resources, "facebook_page")
+                )
+                if media_page_ref is None:
+                    raise ConnectorRequestNotSentError(
+                        "facebook_page_selection_required"
+                    )
+
+                # Ad-set lifetime budgets require scheduling information that is
+                # not part of the current governed campaign action contract.
+                # Never silently reinterpret lifetime spend as daily spend.
+                if payload.budget_period != "daily":
+                    raise ConnectorRequestNotSentError(
+                        "daily_budget_required"
+                    )
+
+                media_optimization_goal = {
+                    "awareness": "REACH",
+                    "traffic": "LINK_CLICKS",
+                    "engagement": "POST_ENGAGEMENT",
+                    "sales": "OFFSITE_CONVERSIONS",
+                }.get(payload.objective)
+
+                if media_optimization_goal is None:
+                    raise ConnectorRequestNotSentError(
+                        "meta_campaign_objective_setup_required"
+                    )
+
+                if (
+                    payload.objective in {"traffic", "sales"}
+                    and not payload.creative.destination_url
+                ):
+                    raise ConnectorRequestNotSentError(
+                        "meta_campaign_destination_required"
+                    )
+
+                if (
+                    payload.objective == "sales"
+                    and payload.conversion_dataset_ref is None
+                ):
+                    raise ConnectorRequestNotSentError(
+                        "meta_conversion_dataset_required"
+                    )
+
             commerce_values = (
                 payload.catalog_ref,
                 payload.product_set_ref,
@@ -400,6 +464,145 @@ class ProviderConnectorActionAdapter:
                 },
             )
             campaign_reference = _required_reference(response, "id")
+
+            if media_urls:
+                try:
+                    ad_set_data: dict[str, object] = {
+                        "name": f"{payload.campaign_name} audience"[:200],
+                        "campaign_id": campaign_reference,
+                        "daily_budget": str(int(payload.budget * 100)),
+                        "billing_event": "IMPRESSIONS",
+                        "optimization_goal": media_optimization_goal,
+                        "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+                        "targeting": json.dumps(
+                            {
+                                "geo_locations": {
+                                    "countries": payload.audience.countries
+                                }
+                            },
+                            separators=(",", ":"),
+                        ),
+                        "status": "PAUSED",
+                    }
+
+                    if payload.objective in {"traffic", "sales"}:
+                        ad_set_data["destination_type"] = "WEBSITE"
+
+                    if payload.objective == "sales":
+                        ad_set_data["promoted_object"] = json.dumps(
+                            {
+                                "pixel_id": payload.conversion_dataset_ref,
+                                "custom_event_type": "PURCHASE",
+                            },
+                            separators=(",", ":"),
+                        )
+
+                    ad_set = await self._http.request_json(
+                        "POST",
+                        f"{self._meta_root()}/{account}/adsets",
+                        headers=headers,
+                        data=ad_set_data,
+                    )
+                    ad_set_reference = _required_reference(ad_set, "id")
+
+                    destination = payload.creative.destination_url
+                    object_story_spec: dict[str, object] = {
+                        "page_id": media_page_ref,
+                    }
+
+                    if destination:
+                        link_data: dict[str, object] = {
+                            "link": destination,
+                            "message": (
+                                payload.primary_text
+                                or payload.campaign_name
+                            ),
+                            "name": (
+                                payload.headline
+                                or payload.campaign_name
+                            ),
+                            "description": payload.description or "",
+                            # The first dispatch variant is the broadly
+                            # compatible 1:1 square derivative.
+                            "picture": media_urls[0],
+                            "call_to_action": {
+                                "type": payload.call_to_action,
+                                "value": {"link": destination},
+                            },
+                        }
+                        object_story_spec["link_data"] = link_data
+                    else:
+                        # Awareness/engagement campaigns do not need a fake
+                        # website destination. Meta's PhotoData contract
+                        # supports an image URL + caption directly.
+                        object_story_spec["photo_data"] = {
+                            "url": media_urls[0],
+                            "caption": (
+                                payload.primary_text
+                                or payload.campaign_name
+                            ),
+                        }
+
+                    creative = await self._http.request_json(
+                        "POST",
+                        f"{self._meta_root()}/{account}/adcreatives",
+                        headers=headers,
+                        data={
+                            "name": (
+                                f"{payload.campaign_name} uploaded media"
+                            )[:200],
+                            "object_story_spec": json.dumps(
+                                object_story_spec,
+                                separators=(",", ":"),
+                            ),
+                        },
+                    )
+                    creative_reference = _required_reference(
+                        creative,
+                        "id",
+                    )
+
+                    ad = await self._http.request_json(
+                        "POST",
+                        f"{self._meta_root()}/{account}/ads",
+                        headers=headers,
+                        data={
+                            "name": f"{payload.campaign_name} ad"[:200],
+                            "adset_id": ad_set_reference,
+                            "creative": json.dumps(
+                                {"creative_id": creative_reference},
+                                separators=(",", ":"),
+                            ),
+                            "status": "PAUSED",
+                        },
+                    )
+                    ad_reference = _required_reference(ad, "id")
+                except (
+                    _ProviderHttpError,
+                    IntegrationProviderUnavailableError,
+                    ConnectorRequestNotSentError,
+                    RuntimeError,
+                ):
+                    # The provider campaign already exists at this point.
+                    # Any later failure has an uncertain external outcome;
+                    # never blind-retry and risk duplicate spend objects.
+                    raise RuntimeError(
+                        "provider_outcome_unknown"
+                    ) from None
+
+                return ConnectorActionResult(
+                    succeeded=True,
+                    external_reference_id=campaign_reference,
+                    safe_metadata={
+                        "provider": "meta_ads",
+                        "status": "provider_pending",
+                        "media_source": "uploaded",
+                        "ad_set_reference": ad_set_reference,
+                        "creative_reference": creative_reference,
+                        "ad_reference": ad_reference,
+                    },
+                )
+
             if commerce_campaign:
                 try:
                     ad_set = await self._http.request_json(
@@ -520,9 +723,60 @@ class ProviderConnectorActionAdapter:
             f"/customers/{customer}"
         )
         if isinstance(payload, CreateGoogleAdsCampaignPayload):
-            micros = str(int(payload.budget * 1_000_000))
-            if payload.network == "performance_max" and payload.merchant_account_ref:
-                operations = _google_retail_pmax_operations(customer, payload, micros)
+            campaign_media_bytes = tuple(
+                getattr(
+                    payload,
+                    "campaign_media_bytes",
+                    (),
+                )
+                or ()
+            )
+
+            # Legacy Google media dispatch used signed URLs. Google PMax
+            # requires real Asset resources backed by the verified private
+            # bytes contract. Never silently discard an approved owner's
+            # uploaded media and create a media-less campaign.
+            legacy_campaign_media_urls = tuple(
+                getattr(
+                    payload,
+                    "campaign_media_urls",
+                    (),
+                )
+                or ()
+            )
+
+            if (
+                legacy_campaign_media_urls
+                and not campaign_media_bytes
+            ):
+                raise ConnectorRequestNotSentError(
+                    "google_campaign_media_asset_upload_required"
+                )
+
+            micros = str(
+                int(payload.budget * 1_000_000)
+            )
+
+            if campaign_media_bytes:
+                operations = (
+                    _google_standard_pmax_operations(
+                        customer,
+                        payload,
+                        micros,
+                    )
+                )
+            elif (
+                payload.network
+                == "performance_max"
+                and payload.merchant_account_ref
+            ):
+                operations = (
+                    _google_retail_pmax_operations(
+                        customer,
+                        payload,
+                        micros,
+                    )
+                )
             else:
                 operations = [
                     {"campaignBudgetOperation": {"create": {
@@ -539,6 +793,9 @@ class ProviderConnectorActionAdapter:
                         "advertisingChannelType": payload.network.upper(),
                         "campaignBudget": f"customers/{customer}/campaignBudgets/-1",
                         "maximizeConversions": {},
+                        "containsEuPoliticalAdvertising": (
+                            payload.eu_political_advertising_status
+                        ),
                     }}},
                 ]
             response = await self._http.request_json(
@@ -555,8 +812,12 @@ class ProviderConnectorActionAdapter:
             metadata: dict[str, str | int | bool] = {
                 "provider": "google_ads", "status": "paused",
             }
-            if payload.network == "performance_max" and payload.merchant_account_ref:
-                metadata.update(_google_child_references(response))
+            if payload.network == "performance_max":
+                metadata.update(
+                    _google_child_references(
+                        response
+                    )
+                )
             return ConnectorActionResult(
                 succeeded=True,
                 external_reference_id=reference,
@@ -641,6 +902,283 @@ def build_configured_action_adapters(
     return adapters
 
 
+def _google_standard_pmax_operations(
+    customer: str,
+    payload,
+    micros: str,
+) -> list[dict[str, object]]:
+    if (
+        payload.network != "performance_max"
+        or payload.merchant_account_ref is not None
+        or not payload.creative.destination_url
+        or not payload.creative.destination_url.startswith("https://")
+        or not payload.business_name
+        or not payload.business_logo_ref
+    ):
+        raise ConnectorRequestNotSentError(
+            "google_pmax_configuration_required"
+        )
+
+    media = tuple(
+        getattr(
+            payload,
+            "campaign_media_bytes",
+            (),
+        )
+        or ()
+    )
+    logo = getattr(
+        payload,
+        "campaign_logo_bytes",
+        b"",
+    )
+
+    if (
+        len(media) != 2
+        or any(
+            not isinstance(item, bytes)
+            or not item
+            or len(item) > 5 * 1024 * 1024
+            for item in media
+        )
+        or not isinstance(logo, bytes)
+        or not logo
+        or len(logo) > 5 * 1024 * 1024
+    ):
+        raise ConnectorRequestNotSentError(
+            "google_pmax_image_assets_required"
+        )
+
+    if (
+        len(payload.headlines) < 3
+        or len(payload.long_headlines) < 1
+        or len(payload.descriptions) < 2
+    ):
+        raise ConnectorRequestNotSentError(
+            "google_pmax_text_assets_required"
+        )
+
+    budget = (
+        f"customers/{customer}/campaignBudgets/-1"
+    )
+    campaign = (
+        f"customers/{customer}/campaigns/-2"
+    )
+    asset_group = (
+        f"customers/{customer}/assetGroups/-3"
+    )
+
+    operations: list[dict[str, object]] = [
+        {
+            "campaignBudgetOperation": {
+                "create": {
+                    "resourceName": budget,
+                    "name": (
+                        f"{payload.campaign_name} budget"
+                    ),
+                    "amountMicros": micros,
+                    "deliveryMethod": "STANDARD",
+                    "explicitlyShared": False,
+                }
+            }
+        }
+    ]
+
+    next_asset_id = -10
+    asset_links: list[
+        tuple[str, str]
+    ] = []
+
+    def create_text_asset(
+        text: str,
+        field_type: str,
+    ) -> str:
+        nonlocal next_asset_id
+
+        resource = (
+            f"customers/{customer}/assets/"
+            f"{next_asset_id}"
+        )
+        next_asset_id -= 1
+
+        operations.append(
+            {
+                "assetOperation": {
+                    "create": {
+                        "resourceName": resource,
+                        "textAsset": {
+                            "text": text,
+                        },
+                    }
+                }
+            }
+        )
+        asset_links.append(
+            (resource, field_type)
+        )
+        return resource
+
+    def create_image_asset(
+        content: bytes,
+        field_type: str,
+        name: str,
+    ) -> str:
+        nonlocal next_asset_id
+
+        resource = (
+            f"customers/{customer}/assets/"
+            f"{next_asset_id}"
+        )
+        next_asset_id -= 1
+
+        operations.append(
+            {
+                "assetOperation": {
+                    "create": {
+                        "resourceName": resource,
+                        "name": name[:128],
+                        "imageAsset": {
+                            "data": base64.b64encode(
+                                content
+                            ).decode("ascii"),
+                        },
+                    }
+                }
+            }
+        )
+        asset_links.append(
+            (resource, field_type)
+        )
+        return resource
+
+    business_name_asset = create_text_asset(
+        payload.business_name,
+        "BUSINESS_NAME",
+    )
+    logo_asset = create_image_asset(
+        logo,
+        "LOGO",
+        f"{payload.campaign_name} logo",
+    )
+
+    landscape_asset = create_image_asset(
+        media[1],
+        "MARKETING_IMAGE",
+        f"{payload.campaign_name} landscape",
+    )
+    square_asset = create_image_asset(
+        media[0],
+        "SQUARE_MARKETING_IMAGE",
+        f"{payload.campaign_name} square",
+    )
+
+    for headline in payload.headlines:
+        create_text_asset(
+            headline,
+            "HEADLINE",
+        )
+
+    for long_headline in payload.long_headlines:
+        create_text_asset(
+            long_headline,
+            "LONG_HEADLINE",
+        )
+
+    for description in payload.descriptions:
+        create_text_asset(
+            description,
+            "DESCRIPTION",
+        )
+
+    operations.append(
+        {
+            "campaignOperation": {
+                "create": {
+                    "resourceName": campaign,
+                    "name": payload.campaign_name,
+                    "status": "PAUSED",
+                    "advertisingChannelType": (
+                        "PERFORMANCE_MAX"
+                    ),
+                    "campaignBudget": budget,
+                    "maximizeConversions": {},
+                    "brandGuidelinesEnabled": True,
+                    "containsEuPoliticalAdvertising": (
+                        payload.eu_political_advertising_status
+                    ),
+                }
+            }
+        }
+    )
+
+    # Brand-guideline assets belong at campaign level.
+    for resource, field_type in (
+        (
+            business_name_asset,
+            "BUSINESS_NAME",
+        ),
+        (
+            logo_asset,
+            "LOGO",
+        ),
+    ):
+        operations.append(
+            {
+                "campaignAssetOperation": {
+                    "create": {
+                        "campaign": campaign,
+                        "asset": resource,
+                        "fieldType": field_type,
+                    }
+                }
+            }
+        )
+
+    operations.append(
+        {
+            "assetGroupOperation": {
+                "create": {
+                    "resourceName": asset_group,
+                    "name": (
+                        f"{payload.campaign_name} creative"
+                    ),
+                    "campaign": campaign,
+                    "finalUrls": [
+                        payload.creative.destination_url
+                    ],
+                    # Campaign remains PAUSED, so no spend can
+                    # occur. Keeping the asset group enabled
+                    # avoids silently creating an unusable child.
+                    "status": "ENABLED",
+                }
+            }
+        }
+    )
+
+    # Everything except brand-guideline assets belongs to
+    # the standard PMax AssetGroup.
+    for resource, field_type in asset_links:
+        if field_type in {
+            "BUSINESS_NAME",
+            "LOGO",
+        }:
+            continue
+
+        operations.append(
+            {
+                "assetGroupAssetOperation": {
+                    "create": {
+                        "assetGroup": asset_group,
+                        "asset": resource,
+                        "fieldType": field_type,
+                    }
+                }
+            }
+        )
+
+    return operations
+
+
 def _google_retail_pmax_operations(customer: str, payload, micros: str) -> list[dict[str, object]]:
     merchant = payload.merchant_account_ref
     if merchant is None or not merchant.isdigit() or not payload.creative.destination_url:
@@ -663,6 +1201,9 @@ def _google_retail_pmax_operations(customer: str, payload, micros: str) -> list[
             "advertisingChannelType": "PERFORMANCE_MAX",
             "campaignBudget": budget,
             "maximizeConversionValue": {},
+            "containsEuPoliticalAdvertising": (
+                payload.eu_political_advertising_status
+            ),
             "shoppingSetting": {
                 "merchantId": merchant,
                 "campaignPriority": 0,

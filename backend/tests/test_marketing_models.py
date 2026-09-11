@@ -32,7 +32,6 @@ from app.models.marketing import (  # noqa: E402
 from app.schemas.marketing import AudienceCreate, CampaignCreate, CampaignUpdate, ChannelConfiguration, MarketingPlanUpdate, PerformanceCreate, ScheduleCreate  # noqa: E402
 from app.schemas.operations import ReportGenerateRequest  # noqa: E402
 from app.services.action_registry import ACTION_REGISTRY  # noqa: E402
-from app.services.creative_provider import CreativeGenerationRequest, CreativeProviderNotConfiguredError, UnavailableCreativeGenerationProvider  # noqa: E402
 
 
 class MarketingModelTests(unittest.TestCase):
@@ -87,14 +86,6 @@ class MarketingModelTests(unittest.TestCase):
         self.assertTrue(required.issubset(ACTION_REGISTRY.action_types))
         self.assertEqual(len(ACTION_REGISTRY.action_types), len(ACTION_REGISTRY.definitions))
 
-    def test_creative_provider_foundation_defaults_to_explicitly_disabled(self) -> None:
-        request = CreativeGenerationRequest(business_id=uuid4(), creative_asset_id=uuid4(), instructions="Create a grounded draft", width=1080, height=1080, aspect_ratio="1:1")
-
-        async def execute() -> None:
-            with self.assertRaises(CreativeProviderNotConfiguredError):
-                await UnavailableCreativeGenerationProvider().generate_draft(request)
-
-        asyncio.run(execute())
 
 
 class MarketingSchemaTests(unittest.TestCase):

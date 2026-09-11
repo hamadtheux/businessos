@@ -9,9 +9,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies.ai_agent import AIAgentProviderDependency
-from app.api.dependencies.creative import (
-    VideoGenerationProviderDependency,
-)
 from app.api.dependencies.business import BusinessAccessDependency, require_business_role
 from app.api.response_materialization import materialize_response_before_commit
 from app.db.session import get_db_session
@@ -510,133 +507,70 @@ async def read_creative_asset(
     )
 
 
-@router.post("/creative-assets/brief", response_model=CreativeAssetResponse, status_code=status.HTTP_201_CREATED)
-async def create_creative_brief(data: CreativeBriefCreate, access: BusinessAccessDependency, response: Response, session: SessionDependency, provider: AIAgentProviderDependency, storage: ObjectStorageDependency):
-    await _guard(session, access.business.id, "marketing_cmo", ai=True)
-    return await _mutate_creative(response, session, service.create_creative_brief(session, business_id=access.business.id, actor_user_id=access.user.id, data=data, provider=provider), business_id=access.business.id, storage=storage)
-
-
-@router.post(
-    "/creative-assets/video/strategy",
-    response_model=CreativeAssetResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_video_creative_strategy(
-    data: VideoCreativeCreateRequest,
-    access: BusinessAccessDependency,
-    response: Response,
-    session: SessionDependency,
-    provider: AIAgentProviderDependency,
-    storage: ObjectStorageDependency,
-):
-    await _guard(session, access.business.id, "marketing_cmo", ai=True)
-    return await _mutate_creative(
-        response,
-        session,
-        service.create_video_creative_strategy(
-            session,
-            business_id=access.business.id,
-            actor_user_id=access.user.id,
-            data=data,
-            provider=provider,
-        ),
-        business_id=access.business.id,
-        storage=storage,
+def _raise_creative_generation_retired() -> None:
+    raise HTTPException(
+        status.HTTP_410_GONE,
+        {
+            "code": "creative_generation_retired",
+            "message": (
+                "AI image and video generation has been retired. "
+                "Upload your own image or video instead."
+            ),
+        },
+        headers=_PRIVATE_HEADERS,
     )
 
 
+@router.post("/creative-assets/brief")
+async def create_creative_brief(
+    data: CreativeBriefCreate,
+    access: BusinessAccessDependency,
+):
+    del data, access
+    _raise_creative_generation_retired()
+
+
+@router.post("/creative-assets/video/strategy")
+async def create_video_creative_strategy(
+    data: VideoCreativeCreateRequest,
+    access: BusinessAccessDependency,
+):
+    del data, access
+    _raise_creative_generation_retired()
+
+
 @router.post(
-    "/creative-assets/{creative_asset_id}/video/generate",
-    response_model=CreativeAssetResponse,
+    "/creative-assets/{creative_asset_id}/video/generate"
 )
 async def start_video_generation(
     creative_asset_id: UUID,
     access: BusinessAccessDependency,
-    response: Response,
-    session: SessionDependency,
-    provider: VideoGenerationProviderDependency,
-    storage: ObjectStorageDependency,
 ):
-    await _guard(session, access.business.id, "marketing_cmo", ai=True)
-    return await _mutate_creative(
-        response,
-        session,
-        service.start_video_generation(
-            session,
-            business_id=access.business.id,
-            creative_asset_id=creative_asset_id,
-            actor_user_id=access.user.id,
-            provider=provider,
-        ),
-        business_id=access.business.id,
-        storage=storage,
-    )
+    del creative_asset_id, access
+    _raise_creative_generation_retired()
 
 
 @router.post(
-    "/creative-assets/{creative_asset_id}/generate",
-    response_model=CreativeAssetResponse,
-    status_code=status.HTTP_202_ACCEPTED,
+    "/creative-assets/{creative_asset_id}/generate"
 )
 async def generate_creative_asset(
     creative_asset_id: UUID,
     access: BusinessAccessDependency,
-    response: Response,
-    session: SessionDependency,
-    storage: ObjectStorageDependency,
 ):
-    await _guard(
-        session,
-        access.business.id,
-        "marketing_cmo",
-        ai=True,
-    )
-    return await _mutate_creative(
-        response,
-        session,
-        service.queue_creative_asset_generation(
-            session,
-            business_id=access.business.id,
-            creative_asset_id=creative_asset_id,
-            actor_user_id=access.user.id,
-        ),
-        business_id=access.business.id,
-        storage=storage,
-    )
+    del creative_asset_id, access
+    _raise_creative_generation_retired()
 
 
 @router.post(
-    "/creative-assets/{creative_asset_id}/regenerate",
-    response_model=CreativeAssetResponse,
-    status_code=status.HTTP_202_ACCEPTED,
+    "/creative-assets/{creative_asset_id}/regenerate"
 )
 async def regenerate_creative_asset(
     creative_asset_id: UUID,
     access: BusinessAccessDependency,
-    response: Response,
-    session: SessionDependency,
-    storage: ObjectStorageDependency,
     data: CreativeVariationRequest | None = None,
 ):
-    await _guard(
-        session,
-        access.business.id,
-        "marketing_cmo",
-        ai=True,
-    )
-    return await _mutate_creative(
-        response,
-        session,
-        service.queue_creative_asset_regeneration(
-            session,
-            business_id=access.business.id,
-            creative_asset_id=creative_asset_id,
-            actor_user_id=access.user.id,
-            variation_mode=(data.variation_mode if data is not None else None),
-        ),
-        business_id=access.business.id,
-        storage=storage,
-    )
+    del creative_asset_id, access, data
+    _raise_creative_generation_retired()
 
 
 @router.get("/calendar", response_model=list[ScheduleResponse])

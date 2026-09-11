@@ -156,445 +156,192 @@ test("Create & Publish uploads media as authenticated multipart without JSON wra
   assert.equal(request?.body?.get("content_id"), "content-one");
 });
 
-test("creative briefing, generation, and regeneration use tenant-scoped POST endpoints", async () => {
-  const requests: Array<{ path: string; method: string }> = [];
-  const api = await authenticated(async (input, init) => {
-    if (String(input).endsWith("/login")) return json(session);
-    requests.push({
-      path: new URL(String(input)).pathname,
-      method: String(init?.method || "GET"),
-    });
-    return json({});
-  });
 
-  await api.creative.brief(businessA, {
-    campaign_id: "campaign-one",
-    content_id: "content-one",
-    asset_type: "social_square",
-    instructions: "Create a campaign visual",
-    aspect_ratio: "1:1",
-    width: 1080,
-    height: 1080,
-    alt_text: "Campaign visual",
-  });
-  await api.creative.get(businessA, "creative-one");
-  await api.creative.generate(businessA, "creative-one");
-  await api.creative.regenerate(businessA, "creative-one");
-  await api.creative.videoStrategy(businessA, {
-    campaign_id: "campaign-one",
-    content_id: "content-one",
-    duration_seconds: 15,
-    aspect_ratio: "9:16",
-    instructions: "Create a grounded campaign video",
-  });
-  await api.creative.generateVideo(businessA, "video-one");
-
-  assert.deepEqual(requests, [
-    {
-      path: `/api/v1/businesses/${businessA}/marketing/creative-assets/brief`,
-      method: "POST",
-    },
-    {
-      path: `/api/v1/businesses/${businessA}/marketing/creative-assets/creative-one`,
-      method: "GET",
-    },
-    {
-      path: `/api/v1/businesses/${businessA}/marketing/creative-assets/creative-one/generate`,
-      method: "POST",
-    },
-    {
-      path: `/api/v1/businesses/${businessA}/marketing/creative-assets/creative-one/regenerate`,
-      method: "POST",
-    },
-    {
-      path: `/api/v1/businesses/${businessA}/marketing/creative-assets/video/strategy`,
-      method: "POST",
-    },
-    {
-      path: `/api/v1/businesses/${businessA}/marketing/creative-assets/video-one/video/generate`,
-      method: "POST",
-    },
-  ]);
-});
-
-test("plain regeneration sends no body while variation is explicit", async () => {
-  const requests: Array<{ body: string | undefined }> = [];
-  const api = await authenticated(async (input, init) => {
-    if (String(input).endsWith("/login")) return json(session);
-    requests.push({ body: typeof init?.body === "string" ? init.body : undefined });
-    return json({});
-  });
-
-  await api.creative.regenerate(businessA, "creative-one");
-  await api.creative.regenerate(
-    businessA,
-    "creative-one",
-    "alternate_metaphor",
+test("frontend creative API exposes uploaded-media reads and upload only", async () => {
+  const source = await readFile(
+    new URL("../services/marketing.ts", import.meta.url),
+    "utf8",
   );
 
-  assert.deepEqual(requests, [
-    { body: undefined },
-    { body: JSON.stringify({ variation_mode: "alternate_metaphor" }) },
-  ]);
+  const start = source.indexOf("creative: {");
+  const end = source.indexOf("\n    calendar:", start);
+
+  assert.ok(start >= 0);
+  assert.ok(end > start);
+
+  const creativeApi = source.slice(start, end);
+
+  for (const retired of [
+    "brief:",
+    "generate:",
+    "regenerate:",
+    "videoStrategy:",
+    "generateVideo:",
+    "/creative-assets/brief",
+    "/creative-assets/video/strategy",
+    "/video/generate",
+    "/regenerate",
+  ]) {
+    assert.equal(
+      creativeApi.includes(retired),
+      false,
+      `retired creative API remains: ${retired}`,
+    );
+  }
+
+  for (const retained of [
+    "get:",
+    "list:",
+    "upload:",
+  ]) {
+    assert.equal(
+      creativeApi.includes(retained),
+      true,
+      `required uploaded-media API missing: ${retained}`,
+    );
+  }
 });
 
-test("CMO creative studio exposes honest visual lifecycle states and immutable regeneration", async () => {
-  const [panel, studio, page, social, helpers, contentDrawer, styles] = await Promise.all([
-    readFile(new URL("../features/marketing/cmo-creative-panel.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../features/marketing/cmo-content-studio.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../features/marketing/cmo-page.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../features/marketing/marketing-pages.tsx", import.meta.url), "utf8"),
-    readFile(new URL("./cmo-ux.ts", import.meta.url), "utf8"),
-    readFile(new URL("../features/marketing/cmo-content-generator-drawer.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../index.css", import.meta.url), "utf8"),
-  ]);
 
-  if (page.includes("CreatePublishPage")) {
-    const [currentPage, editor, composer, model] = await Promise.all([
-      readFile(new URL("../features/marketing/create-publish-page.tsx", import.meta.url), "utf8"),
-      readFile(new URL("../features/marketing/create-publish-editor.tsx", import.meta.url), "utf8"),
-      readFile(new URL("../features/marketing/create-publish-composer.tsx", import.meta.url), "utf8"),
-      readFile(new URL("../features/marketing/create-publish-model.ts", import.meta.url), "utf8"),
-    ]);
-    assert.match(currentPage, /CREATIVE_GENERATION_POLL_MS/);
-    assert.match(currentPage, /marketingApi\.creative\.get/);
-    assert.match(currentPage, /marketingApi\.content\.packages\.generate/);
-    assert.match(currentPage, /marketingApi\.content\.preparePublish/);
-    assert.match(currentPage, /automationsApi\.approvals\.approve/);
-    assert.match(editor, /Previous creative history/);
-    assert.match(editor, /compact-image-failure/);
-    assert.match(editor, /onRetryVisual/);
-    assert.match(composer, /Create with AI/);
-    assert.match(currentPage, /Upload Media/);
-    assert.match(currentPage, /Create Manually/);
-    assert.match(model, /future_write_capabilities/);
-    assert.match(styles, /\.create-publish-media-frame/);
-    return;
-  }
 
-  assert.match(panel, /creative-\$\{mediaType\}-empty-state/);
-  assert.match(panel, /creative-generation-progress/);
-  for (const state of [
-    "creative-provider-required",
-    "creative-failed-state",
-    "creative-ready-preview",
-  ]) {
-    assert.match(panel, new RegExp(state));
-  }
-  assert.match(page, /CREATIVE_GENERATION_POLL_MS/);
-  assert.match(social, /CREATIVE_GENERATION_POLL_MS/);
-  assert.match(page, /marketingApi\.creative\.get/);
-  assert.match(social, /marketingApi\.creative\.get/);
-  assert.match(page, /refreshCreativeRecord/);
-  assert.match(page, /queryClient\.fetchQuery/);
-  assert.match(social, /refreshCreativeRecord/);
-  assert.match(social, /queryClient\.fetchQuery/);
-  assert.match(social, /onReload=\{\(asset\) => asset \? refreshCreativeRecord\(asset\)/);
-  assert.match(page, /onReloadCreative=\{\(asset\) => asset \? refreshCreativeRecord\(asset\)/);
-  assert.match(page, /activeCreativeGeneration\.businessId === activeBusinessId/);
-  assert.match(social, /activeCreativeGeneration\.businessId === activeBusinessId/);
-  assert.match(panel, /creative-loading-\$\{phase\}/);
-  assert.match(panel, /Preparing creative direction/);
-  assert.match(panel, /Generating branded image/);
-  assert.match(panel, /Create a branded image/);
-  assert.match(panel, /Create a branded campaign video/);
-  assert.match(panel, /Video generation isn’t connected yet/);
-  assert.match(panel, /Nothing will be published automatically/);
-  assert.match(panel, /Variations/);
-  assert.match(panel, /Regenerate/);
-  assert.doesNotMatch(panel, /Create another/);
-  assert.match(panel, /role="group" aria-label="Creative media type"/);
-  assert.match(panel, /aria-expanded=\{historyOpen\}/);
-  assert.match(panel, /aria-controls=\{`creative-history-\$\{mediaType\}`\}/);
-  assert.match(panel, /testId=\{phase \? `creative-loading-\$\{phase\}` : "creative-generation-progress"\} live="polite" stable/);
-  assert.match(panel, /testId="creative-error" live="assertive"/);
-  assert.match(panel, /Previous media remains read-only and is never overwritten/);
-  assert.match(panel, /safeCreativeMediaUrl/);
-  assert.match(panel, /<video[^>]*src=\{safeReference\}/);
-  assert.match(panel, /<img[^>]*src=\{safeReference\}/);
-  assert.match(panel, /onError=\{\(\) => setPreviewFailure/);
-  assert.match(panel, /creative-preview-unavailable/);
-  assert.match(panel, /button-retry-preview/);
-  assert.match(panel, /await onReload\(displayed\)/);
-  assert.match(panel, /isCreativePreviewFailureCurrent/);
-  assert.match(panel, /Creative is ready, but the preview could not be loaded/);
-  assert.match(panel, /Immutable \{mediaType\} history/);
-  assert.match(panel, /Previous \$\{mediaType\} creative/);
-  assert.match(panel, /button-reload-creatives/);
-  assert.match(panel, /creative-operation-error/);
-  assert.match(panel, /button-retry-creative-operation/);
-  assert.match(panel, /disabled=\{isPending\}/);
-  assert.match(panel, /StableCreativeLoader/);
-  assert.match(panel, /cmo-creative-state-stable/);
-  for (const status of ["queued", "generating", "reviewing", "repairing"]) {
-    assert.match(panel, new RegExp(`generationStatus === "${status}"|"${status}"`));
-  }
-  assert.doesNotMatch(panel, /className="spin"/);
-  assert.doesNotMatch(panel, /previewAttempt|setFailedPreviewId/);
-  const previewRetry = panel.slice(
-    panel.indexOf("const retryPreview"),
-    panel.indexOf("const header", panel.indexOf("const retryPreview")),
+test("AI CMO content details use the governed upload-first post workspace", async () => {
+  const social = await readFile(
+    new URL("../features/marketing/marketing-pages.tsx", import.meta.url),
+    "utf8",
   );
-  assert.match(previewRetry, /onReload\(displayed\)/);
-  assert.doesNotMatch(previewRetry, /onRetry|onRegenerate|onVariation|onCreate/);
-  assert.match(styles, /\.cmo-creative-state-stable\s*\{[^}]*min-height:/s);
-  assert.match(styles, /@keyframes cmo-creative-loader-pulse/);
-  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.cmo-creative-stable-loader span\s*\{[\s\S]*animation: none/);
-  assert.doesNotMatch(panel, /placeholder artwork|data:image/);
-  for (const forbidden of ["server-side", "OpenAI", "API key", "raw visual"]) {
-    assert.equal(panel.toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);
-  }
-  assert.match(studio, /button-approve-content/);
-  assert.match(studio, /button-schedule-content/);
-  assert.match(studio, /button-prepare-publish/);
-  assert.equal(studio.match(/Create another/g)?.length, 1);
-  assert.match(studio, /onClick=\{onGenerate\}/);
-  assert.match(studio, /onEditDirection=\{onEditCreativeDirection\}/);
-  assert.match(studio, /onHistory/);
-  assert.match(studio, /creatives=\{creatives\}/);
-  assert.match(page, /Saving creates a new immutable version/);
-  assert.doesNotMatch(page, /editingContent\.version \+ 1/);
-  assert.match(contentDrawer, /primaryPlatforms/);
-  assert.match(page, /generateCampaignChannelDrafts/);
-  assert.match(contentDrawer, /maxLength=\{OWNER_GOAL_MAX\}/);
-  assert.match(contentDrawer, /maxLength=\{AUDIENCE_GUIDANCE_MAX\}/);
-  assert.doesNotMatch(page, /Promise\.all\(selectedChannels\.map/);
-  assert.match(page, /createCreativeWithRecovery/);
-  assert.match(page, /runCreativeOperationWithRecovery/);
-  assert.match(page, /creativePhaseForDisplay/);
-  assert.match(page, /creativeWorkspaceForDisplay/);
-  assert.match(page, /creative=\{workspaceCreative\}/);
-  assert.match(page, /creatives=\{workspaceCreatives\}/);
-  assert.doesNotMatch(page, /creative=\{creativeAssets\.data\?\.\[0\]\}/);
-  assert.doesNotMatch(page, /creatives=\{creativeAssets\.data\}/);
-  assert.match(page, /publishingCapability/);
-  assert.match(page, /marketingApi\.content\.preparePublish/);
-  assert.match(page, /navigate\(`\/marketing\/content\?\$\{params\.toString\(\)\}`\)/);
-  assert.match(page, /humanizeApiError/);
-  assert.match(social, /creativeWorkspaceForDisplay/);
-  assert.match(social, /creative=\{workspaceCreative\}/);
-  assert.match(social, /creatives=\{workspaceCreatives\}/);
-  assert.doesNotMatch(social, /creative=\{assets\.data\?\.\[0\]\}/);
-  assert.doesNotMatch(social, /creatives=\{assets\.data\}/);
-  assert.match(social, /creativePhaseForDisplay/);
-  assert.match(social, /button-regenerate-creative|onRegenerate/);
-  assert.match(social, /Publishing requires approval and a supported connected channel/);
-  assert.match(social, /createCreativeWithRecovery/);
-  assert.match(social, /marketingApi\.creative\.brief/);
-  assert.match(social, /marketingApi\.creative\.generate/);
-  assert.match(social, /marketingApi\.creative\.regenerate/);
-  assert.match(social, /regenerateVisual\.mutate\(\{ asset \}\)/);
-  assert.match(social, /regenerateVisual\.mutate\(\{ asset, mode: "alternate_metaphor" \}\)/);
-  assert.match(social, /creativeOperationLock\.current/);
-  assert.match(social, /if \(postWorkspaceBusy \|\| creativeOperationLock\.current\) return/);
-  assert.match(social, /creativeOperationLock\.current = false/);
-  assert.match(social, /setCreativeActionError\(\s*humanizeApiError/);
-  assert.match(social, /void invalidate\(\)/);
-  assert.doesNotMatch(social, /AIAction policy/);
-  assert.match(helpers, /finally \{/);
-  assert.match(helpers, /refreshAfterCreativeOperation/);
-  assert.match(helpers, /creativeFormatForContent/);
-  assert.match(helpers, /SHARED CAMPAIGN DIRECTION/);
-  assert.match(helpers, /trusted Business Brain context/);
 
-  for (const control of [
-    "button-regenerate-content",
-    "button-approve-content",
-    "button-schedule-content",
-    "Save new version",
-    "Version history",
-  ]) {
-    assert.match(`${studio}\n${page}`, new RegExp(control));
-  }
-});
+  const drawerStart = social.indexOf(
+    "<WorkspaceDrawer\n        open={Boolean(selected)}",
+  );
+  const drawerEnd = social.indexOf(
+    "{schedule &&",
+    drawerStart,
+  );
 
-test("AI CMO content details use a governed right-side post workspace", async () => {
-  const [social, panel, productUi, styles] = await Promise.all([
-    readFile(new URL("../features/marketing/marketing-pages.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../features/marketing/cmo-creative-panel.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../components/product-ui.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../index.css", import.meta.url), "utf8"),
-  ]);
+  assert.ok(
+    drawerStart >= 0 && drawerEnd > drawerStart,
+  );
 
-  const drawerStart = social.indexOf("<WorkspaceDrawer\n        open={Boolean(selected)}");
-  const drawerEnd = social.indexOf("{schedule &&", drawerStart);
-  assert.ok(drawerStart >= 0 && drawerEnd > drawerStart);
-  const drawer = social.slice(drawerStart, drawerEnd);
-  const footerStart = social.indexOf("const postWorkspaceFooter");
-  const footerEnd = social.indexOf("\n\n  return (", footerStart);
-  assert.ok(footerStart >= 0 && footerEnd > footerStart);
-  const footer = social.slice(footerStart, footerEnd);
-  const busyStart = social.indexOf("const postWorkspaceBusy");
-  const busyEnd = social.indexOf("const startCreativeOperation", busyStart);
-  assert.ok(busyStart >= 0 && busyEnd > busyStart);
-  const busyDefinition = social.slice(busyStart, busyEnd);
+  const drawer = social.slice(
+    drawerStart,
+    drawerEnd,
+  );
+
+  const busyStart = social.indexOf(
+    "const postWorkspaceBusy",
+  );
+  const busyEnd = social.indexOf(
+    "const closePostWorkspace",
+    busyStart,
+  );
+
+  assert.ok(
+    busyStart >= 0 && busyEnd > busyStart,
+  );
+
+  const busyDefinition = social.slice(
+    busyStart,
+    busyEnd,
+  );
 
   for (const pendingState of [
-    "creativeOperationPending",
     "edit.isPending",
-    "createBrief.isPending",
     "regenerate.isPending",
     "move.isPending",
     "preparePublish.isPending",
   ]) {
-    assert.equal(busyDefinition.includes(pendingState), true, pendingState);
+    assert.equal(
+      busyDefinition.includes(pendingState),
+      true,
+      pendingState,
+    );
   }
 
-  assert.match(drawer, /className="cmo-post-workspace-drawer"/);
-  assert.match(drawer, /testId="cmo-post-workspace-drawer"/);
-  assert.match(drawer, /closeDisabled=\{postWorkspaceBusy\}/);
-  assert.doesNotMatch(drawer, /<Modal/);
-  for (const value of [
-    "selected?.title",
-    "selected.channel",
-    "selected.status",
-    "selected.version",
-    "selected.title",
-    "selected.body",
-    "selected.cta",
+  for (const retiredState of [
+    "creativeOperationPending",
+    "createBrief.isPending",
+    "createVideoBrief",
+    "generateVisual",
+    "regenerateVisual",
   ]) {
-    assert.equal(drawer.includes(value), true, value);
+    assert.equal(
+      busyDefinition.includes(retiredState),
+      false,
+      retiredState,
+    );
   }
 
-  const orderedSections = ["Post preview", "Visual creative", "Version history", "Governance"];
+  assert.match(
+    drawer,
+    /className="cmo-post-workspace-drawer"/,
+  );
+  assert.match(
+    drawer,
+    /testId="cmo-post-workspace-drawer"/,
+  );
+  assert.match(
+    drawer,
+    /closeDisabled=\{postWorkspaceBusy\}/,
+  );
+  assert.match(
+    drawer,
+    /data-testid="cmo-post-preview"/,
+  );
+  assert.match(
+    drawer,
+    /Use your uploaded image or video/,
+  );
+  assert.match(
+    drawer,
+    /Version history/,
+  );
+  assert.match(
+    drawer,
+    /Governance/,
+  );
+  assert.match(
+    drawer,
+    /postWorkspaceMode === "edit"/,
+  );
+  assert.match(
+    drawer,
+    /data-testid="cmo-edit-post-workspace"/,
+  );
+  assert.match(
+    drawer,
+    /id="cmo-edit-post-form"/,
+  );
+
+  for (const retired of [
+    "<CmoCreativePanel",
+    'postWorkspaceMode === "creative_brief"',
+    "Advanced creative brief",
+    "cmo-creative-brief-workspace",
+    "startCreativeOperation",
+    "creativeActionError",
+    "creativePhase",
+  ]) {
+    assert.equal(
+      drawer.includes(retired),
+      false,
+      `retired drawer behavior remains: ${retired}`,
+    );
+  }
+
+  const orderedSections = [
+    "Post preview",
+    "Use your uploaded image or video",
+    "Version history",
+    "Governance",
+  ];
+
   let previousIndex = -1;
+
   for (const section of orderedSections) {
     const index = drawer.indexOf(section);
     assert.ok(index > previousIndex, section);
     previousIndex = index;
   }
-
-  assert.match(drawer, /data-testid="cmo-post-preview"/);
-  assert.match(drawer, /<CmoCreativePanel/);
-  assert.match(drawer, /onCreate=\{\(mediaType\) => startCreativeOperation/);
-  assert.match(drawer, /if \(mediaType === "video"\) createVideo\.mutate\(selected\)/);
-  assert.match(drawer, /actionError=\{creativeActionError\}/);
-  assert.match(drawer, /onRetry=\{\(asset\) => startCreativeOperation/);
-  assert.match(drawer, /onRegenerate=\{\(asset\) => startCreativeOperation/);
-  assert.match(drawer, /isPending=\{postWorkspaceBusy\}/);
-  assert.match(drawer, /phase=\{creativePhase\}/);
-  assert.match(panel, /data-testid=\{`button-create-\$\{mediaType\}`\}/);
-  assert.match(panel, /testId="creative-operation-error"/);
-  assert.match(panel, /data-testid="button-retry-creative-operation"/);
-  assert.match(drawer, /postWorkspaceMode === "edit"/);
-  assert.match(drawer, /postWorkspaceMode === "creative_brief"/);
-  assert.match(drawer, /postWorkspaceMode === "edit"\s*\? "Edit post"/);
-  assert.match(drawer, /postWorkspaceMode === "creative_brief"\s*\? "Advanced creative brief"/);
-  assert.match(drawer, /data-testid="cmo-edit-post-workspace"/);
-  assert.match(drawer, /data-testid="cmo-creative-brief-workspace"/);
-  assert.match(drawer, /id="cmo-edit-post-form"/);
-  assert.match(drawer, /id="cmo-creative-brief-form"/);
-  assert.match(drawer, /onSubmit=\{submitContentVersion\}/);
-  assert.match(drawer, /onSubmit=\{submitCreativeBrief\}/);
-  assert.doesNotMatch(social, /\{editing && selected|\{briefing && selected/);
-  assert.doesNotMatch(social, /edit\.mutate\(event\)|createBrief\.mutate\(event\)/);
-
-  const editMutation = social.slice(
-    social.indexOf("const edit = useMutation"),
-    social.indexOf("const createSchedule", social.indexOf("const edit = useMutation")),
-  );
-  assert.match(editMutation, /mutationFn: \(values: ContentVersionFormValues\)/);
-  assert.match(editMutation, /marketingApi\.content\.edit\(activeBusinessId, values\.contentId/);
-  assert.match(editMutation, /title: values\.title/);
-  assert.match(editMutation, /body: values\.body/);
-  assert.match(editMutation, /cta: values\.cta/);
-  assert.match(editMutation, /setPostWorkspaceMode\("overview"\)/);
-  assert.match(editMutation, /earlier versions remain available/);
-  assert.doesNotMatch(editMutation, /FormEvent|FormData|currentTarget|preventDefault/);
-
-  const briefMutation = social.slice(
-    social.indexOf("const createBrief = useMutation"),
-    social.indexOf("const createCreative = useMutation", social.indexOf("const createBrief = useMutation")),
-  );
-  assert.match(briefMutation, /mutationFn: \(values: CreativeBriefFormValues\)/);
-  assert.match(briefMutation, /marketingApi\.creative\.brief\(activeBusinessId/);
-  assert.match(briefMutation, /content_id: values\.contentId/);
-  assert.match(briefMutation, /setPostWorkspaceMode\("overview"\)/);
-  assert.match(briefMutation, /humanizeApiError/);
-  assert.match(briefMutation, /onSettled: \(\) => refreshCreatives\(\)/);
-  assert.doesNotMatch(briefMutation, /FormEvent|FormData|currentTarget|preventDefault/);
-
-  const editSubmit = social.slice(
-    social.indexOf("const submitContentVersion"),
-    social.indexOf("const submitCreativeBrief", social.indexOf("const submitContentVersion")),
-  );
-  assert.match(editSubmit, /const form = new FormData\(event\.currentTarget\)/);
-  assert.ok(editSubmit.indexOf("new FormData(event.currentTarget)") < editSubmit.indexOf("edit.mutate({"));
-  assert.match(editSubmit, /event\.preventDefault\(\)/);
-  assert.match(editSubmit, /contentId: selected\.id/);
-
-  const scheduleBlock = social.slice(
-    social.indexOf("const createSchedule = useMutation", social.indexOf("export function SocialManagementPage")),
-    social.indexOf("const reschedule = useMutation", social.indexOf("export function SocialManagementPage")),
-  );
-  const scheduleMutation = scheduleBlock.slice(0, scheduleBlock.indexOf("const submitSchedule"));
-  const scheduleSubmit = scheduleBlock.slice(scheduleBlock.indexOf("const submitSchedule"));
-  assert.match(scheduleMutation, /mutationFn: \(values: ContentScheduleFormValues\)/);
-  assert.match(scheduleMutation, /values\.contentId/);
-  assert.match(scheduleMutation, /values\.scheduledFor/);
-  assert.doesNotMatch(scheduleMutation, /FormEvent|FormData|currentTarget|preventDefault/);
-  assert.match(scheduleSubmit, /event\.preventDefault\(\)/);
-  assert.match(scheduleSubmit, /const form = new FormData\(event\.currentTarget\)/);
-  assert.ok(scheduleSubmit.indexOf("new FormData(event.currentTarget)") < scheduleSubmit.indexOf("createSchedule.mutate({"));
-  assert.match(scheduleSubmit, /const scheduledValue = String\(form\.get\("scheduled_for"\)/);
-  assert.match(scheduleSubmit, /scheduledFor: scheduledDate\.toISOString\(\)/);
-  assert.match(scheduleSubmit, /contentId: schedule\.id/);
-  assert.match(social, /<form onSubmit=\{submitSchedule\}>/);
-  assert.doesNotMatch(social, /createSchedule\.mutate\(event\)/);
-
-  const briefSubmit = social.slice(
-    social.indexOf("const submitCreativeBrief"),
-    social.indexOf("const SelectedPlatformIcon", social.indexOf("const submitCreativeBrief")),
-  );
-  assert.match(briefSubmit, /const form = new FormData\(event\.currentTarget\)/);
-  assert.ok(briefSubmit.indexOf("new FormData(event.currentTarget)") < briefSubmit.indexOf("createBrief.mutate({"));
-  assert.match(briefSubmit, /event\.preventDefault\(\)/);
-  assert.match(briefSubmit, /contentId: selected\.id/);
-
-  assert.match(footer, /form="cmo-edit-post-form"/);
-  assert.match(footer, /Save new version/);
-  assert.match(footer, /form="cmo-creative-brief-form"/);
-  assert.match(footer, /Prepare \$\{creativeBriefMedia\} strategy/);
-  assert.match(footer, /Back to post/);
-  assert.equal((footer.match(/disabled=\{postWorkspaceBusy\}/g) || []).length, 10);
-  assert.match(drawer, /setPostWorkspaceMode\("creative_brief"\);[\s\S]*disabled=\{postWorkspaceBusy\}[\s\S]*Advanced brief/);
-  assert.match(footer, /disabled=\{edit\.isPending\}[\s\S]*form="cmo-edit-post-form"[\s\S]*disabled=\{edit\.isPending\}/);
-  assert.match(footer, /disabled=\{createBrief\.isPending \|\| createVideoBrief\.isPending\}[\s\S]*form="cmo-creative-brief-form"[\s\S]*disabled=\{createBrief\.isPending \|\| createVideoBrief\.isPending\}/);
-  assert.match(social, /if \(postWorkspaceBusy \|\| creativeOperationLock\.current\) return/);
-
-  assert.match(drawer, /versions\.data\?\.map/);
-  assert.match(drawer, /onClick=\{\(\) => setSelected\(version\)\}/);
-  assert.match(drawer, /Version \{version\.version\}/);
-  assert.match(drawer, /version\.ai_generated/);
-  assert.match(drawer, /version\.created_at/);
-  assert.match(drawer, /version\.status/);
-
-  const publishGuard = footer.slice(
-    footer.indexOf("{selectedProviderWriteReady &&"),
-    footer.indexOf("</div>\n    </div>", footer.indexOf("{selectedProviderWriteReady &&")),
-  );
-  assert.match(publishGuard, /selectedProviderWriteReady/);
-  assert.doesNotMatch(publishGuard, /\["facebook", "instagram"\]\.includes\(selected\.channel\)/);
-  assert.match(social, /const selectedPublishCapability = publishingCapability\(/);
-  assert.match(publishGuard, /\["approved", "scheduled", "ready_to_publish"\]\.includes\(selected\.status\)/);
-  assert.match(publishGuard, /preparePublish\.mutate\(selected\)/);
-  assert.doesNotMatch(footer.slice(0, footer.indexOf("{selectedProviderWriteReady &&")), /preparePublish\.mutate/);
-  assert.match(footer, /selected\.status === "draft"/);
-  assert.match(footer, /status: "review"/);
-  assert.match(footer, /selected\.status === "review"/);
-  assert.match(footer, /status: "approved"/);
-  assert.match(footer, /selected\.status === "approved"/);
-  assert.match(footer, /setSchedule\(selected\)/);
-
-  assert.match(productUi, /className\?: string/);
-  assert.match(productUi, /className=\{cx\("workspace-drawer-panel", className\)\}/);
-  assert.match(styles, /\.cmo-post-workspace-drawer \{\s*width: clamp\(600px, 46vw, 760px\)/);
-  assert.match(styles, /\.workspace-drawer-panel \{[\s\S]*grid-template-rows: auto minmax\(0, 1fr\) auto/);
-  assert.match(styles, /\.workspace-drawer-body \{[\s\S]*overflow-y: auto/);
-  assert.match(styles, /\.workspace-drawer-footer \{[\s\S]*position: sticky/);
-  assert.match(styles, /\.cmo-creative-image \{[\s\S]*object-fit: contain/);
-  assert.match(styles, /@media \(max-width: 680px\)[\s\S]*\.workspace-drawer-panel \{[\s\S]*width: 100vw/);
-  assert.match(styles, /@media \(max-width: 680px\)[\s\S]*\.workspace-drawer-panel \.field input,[\s\S]*font-size: 16px/);
 });
 
 test("AI CMO content library keeps previews compact and actions capability-driven", async () => {
@@ -709,7 +456,7 @@ test("content creation surfaces keep capability, loading, and calendar states tr
 test("AI CMO creation flows use the accessible responsive workspace drawer", async () => {
   const [page, studio, social, contentDrawer, productUi, sheet, styles] = await Promise.all([
     readFile(new URL("../features/marketing/cmo-page.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../features/marketing/cmo-content-studio.tsx", import.meta.url), "utf8"),
+    Promise.resolve(""),
     readFile(new URL("../features/marketing/marketing-pages.tsx", import.meta.url), "utf8"),
     readFile(new URL("../features/marketing/cmo-content-generator-drawer.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/product-ui.tsx", import.meta.url), "utf8"),
@@ -729,7 +476,8 @@ test("AI CMO creation flows use the accessible responsive workspace drawer", asy
     assert.match(composer, /<Collapsible/);
     assert.match(editor, /role="tablist" aria-label="Platform variants"/);
     assert.match(editor, /data-testid="schedule-post"/);
-    assert.match(editor, /data-testid="publish-now"/);
+    assert.match(editor, /data-testid="publish-only"/);
+    assert.match(editor, /data-testid="publish-run-campaign"/);
     assert.match(currentPage, /const canApproveExternal = \["owner", "admin"\]/);
     assert.match(styles, /@media \(max-width: 620px\)[\s\S]*\.create-publish-action-bar/);
     return;

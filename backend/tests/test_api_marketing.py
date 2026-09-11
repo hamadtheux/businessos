@@ -102,21 +102,19 @@ class MarketingApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
 
-    async def test_image_generation_returns_202_queued_asset_without_runtime_inputs(self) -> None:
-        asset = _creative_asset()
-        with patch(
-            "app.api.v1.marketing.service.queue_creative_asset_generation",
-            new=AsyncMock(return_value=asset),
-        ) as enqueue:
-            response = await self.client.post(
-                self._url(f"creative-assets/{asset.id}/generate")
-            )
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["generation_status"], "queued")
-        self.assertNotIn("creative_metadata", response.json())
-        self.assertEqual(enqueue.await_args.kwargs["business_id"], BUSINESS_ID)
-        self.assertEqual(enqueue.await_args.kwargs["actor_user_id"], USER_ID)
-        self.assertEqual(enqueue.await_args.kwargs["creative_asset_id"], asset.id)
+    async def test_image_generation_endpoint_is_retired(self) -> None:
+        asset_id = uuid4()
+        response = await self.client.post(
+            self._url(f"creative-assets/{asset_id}/generate")
+        )
+
+        self.assertEqual(response.status_code, 410)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "creative_generation_retired",
+        )
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+
 
     async def test_specific_creative_poll_is_tenant_scoped(self) -> None:
         asset = _creative_asset()
@@ -226,27 +224,20 @@ class MarketingApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(response.json()["storage_reference"])
         self.assertEqual(self.storage.presented, [])
 
-    async def test_image_regeneration_returns_202_queued_immutable_revision(self) -> None:
-        revision = _creative_asset()
+    async def test_image_regeneration_endpoint_is_retired(self) -> None:
         source_id = uuid4()
-        with patch(
-            "app.api.v1.marketing.service.queue_creative_asset_regeneration",
-            new=AsyncMock(return_value=revision),
-        ) as enqueue:
-            response = await self.client.post(
-                self._url(f"creative-assets/{source_id}/regenerate"),
-                json={"variation_mode": "alternate_metaphor"},
-            )
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["id"], str(revision.id))
-        self.assertEqual(response.json()["generation_status"], "queued")
-        self.assertNotIn("creative_metadata", response.json())
-        self.assertEqual(enqueue.await_args.kwargs["business_id"], BUSINESS_ID)
-        self.assertEqual(enqueue.await_args.kwargs["creative_asset_id"], source_id)
-        self.assertEqual(
-            enqueue.await_args.kwargs["variation_mode"],
-            "alternate_metaphor",
+        response = await self.client.post(
+            self._url(f"creative-assets/{source_id}/regenerate"),
+            json={"variation_mode": "alternate_metaphor"},
         )
+
+        self.assertEqual(response.status_code, 410)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "creative_generation_retired",
+        )
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+
 
     async def test_campaign_list_passes_bounded_filters_and_business(self) -> None:
         with patch("app.api.v1.marketing.service.list_campaigns", new=AsyncMock(return_value=([_campaign()], 1))) as service:

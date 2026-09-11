@@ -1,3 +1,4 @@
+import hashlib
 import re
 from uuid import UUID
 
@@ -89,6 +90,32 @@ def validated_business_logo_key(
     ):
         return None
     return key
+
+
+def business_logo_reference(
+    branding: BusinessBranding | None,
+    *,
+    business_id: UUID,
+) -> str | None:
+    """
+    Return an opaque approval-safe reference to the exact tenant-owned logo key.
+
+    The private storage key itself is never placed in the governed action
+    payload. Dispatch recomputes this fingerprint and fails closed if the logo
+    changed after approval.
+    """
+    key = validated_business_logo_key(
+        branding,
+        business_id=business_id,
+    )
+    if key is None:
+        return None
+
+    fingerprint = hashlib.sha256(
+        key.encode("utf-8")
+    ).hexdigest()
+
+    return f"business_logo:{fingerprint}"
 
 
 def materialize_business_branding_response(
