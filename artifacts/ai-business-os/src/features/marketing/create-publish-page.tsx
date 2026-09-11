@@ -687,8 +687,8 @@ function StartExperience({
       <section className="create-publish-start" aria-label="Choose how to create a post">
         <button type="button" onClick={() => onChoose("ai")} data-testid="start-ai">
           <span><Sparkles /></span>
-          <strong>Create with AI</strong>
-          <p>Describe the goal. 9D Brain prepares the copy and platform variants for review.</p>
+          <strong>AI Copy & Strategy</strong>
+          <p>Describe your goal. 9D Brain prepares the copy, strategy, and platform variants for review.</p>
         </button>
         <button type="button" onClick={() => onChoose("upload")} data-testid="start-upload">
           <span><Upload /></span>

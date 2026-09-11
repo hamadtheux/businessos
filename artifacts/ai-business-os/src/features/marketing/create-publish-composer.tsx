@@ -124,7 +124,7 @@ export function CreatePublishComposer({
   const requiresMedia = mode === "upload";
   const title =
     mode === "ai"
-      ? "Create with AI"
+      ? "AI Copy & Strategy"
       : mode === "upload"
         ? "Prepare uploaded media"
         : "Create manually";
