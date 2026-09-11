@@ -69,6 +69,7 @@ class _Session:
         self.scalar_values = list(scalar_values or [])
         self.added: list[object] = []
         self.flush_calls = 0
+        self.refresh_calls = 0
 
     async def scalar(self, _statement: object) -> object | None:
         return self.scalar_values.pop(0) if self.scalar_values else None
@@ -87,6 +88,10 @@ class _Session:
             if hasattr(value, "updated_at") and getattr(value, "updated_at", None) is None:
                 value.updated_at = NOW
 
+
+
+    async def refresh(self, _value: object) -> None:
+        self.refresh_calls += 1
 
 class _FailingFlushSession(_Session):
     def __init__(self) -> None:
@@ -216,6 +221,7 @@ class CreatePublishFlowTests(unittest.IsolatedAsyncioTestCase):
             )
 
         runtime.assert_awaited_once()
+        self.assertEqual(session.refresh_calls, 2)
         self.assertEqual(len(package.contents), 2)
         self.assertEqual(package.contents[0].platform_fields["platform"], "instagram")
         self.assertEqual(package.contents[1].platform_fields["platform"], "linkedin")
@@ -326,6 +332,7 @@ class CreatePublishFlowTests(unittest.IsolatedAsyncioTestCase):
             )
 
         runtime.assert_not_awaited()
+        self.assertEqual(session.refresh_calls, 2)
         self.assertEqual([item.body for item in package.contents], [authored, authored])
         self.assertTrue(all(not item.ai_generated for item in package.contents))
 

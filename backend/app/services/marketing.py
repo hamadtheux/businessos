@@ -2575,6 +2575,19 @@ async def _execute_content_package(
         )
         raise MarketingAIError from None
 
+
+async def _refresh_content_package_rows(
+    session: AsyncSession,
+    contents: list[MarketingContent],
+) -> None:
+    """Refresh flushed ORM rows before synchronous Pydantic serialization."""
+    try:
+        for content in contents:
+            await session.refresh(content)
+    except SQLAlchemyError:
+        raise MarketingPersistenceError from None
+
+
 async def generate_content_package(
     session: AsyncSession,
     *,
@@ -2721,6 +2734,7 @@ async def generate_content_package(
             "nothing was approved, scheduled, or published."
         ),
     )
+    await _refresh_content_package_rows(session, contents)
     return ContentPackageResponse(
         package_id=package_id,
         canonical_message=proposal.canonical_message,
@@ -2786,6 +2800,7 @@ async def create_manual_content_package(
             "rewriting, approval, scheduling, or publication."
         ),
     )
+    await _refresh_content_package_rows(session, contents)
     return ContentPackageResponse(
         package_id=package_id,
         canonical_message=data.post_text,
