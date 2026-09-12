@@ -370,7 +370,7 @@ class CreativeAsset(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint("source_type IN ('manual','import','ai_brief','future_provider')", name="valid_source_type"),
         CheckConstraint("instructions IS NULL OR char_length(instructions) <= 5000", name="valid_instructions"),
         CheckConstraint("visual_direction IS NULL OR char_length(visual_direction) <= 5000", name="valid_visual_direction"),
-        CheckConstraint("generation_status IN ('draft','brief_ready','strategy_ready','provider_required','queued','generating','reviewing','repairing','ready','failed','archived')", name="valid_generation_status"),
+        CheckConstraint("generation_status IN ('draft','brief_ready','strategy_ready','provider_required','queued','generating','reviewing','repairing','processing','ready','failed','archived')", name="valid_generation_status"),
         CheckConstraint("storage_reference IS NULL OR char_length(storage_reference) <= 1024", name="valid_storage_reference"),
         CheckConstraint("width IS NULL OR width BETWEEN 1 AND 20000", name="valid_width"),
         CheckConstraint("height IS NULL OR height BETWEEN 1 AND 20000", name="valid_height"),

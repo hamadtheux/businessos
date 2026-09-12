@@ -24,6 +24,9 @@ from app.services.action_dispatcher import dispatch_action_execution_job
 from app.services.conversation_message_dispatcher import (
     dispatch_conversation_message_job,
 )
+from app.services.marketing_video_dispatcher import (
+    dispatch_marketing_video_preparation_job,
+)
 
 
 logger = logging.getLogger("aibos.worker")
@@ -85,6 +88,13 @@ async def process_claimed_job(job: BackgroundJob, *, worker_id: str) -> None:
             )
         elif job.job_type == "dispatch_conversation_message":
             dispatched = await dispatch_conversation_message_job(job)
+            outcome = HandlerOutcome(
+                dispatched.succeeded,
+                dispatched.failure_code,
+                dispatched.retryable,
+            )
+        elif job.job_type == "prepare_marketing_video":
+            dispatched = await dispatch_marketing_video_preparation_job(job)
             outcome = HandlerOutcome(
                 dispatched.succeeded,
                 dispatched.failure_code,

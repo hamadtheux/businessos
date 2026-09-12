@@ -29,6 +29,7 @@ JobType = Literal[
     "google_ads_performance_sync",
     "meta_ads_performance_sync",
     "generate_creative_asset",
+    "prepare_marketing_video",
 ]
 
 JOB_STATUSES: Final = frozenset({

@@ -797,7 +797,7 @@ class CreativeAssetResponse(MarketingRecord):
     source_type: Literal["manual", "import", "ai_brief", "future_provider"]
     instructions: str | None
     visual_direction: str | None
-    generation_status: Literal["draft", "brief_ready", "strategy_ready", "provider_required", "queued", "generating", "reviewing", "repairing", "ready", "failed", "archived"]
+    generation_status: Literal["draft", "brief_ready", "strategy_ready", "provider_required", "queued", "generating", "reviewing", "repairing", "processing", "ready", "failed", "archived"]
     storage_reference: str | None
     width: int | None
     height: int | None

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 
 class StorageError(Exception):
@@ -27,6 +27,40 @@ class ObjectStorage(ABC):
         content_type: str,
     ) -> None:
         """Persist bytes under a server-generated object key."""
+
+    async def put_file(
+        self,
+        object_key: str,
+        source_path: Path,
+        content_type: str,
+        *,
+        max_bytes: int,
+    ) -> None:
+        """
+        Persist a server-owned regular file without materializing it as bytes.
+
+        Concrete production storage implementations override this method.
+        Keeping the base contract non-abstract preserves lightweight test
+        doubles which never use file-backed uploads.
+        """
+        del object_key, source_path, content_type, max_bytes
+        raise NotImplementedError
+
+    async def get_file(
+        self,
+        object_key: str,
+        destination_path: Path,
+        *,
+        max_bytes: int,
+    ) -> None:
+        """
+        Stream a trusted stored object into a server-owned local file.
+
+        Production implementations override this without loading the entire
+        object into Python memory. Lightweight test doubles remain compatible.
+        """
+        del object_key, destination_path, max_bytes
+        raise NotImplementedError
 
     @abstractmethod
     async def get(

@@ -55,6 +55,7 @@ class JobHandlerTests(unittest.IsolatedAsyncioTestCase):
             "commerce_initial_sync", "commerce_incremental_sync", "commerce_webhook_reconcile",
             "google_merchant_status_sync", "meta_catalog_status_sync",
             "google_ads_performance_sync", "meta_ads_performance_sync",
+            "prepare_marketing_video",
             "generate_creative_asset",
         })
         with self.assertRaises(TypeError):

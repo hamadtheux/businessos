@@ -85,7 +85,7 @@ class BackgroundJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "'commerce_initial_sync','commerce_incremental_sync','commerce_webhook_reconcile',"
             "'google_merchant_status_sync','meta_catalog_status_sync',"
             "'google_ads_performance_sync','meta_ads_performance_sync',"
-            "'generate_creative_asset')",
+            "'generate_creative_asset','prepare_marketing_video')",
             name="valid_job_type",
         ),
         CheckConstraint(

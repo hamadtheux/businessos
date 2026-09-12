@@ -1,4 +1,7 @@
 import asyncio
+import os
+import stat
+from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote, unquote, urlsplit
 
@@ -63,6 +66,160 @@ class S3ObjectStorage(ObjectStorage):
             )
         except Exception:
             raise StorageOperationError("Unable to store object") from None
+
+    async def put_file(
+        self,
+        object_key: str,
+        source_path: Path,
+        content_type: str,
+        *,
+        max_bytes: int,
+    ) -> None:
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+
+        key = validate_storage_key(object_key).as_posix()
+        source = Path(source_path)
+
+        def upload_file() -> None:
+            try:
+                with source.open("rb") as source_handle:
+                    source_stat = os.fstat(source_handle.fileno())
+
+                    if not stat.S_ISREG(source_stat.st_mode):
+                        raise StorageOperationError(
+                            "Upload source is not a regular file"
+                        )
+
+                    if source_stat.st_size > max_bytes:
+                        raise StorageOperationError(
+                            "Upload source exceeds file limit"
+                        )
+
+                    self.client.put_object(
+                        Bucket=self.bucket,
+                        Key=key,
+                        Body=source_handle,
+                        ContentType=content_type,
+                        CacheControl="public, max-age=31536000, immutable",
+                    )
+            except StorageOperationError:
+                raise
+            except Exception:
+                raise StorageOperationError(
+                    "Unable to store object"
+                ) from None
+
+        await asyncio.to_thread(upload_file)
+
+    async def get_file(
+        self,
+        object_key: str,
+        destination_path: Path,
+        *,
+        max_bytes: int,
+    ) -> None:
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+
+        key = validate_storage_key(object_key).as_posix()
+        destination = Path(destination_path)
+
+        def download_bounded() -> None:
+            body = None
+            temporary_path = destination.with_name(
+                f".{destination.name}.{os.getpid()}.tmp"
+            )
+
+            try:
+                response = self.client.get_object(
+                    Bucket=self.bucket,
+                    Key=key,
+                )
+
+                if not isinstance(response, dict):
+                    raise StorageOperationError(
+                        "Unable to read object"
+                    )
+
+                body = response.get("Body")
+                if body is None or not hasattr(body, "read"):
+                    raise StorageOperationError(
+                        "Unable to read object"
+                    )
+
+                content_length = response.get("ContentLength")
+                if (
+                    isinstance(content_length, int)
+                    and content_length > max_bytes
+                ):
+                    raise StorageOperationError(
+                        "Stored object exceeds read limit"
+                    )
+
+                destination.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+
+                copied = 0
+                with temporary_path.open("xb") as destination_handle:
+                    while True:
+                        remaining = max_bytes - copied
+                        chunk = body.read(
+                            min(1024 * 1024, remaining + 1)
+                        )
+
+                        if not chunk:
+                            break
+
+                        if not isinstance(chunk, bytes):
+                            raise StorageOperationError(
+                                "Unable to read object"
+                            )
+
+                        copied += len(chunk)
+                        if copied > max_bytes:
+                            raise StorageOperationError(
+                                "Stored object exceeds read limit"
+                            )
+
+                        destination_handle.write(chunk)
+
+                    destination_handle.flush()
+                    os.fsync(destination_handle.fileno())
+
+                os.replace(temporary_path, destination)
+
+            except StorageOperationError:
+                raise
+            except ClientError as exc:
+                error = (
+                    exc.response.get("Error", {})
+                    if isinstance(exc.response, dict)
+                    else {}
+                )
+                code = str(error.get("Code", ""))
+                if code in {"NoSuchKey", "404", "NotFound"}:
+                    raise ObjectNotFoundError(
+                        "Stored object was not found"
+                    ) from None
+                raise StorageOperationError(
+                    "Unable to read object"
+                ) from None
+            except Exception:
+                raise StorageOperationError(
+                    "Unable to read object"
+                ) from None
+            finally:
+                if body is not None and hasattr(body, "close"):
+                    try:
+                        body.close()
+                    except Exception:
+                        pass
+                temporary_path.unlink(missing_ok=True)
+
+        await asyncio.to_thread(download_bounded)
 
     async def get(
         self,

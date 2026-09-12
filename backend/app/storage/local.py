@@ -1,5 +1,6 @@
 import asyncio
 import os
+import stat
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 from uuid import uuid4
@@ -43,6 +44,151 @@ class LocalObjectStorage(ObjectStorage):
             await asyncio.to_thread(write_atomically)
         except OSError:
             raise StorageOperationError("Unable to store object") from None
+
+    async def put_file(
+        self,
+        object_key: str,
+        source_path: Path,
+        content_type: str,
+        *,
+        max_bytes: int,
+    ) -> None:
+        del content_type
+
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+
+        destination = self._resolve(object_key)
+        source = Path(source_path)
+        temporary_path = destination.with_name(
+            f".{destination.name}.{uuid4().hex}.tmp"
+        )
+
+        def copy_atomically() -> None:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+
+            try:
+                with source.open("rb") as source_handle:
+                    source_stat = os.fstat(source_handle.fileno())
+
+                    if not stat.S_ISREG(source_stat.st_mode):
+                        raise StorageOperationError(
+                            "Upload source is not a regular file"
+                        )
+
+                    if source_stat.st_size > max_bytes:
+                        raise StorageOperationError(
+                            "Upload source exceeds file limit"
+                        )
+
+                    copied = 0
+                    with temporary_path.open("xb") as destination_handle:
+                        while True:
+                            chunk = source_handle.read(
+                                min(
+                                    1024 * 1024,
+                                    max_bytes - copied + 1,
+                                )
+                            )
+                            if not chunk:
+                                break
+
+                            copied += len(chunk)
+                            if copied > max_bytes:
+                                raise StorageOperationError(
+                                    "Upload source exceeds file limit"
+                                )
+
+                            destination_handle.write(chunk)
+
+                        destination_handle.flush()
+                        os.fsync(destination_handle.fileno())
+
+                    os.replace(temporary_path, destination)
+            finally:
+                temporary_path.unlink(missing_ok=True)
+
+        try:
+            await asyncio.to_thread(copy_atomically)
+        except StorageOperationError:
+            raise
+        except OSError:
+            raise StorageOperationError(
+                "Unable to store object"
+            ) from None
+
+    async def get_file(
+        self,
+        object_key: str,
+        destination_path: Path,
+        *,
+        max_bytes: int,
+    ) -> None:
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+
+        source = self._resolve(object_key)
+        destination = Path(destination_path)
+        temporary_path = destination.with_name(
+            f".{destination.name}.{uuid4().hex}.tmp"
+        )
+
+        def copy_bounded() -> None:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+
+            try:
+                with source.open("rb") as source_handle:
+                    source_stat = os.fstat(source_handle.fileno())
+
+                    if not stat.S_ISREG(source_stat.st_mode):
+                        raise StorageOperationError(
+                            "Stored object is not a regular file"
+                        )
+
+                    if source_stat.st_size > max_bytes:
+                        raise StorageOperationError(
+                            "Stored object exceeds read limit"
+                        )
+
+                    copied = 0
+                    with temporary_path.open("xb") as destination_handle:
+                        while True:
+                            chunk = source_handle.read(
+                                min(
+                                    1024 * 1024,
+                                    max_bytes - copied + 1,
+                                )
+                            )
+                            if not chunk:
+                                break
+
+                            copied += len(chunk)
+                            if copied > max_bytes:
+                                raise StorageOperationError(
+                                    "Stored object exceeds read limit"
+                                )
+
+                            destination_handle.write(chunk)
+
+                        destination_handle.flush()
+                        os.fsync(destination_handle.fileno())
+
+                    os.replace(temporary_path, destination)
+            except FileNotFoundError:
+                raise ObjectNotFoundError(
+                    "Stored object was not found"
+                ) from None
+            finally:
+                temporary_path.unlink(missing_ok=True)
+
+        try:
+            await asyncio.to_thread(copy_bounded)
+        except (ObjectNotFoundError, StorageOperationError):
+            raise
+        except OSError:
+            raise StorageOperationError(
+                "Unable to read object"
+            ) from None
 
     async def get(
         self,

@@ -165,6 +165,17 @@ async def handle_dispatch_conversation_message(
     return HandlerOutcome(False, "invalid_job_state")
 
 
+async def handle_prepare_marketing_video(
+    session: AsyncSession,
+    job: BackgroundJob,
+) -> HandlerOutcome:
+    # Video preparation performs storage + ffprobe + FFmpeg work and therefore
+    # must never run inside the generic worker database transaction.
+    # app.worker intercepts this job type and invokes the dedicated dispatcher.
+    _ = session, job
+    return HandlerOutcome(False, "invalid_job_state")
+
+
 async def handle_process_automation_event(
     session: AsyncSession, job: BackgroundJob,
 ) -> HandlerOutcome:
@@ -685,6 +696,7 @@ JOB_HANDLERS: Final = MappingProxyType({
     "meta_catalog_status_sync": handle_destination_status_sync,
     "google_ads_performance_sync": handle_ads_performance_sync,
     "meta_ads_performance_sync": handle_ads_performance_sync,
+    "prepare_marketing_video": handle_prepare_marketing_video,
     "generate_creative_asset": handle_generate_creative_asset,
 })
 

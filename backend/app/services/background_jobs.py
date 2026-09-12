@@ -190,7 +190,7 @@ async def enqueue_job(
             and job.conversation_message_id != conversation_message_id
         )
         or (
-            job_type == "generate_creative_asset"
+            job_type in {"generate_creative_asset", "prepare_marketing_video"}
             and job.creative_asset_id != creative_asset_id
         )
     ):
