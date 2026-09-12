@@ -39,7 +39,7 @@ type ComposerProps = {
   error?: string;
   onBack: () => void;
   onUpload: (file: File, durationSeconds?: number) => Promise<void>;
-  onGenerate: (input: GenerateContentPackageInput, visual: string) => void;
+  onGenerate: (input: GenerateContentPackageInput) => void;
   onManual: (input: ManualContentPackageInput) => void;
 };
 
@@ -114,10 +114,8 @@ export function CreatePublishComposer({
         audience: valueOrNull(form, "audience"),
         tone: valueOrNull(form, "tone"),
         objective: valueOrNull(form, "objective"),
-        visual_preference: valueOrNull(form, "visual_preference"),
         language: String(form.get("language") || "en"),
-      },
-      String(form.get("visual_preference") || "auto"),
+      }
     );
   };
 
@@ -238,6 +236,12 @@ export function CreatePublishComposer({
           onToggle={togglePlatform}
         />
 
+        {uploadedAsset?.media_type === "image" && (
+          <p className="create-publish-auto-media-note">
+            Your image is automatically optimized for each selected platform.
+          </p>
+        )}
+
         {mode !== "manual" && (
           <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
             <CollapsibleTrigger asChild>
@@ -270,21 +274,7 @@ export function CreatePublishComposer({
                   <option value="sales">Sales</option>
                 </select>
               </label>
-              <label className="create-publish-field">
-                <span>Visual</span>
-                <select name="visual_preference" defaultValue={mode === "upload" ? "uploaded" : "auto"}>
-                  {mode === "upload" ? (
-                    <option value="uploaded">Use uploaded media</option>
-                  ) : (
-                    <>
-                      <option value="auto">Create an image</option>
-                      <option value="image">Image</option>
-                      <option value="video">Video</option>
-                      <option value="none">No media</option>
-                    </>
-                  )}
-                </select>
-              </label>
+
               <label className="create-publish-field">
                 <span>Language</span>
                 <select name="language" defaultValue="en">

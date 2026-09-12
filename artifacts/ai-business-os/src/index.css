@@ -9979,6 +9979,12 @@ td strong {
 
 .create-publish-platform-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .create-publish-platform-fieldset legend { margin-bottom: 10px; }
+.create-publish-auto-media-note {
+  margin: -8px 0 0;
+  color: hsl(var(--muted-foreground));
+  font-size: .8125rem;
+  line-height: 1.45;
+}
 .create-publish-platform-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
 .create-publish-platform {
   display: flex;

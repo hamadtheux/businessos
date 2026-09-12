@@ -54,17 +54,107 @@ class _Storage:
         )
 
 
+def _variant_reference(
+    business_id,
+    asset_id,
+    variant: str,
+) -> str:
+    return (
+        "https://media.example.test/"
+        f"businesses/{business_id}/marketing/uploads/"
+        f"{asset_id}/variants/{variant}.jpg"
+    )
+
+
+def _variant_metadata(
+    business_id,
+    asset_id,
+) -> dict[str, object]:
+    return {
+        "variants": {
+            "square_1_1": {
+                "storage_reference": _variant_reference(
+                    business_id,
+                    asset_id,
+                    "square_1_1",
+                ),
+                "content_type": "image/jpeg",
+                "width": 1200,
+                "height": 1200,
+                "aspect_ratio": "1:1",
+                "transformation": "contain_no_crop",
+            },
+            "landscape_1_91_1": {
+                "storage_reference": _variant_reference(
+                    business_id,
+                    asset_id,
+                    "landscape_1_91_1",
+                ),
+                "content_type": "image/jpeg",
+                "width": 1200,
+                "height": 628,
+                "aspect_ratio": "1.91:1",
+                "transformation": "contain_no_crop",
+            },
+            "portrait_4_5": {
+                "storage_reference": _variant_reference(
+                    business_id,
+                    asset_id,
+                    "portrait_4_5",
+                ),
+                "content_type": "image/jpeg",
+                "width": 1080,
+                "height": 1350,
+                "aspect_ratio": "4:5",
+                "transformation": "contain_no_crop",
+            },
+            "vertical_9_16": {
+                "storage_reference": _variant_reference(
+                    business_id,
+                    asset_id,
+                    "vertical_9_16",
+                ),
+                "content_type": "image/jpeg",
+                "width": 1080,
+                "height": 1920,
+                "aspect_ratio": "9:16",
+                "transformation": "contain_no_crop",
+            },
+        },
+    }
+
+
+def _source_reference(
+    business_id,
+    asset_id,
+) -> str:
+    return (
+        "https://media.example.test/"
+        f"businesses/{business_id}/marketing/uploads/"
+        f"{asset_id}/source.jpg"
+    )
+
+
 class SocialMediaDispatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_approved_asset_handle_becomes_fresh_transient_signed_url(self) -> None:
         business_id = uuid4()
         action_id = uuid4()
         content_id = uuid4()
         asset_id = uuid4()
-        object_key = (
+        source_key = (
             f"businesses/{business_id}/marketing/uploads/"
             f"{asset_id}/source.jpg"
         )
-        durable = f"https://media.example.test/{object_key}"
+        variant_key = (
+            f"businesses/{business_id}/marketing/uploads/"
+            f"{asset_id}/variants/portrait_4_5.jpg"
+        )
+        durable = f"https://media.example.test/{source_key}"
+        variant_reference = _variant_reference(
+            business_id,
+            asset_id,
+            "portrait_4_5",
+        )
 
         proposal = SimpleNamespace(
             entity_id=content_id,
@@ -83,9 +173,15 @@ class SocialMediaDispatchTests(unittest.IsolatedAsyncioTestCase):
             source_type="import",
             generation_status="ready",
             media_type="image",
+            width=1600,
+            height=1200,
+            creative_metadata=_variant_metadata(
+                business_id,
+                asset_id,
+            ),
             storage_reference=durable,
         )
-        storage = _Storage(resolved_key=object_key)
+        storage = _Storage(resolved_key=variant_key)
         original = PublishSocialPostPayload(
             platform="facebook",
             content="Approved post",
@@ -109,8 +205,28 @@ class SocialMediaDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(transient.media_refs), 1)
         self.assertTrue(transient.media_refs[0].startswith("https://"))
         self.assertGreater(len(transient.media_refs[0]), 255)
-        self.assertEqual(storage.resolved, [durable])
-        self.assertEqual(storage.presented, [(object_key, 3600)])
+        # The persisted/approved handle remains the stable asset UUID.
+        self.assertEqual(
+            original.media_refs,
+            [f"creative_asset:{asset_id}"],
+        )
+
+        # Execution resolves and signs only the server-selected derivative.
+        self.assertEqual(
+            storage.resolved,
+            [variant_reference],
+        )
+        self.assertEqual(
+            storage.presented,
+            [(variant_key, 3600)],
+        )
+
+        # The original uploaded source remains unchanged and is not signed
+        # for Facebook feed execution.
+        self.assertNotIn(
+            source_key,
+            [item[0] for item in storage.presented],
+        )
 
     async def test_create_publish_package_can_share_owner_media_across_platforms(self) -> None:
         business_id = uuid4()
@@ -119,9 +235,13 @@ class SocialMediaDispatchTests(unittest.IsolatedAsyncioTestCase):
         instagram_owner_id = uuid4()
         asset_id = uuid4()
         package_id = uuid4()
-        object_key = (
+        source_key = (
             f"businesses/{business_id}/marketing/uploads/"
             f"{asset_id}/source.jpg"
+        )
+        variant_key = (
+            f"businesses/{business_id}/marketing/uploads/"
+            f"{asset_id}/variants/portrait_4_5.jpg"
         )
 
         proposal = SimpleNamespace(
@@ -141,9 +261,15 @@ class SocialMediaDispatchTests(unittest.IsolatedAsyncioTestCase):
             source_type="import",
             generation_status="ready",
             media_type="image",
-            storage_reference=f"https://media.example.test/{object_key}",
+            width=1600,
+            height=1200,
+            creative_metadata=_variant_metadata(
+                business_id,
+                asset_id,
+            ),
+            storage_reference=f"https://media.example.test/{source_key}",
         )
-        storage = _Storage(resolved_key=object_key)
+        storage = _Storage(resolved_key=variant_key)
 
         transient = await _materialize_publish_media_payload(
             _Session([proposal, content, asset, instagram_owner_id]),
@@ -159,7 +285,13 @@ class SocialMediaDispatchTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(transient.media_type, "image")
-        self.assertEqual(len(storage.presented), 1)
+        self.assertEqual(
+            storage.presented,
+            [(variant_key, 3600)],
+        )
+        self.assertTrue(
+            transient.media_refs[0].startswith("https://")
+        )
 
     async def test_direct_external_url_cannot_replace_approved_asset_handle(self) -> None:
         with self.assertRaisesRegex(
@@ -204,6 +336,12 @@ class SocialMediaDispatchTests(unittest.IsolatedAsyncioTestCase):
             source_type="import",
             generation_status="ready",
             media_type="image",
+            width=1600,
+            height=1200,
+            creative_metadata=_variant_metadata(
+                business_id,
+                asset_id,
+            ),
             storage_reference=f"https://media.example.test/{object_key}",
         )
         storage = _Storage(resolved_key=object_key)
@@ -248,11 +386,17 @@ class SocialMediaDispatchTests(unittest.IsolatedAsyncioTestCase):
             source_type="import",
             generation_status="ready",
             media_type="image",
+            width=1600,
+            height=1200,
+            creative_metadata=_variant_metadata(
+                business_id,
+                asset_id,
+            ),
             storage_reference="https://media.example.test/claimed.jpg",
         )
         forged_key = (
             f"businesses/{other_business}/marketing/uploads/"
-            f"{asset_id}/source.jpg"
+            f"{asset_id}/variants/portrait_4_5.jpg"
         )
         storage = _Storage(resolved_key=forged_key)
 

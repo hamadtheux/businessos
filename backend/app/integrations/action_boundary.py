@@ -601,9 +601,10 @@ async def _materialize_publish_media_payload(
     ):
         raise IntegrationStateError("publish_media_content_conflict")
 
-    durable_reference = asset.storage_reference
-    if not isinstance(durable_reference, str) or not durable_reference:
-        raise IntegrationStateError("publish_media_reference_invalid")
+    durable_reference, expected_variant = _publish_media_reference(
+        asset=asset,
+        payload=payload,
+    )
 
     object_storage = storage or get_object_storage()
     try:
@@ -615,6 +616,7 @@ async def _materialize_publish_media_payload(
         business_id=business_id,
         asset=asset,
         object_key=object_key,
+        expected_variant=expected_variant,
     ):
         raise IntegrationStateError("publish_media_reference_invalid")
 
@@ -637,6 +639,83 @@ async def _materialize_publish_media_payload(
         media_refs=[signed_url],
         media_type=payload.media_type,
     )
+
+
+def _publish_media_reference(
+    *,
+    asset: CreativeAsset,
+    payload: PublishSocialPostPayload,
+) -> tuple[str, str | None]:
+    """
+    Resolve the durable media object used for provider execution.
+
+    The approved action continues to authorize only creative_asset:<uuid>.
+    Platform-specific derivatives are selected server-side at execution time
+    from deterministic upload metadata. No signed URL or derivative reference
+    becomes part of the approval identity.
+    """
+
+    if asset.media_type == "video":
+        reference = asset.storage_reference
+        if not isinstance(reference, str) or not reference:
+            raise IntegrationStateError(
+                "publish_media_reference_invalid"
+            )
+        return reference, None
+
+    if asset.media_type != "image":
+        raise IntegrationStateError("publish_media_asset_invalid")
+
+    from app.services.social_media_profiles import (
+        automatic_social_profile,
+    )
+
+    profile = automatic_social_profile(
+        payload.platform,
+        media_type="image",
+        width=asset.width,
+        height=asset.height,
+    )
+
+    if profile is None or profile.image_variant is None:
+        raise IntegrationStateError(
+            "publish_media_profile_unsupported"
+        )
+
+    metadata = asset.creative_metadata
+    if not isinstance(metadata, dict):
+        raise IntegrationStateError(
+            "publish_media_variants_required"
+        )
+
+    variants = metadata.get("variants")
+    if not isinstance(variants, dict):
+        raise IntegrationStateError(
+            "publish_media_variants_required"
+        )
+
+    variant = variants.get(profile.image_variant)
+    if not isinstance(variant, dict):
+        raise IntegrationStateError(
+            "publish_media_variants_required"
+        )
+
+    reference = variant.get("storage_reference")
+
+    if (
+        not isinstance(reference, str)
+        or not reference
+        or variant.get("content_type") != "image/jpeg"
+        or variant.get("width") != profile.target_width
+        or variant.get("height") != profile.target_height
+        or variant.get("aspect_ratio") != profile.aspect_ratio
+        or variant.get("transformation") != "contain_no_crop"
+    ):
+        raise IntegrationStateError(
+            "publish_media_variant_invalid"
+        )
+
+    return reference, profile.image_variant
 
 
 async def _publish_asset_belongs_to_content(
@@ -681,6 +760,7 @@ def _trusted_publish_media_object_key(
     business_id: UUID,
     asset: CreativeAsset,
     object_key: str,
+    expected_variant: str | None = None,
 ) -> bool:
     if asset.source_type == "import":
         prefix = (
@@ -688,7 +768,12 @@ def _trusted_publish_media_object_key(
         )
         if not object_key.startswith(prefix):
             return False
+
         leaf = object_key.removeprefix(prefix)
+
+        if expected_variant is not None:
+            return leaf == f"variants/{expected_variant}.jpg"
+
         return (
             leaf.startswith("source.")
             and "/" not in leaf

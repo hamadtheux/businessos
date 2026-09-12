@@ -81,7 +81,6 @@ export type GenerateContentPackageInput = {
   audience?: string | null;
   tone?: string | null;
   objective?: string | null;
-  visual_preference?: string | null;
   language?: string;
 };
 
