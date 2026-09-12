@@ -211,6 +211,215 @@ class CreativePresentationTests(unittest.TestCase):
             self.assertEqual(response.storage_reference, storage.public_url(key))
             self.assertEqual(asset.storage_reference, storage.public_url(key))
 
+    def test_ready_import_video_presents_prepared_landscape_mp4_not_original_mov(self) -> None:
+        storage = _PresentationStorage()
+        asset = _asset()
+        asset.source_type = "import"
+        asset.media_type = "video"
+        asset.asset_type = "video_landscape"
+        asset.storage_reference = (
+            "https://media.example.test/"
+            f"businesses/{BUSINESS_ID}/marketing/uploads/{asset.id}/source.mov"
+        )
+        variant_key = (
+            f"businesses/{BUSINESS_ID}/marketing/uploads/{asset.id}/"
+            "variants/landscape_16_9.mp4"
+        )
+        asset.creative_metadata = {
+            "video_preparation": {"status": "ready", "version": 1},
+            "variants": {
+                "landscape_16_9": {
+                    "storage_reference": f"https://media.example.test/{variant_key}",
+                    "content_type": "video/mp4",
+                    "width": 1920,
+                    "height": 1080,
+                    "aspect_ratio": "16:9",
+                    "duration_seconds": 6,
+                    "video_codec": "h264",
+                    "audio_codec": None,
+                    "transformation": "contain_no_crop",
+                }
+            },
+        }
+
+        response = materialize_creative_asset_response(
+            asset,
+            business_id=BUSINESS_ID,
+            storage=storage,  # type: ignore[arg-type]
+            signed_url_ttl_seconds=900,
+        )
+
+        self.assertIsNotNone(response.storage_reference)
+        self.assertIn("landscape_16_9.mp4", response.storage_reference or "")
+        self.assertNotIn("source.mov", response.storage_reference or "")
+        self.assertEqual(
+            storage.presented,
+            [(variant_key, 900)],
+        )
+
+    def test_ready_import_video_without_valid_prepared_variant_fails_closed(self) -> None:
+        storage = _PresentationStorage()
+        asset = _asset()
+        asset.source_type = "import"
+        asset.media_type = "video"
+        asset.asset_type = "video_landscape"
+        asset.storage_reference = (
+            "https://media.example.test/"
+            f"businesses/{BUSINESS_ID}/marketing/uploads/{asset.id}/source.mov"
+        )
+        asset.creative_metadata = {
+            "video_preparation": {"status": "ready", "version": 1},
+            "variants": {},
+        }
+
+        response = materialize_creative_asset_response(
+            asset,
+            business_id=BUSINESS_ID,
+            storage=storage,  # type: ignore[arg-type]
+            signed_url_ttl_seconds=900,
+        )
+
+        self.assertIsNone(response.storage_reference)
+        self.assertEqual(storage.presented, [])
+
+
+    def test_ready_vertical_import_video_presents_vertical_mp4(self) -> None:
+        storage = _PresentationStorage()
+        asset = _asset()
+        asset.source_type = "import"
+        asset.media_type = "video"
+        asset.asset_type = "video_vertical"
+        asset.width = 1080
+        asset.height = 1920
+        asset.storage_reference = (
+            "https://media.example.test/"
+            f"businesses/{BUSINESS_ID}/marketing/uploads/{asset.id}/source.mov"
+        )
+        variant_key = (
+            f"businesses/{BUSINESS_ID}/marketing/uploads/{asset.id}/"
+            "variants/vertical_9_16.mp4"
+        )
+        asset.creative_metadata = {
+            "video_preparation": {"status": "ready", "version": 1},
+            "variants": {
+                "vertical_9_16": {
+                    "storage_reference": f"https://media.example.test/{variant_key}",
+                    "content_type": "video/mp4",
+                    "width": 1080,
+                    "height": 1920,
+                    "aspect_ratio": "9:16",
+                    "duration_seconds": 6,
+                    "video_codec": "h264",
+                    "audio_codec": "aac",
+                    "transformation": "contain_no_crop",
+                }
+            },
+        }
+
+        original_reference = asset.storage_reference
+
+        response = materialize_creative_asset_response(
+            asset,
+            business_id=BUSINESS_ID,
+            storage=storage,  # type: ignore[arg-type]
+            signed_url_ttl_seconds=900,
+        )
+
+        self.assertIsNotNone(response.storage_reference)
+        self.assertIn("vertical_9_16.mp4", response.storage_reference or "")
+        self.assertEqual(asset.storage_reference, original_reference)
+        self.assertEqual(storage.presented, [(variant_key, 900)])
+
+    def test_ready_import_video_rejects_foreign_variant_object(self) -> None:
+        storage = _PresentationStorage()
+        asset = _asset()
+        asset.source_type = "import"
+        asset.media_type = "video"
+        asset.asset_type = "video_landscape"
+        asset.width = 2560
+        asset.height = 1440
+        asset.storage_reference = (
+            "https://media.example.test/"
+            f"businesses/{BUSINESS_ID}/marketing/uploads/{asset.id}/source.mov"
+        )
+
+        foreign_asset_id = uuid4()
+        foreign_key = (
+            f"businesses/{BUSINESS_ID}/marketing/uploads/{foreign_asset_id}/"
+            "variants/landscape_16_9.mp4"
+        )
+        asset.creative_metadata = {
+            "video_preparation": {"status": "ready", "version": 1},
+            "variants": {
+                "landscape_16_9": {
+                    "storage_reference": f"https://media.example.test/{foreign_key}",
+                    "content_type": "video/mp4",
+                    "width": 1920,
+                    "height": 1080,
+                    "aspect_ratio": "16:9",
+                    "duration_seconds": 6,
+                    "video_codec": "h264",
+                    "audio_codec": None,
+                    "transformation": "contain_no_crop",
+                }
+            },
+        }
+
+        response = materialize_creative_asset_response(
+            asset,
+            business_id=BUSINESS_ID,
+            storage=storage,  # type: ignore[arg-type]
+            signed_url_ttl_seconds=900,
+        )
+
+        self.assertIsNone(response.storage_reference)
+        self.assertEqual(storage.presented, [])
+
+    def test_import_video_is_not_presented_until_preparation_is_ready(self) -> None:
+        storage = _PresentationStorage()
+        asset = _asset()
+        asset.source_type = "import"
+        asset.media_type = "video"
+        asset.asset_type = "video_landscape"
+        asset.width = 2560
+        asset.height = 1440
+        asset.storage_reference = (
+            "https://media.example.test/"
+            f"businesses/{BUSINESS_ID}/marketing/uploads/{asset.id}/source.mov"
+        )
+        variant_key = (
+            f"businesses/{BUSINESS_ID}/marketing/uploads/{asset.id}/"
+            "variants/landscape_16_9.mp4"
+        )
+        asset.creative_metadata = {
+            "video_preparation": {"status": "processing", "version": 1},
+            "variants": {
+                "landscape_16_9": {
+                    "storage_reference": f"https://media.example.test/{variant_key}",
+                    "content_type": "video/mp4",
+                    "width": 1920,
+                    "height": 1080,
+                    "aspect_ratio": "16:9",
+                    "duration_seconds": 6,
+                    "video_codec": "h264",
+                    "audio_codec": None,
+                    "transformation": "contain_no_crop",
+                }
+            },
+        }
+
+        response = materialize_creative_asset_response(
+            asset,
+            business_id=BUSINESS_ID,
+            storage=storage,  # type: ignore[arg-type]
+            signed_url_ttl_seconds=900,
+        )
+
+        self.assertIsNone(response.storage_reference)
+        self.assertEqual(storage.resolved, [])
+        self.assertEqual(storage.presented, [])
+
+
     def test_tenant_owned_import_gets_signed_presentation_url(self) -> None:
         storage = _PresentationStorage()
         asset = _asset()

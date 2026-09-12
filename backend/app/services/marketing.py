@@ -3691,6 +3691,108 @@ async def list_creative_assets(session: AsyncSession, *, business_id: UUID, camp
         raise MarketingPersistenceError from None
 
 
+def _ready_import_video_presentation_reference(
+    value: CreativeAsset,
+    *,
+    business_id: UUID,
+    storage: ObjectStorage,
+    signed_url_ttl_seconds: int,
+) -> str | None:
+    """
+    Return a browser-playable presentation URL for a prepared tenant video.
+
+    The immutable uploaded source is never exposed as the ready-video
+    presentation object. A ready imported video must have a trusted,
+    server-produced H.264 MP4 derivative beneath its own tenant/asset prefix.
+    Any malformed, missing, foreign, or incomplete metadata fails closed.
+    """
+    if (
+        value.business_id != business_id
+        or value.source_type != "import"
+        or value.media_type != "video"
+        or value.generation_status != "ready"
+    ):
+        return None
+
+    metadata = value.creative_metadata
+    if not isinstance(metadata, dict):
+        return None
+
+    preparation = metadata.get("video_preparation")
+    if (
+        not isinstance(preparation, dict)
+        or preparation.get("status") != "ready"
+    ):
+        return None
+
+    variants = metadata.get("variants")
+    if not isinstance(variants, dict):
+        return None
+
+    # Successful preparation persists authoritative source dimensions.
+    # Choose the normalized derivative matching the source orientation.
+    width = value.width
+    height = value.height
+    if type(width) is not int or type(height) is not int:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+
+    variant_key = (
+        "vertical_9_16"
+        if height > width
+        else "landscape_16_9"
+    )
+
+    variant = variants.get(variant_key)
+    if not isinstance(variant, dict):
+        return None
+
+    durable_reference = variant.get("storage_reference")
+    if (
+        not isinstance(durable_reference, str)
+        or not durable_reference
+        or len(durable_reference) > 1024
+    ):
+        return None
+
+    # Browser presentation is intentionally restricted to the normalized
+    # codec/container contract produced by the server-side preparation job.
+    if variant.get("content_type") != "video/mp4":
+        return None
+    if variant.get("video_codec") != "h264":
+        return None
+
+    audio_codec = variant.get("audio_codec")
+    if audio_codec not in {None, "aac"}:
+        return None
+
+    expected_object_key = (
+        f"businesses/{business_id}/marketing/uploads/{value.id}/"
+        f"variants/{variant_key}.mp4"
+    )
+
+    try:
+        object_key = storage.object_key_from_reference(durable_reference)
+
+        # Exact equality is deliberate. Do not permit sibling objects,
+        # alternate tenants, alternate asset IDs, nested paths, or arbitrary
+        # metadata-provided filenames to become signed presentation URLs.
+        if object_key != expected_object_key:
+            raise StorageError("Invalid prepared video presentation reference")
+
+        candidate = storage.presentation_url(
+            object_key,
+            expires_in_seconds=signed_url_ttl_seconds,
+        )
+        if not _safe_creative_presentation_reference(candidate):
+            raise StorageError("Invalid creative presentation URL")
+
+        return candidate
+    except (StorageError, ValueError):
+        return None
+
+
 def materialize_creative_asset_response(
     value: CreativeAsset,
     *,
@@ -3704,48 +3806,81 @@ def materialize_creative_asset_response(
 
     response = CreativeAssetResponse.model_validate(value)
     presentation_reference: str | None = None
-    durable_reference = value.storage_reference
-    imported_reference_prefix = (
-        f"/businesses/{business_id}/marketing/uploads/{value.id}/"
-    )
-    if (
-        value.generation_status == "ready"
-        and value.source_type in {"future_provider", "import"}
-        and isinstance(durable_reference, str)
-        and durable_reference
-        and (
-            value.source_type != "import"
-            or imported_reference_prefix in durable_reference
+
+    # Nothing that is incomplete, processing, failed, or archived receives
+    # a browser presentation URL.
+    if value.generation_status != "ready":
+        return response.model_copy(
+            update={"storage_reference": None}
         )
+
+    # Imported video is a special presentation boundary: the durable top-level
+    # reference is the immutable customer upload and may be MOV/WEBM/etc.
+    # The browser must receive only the trusted normalized MP4 derivative.
+    if value.source_type == "import" and value.media_type == "video":
+        presentation_reference = _ready_import_video_presentation_reference(
+            value,
+            business_id=business_id,
+            storage=storage,
+            signed_url_ttl_seconds=signed_url_ttl_seconds,
+        )
+        return response.model_copy(
+            update={"storage_reference": presentation_reference}
+        )
+
+    durable_reference = value.storage_reference
+    if (
+        value.source_type not in {"future_provider", "import"}
+        or not isinstance(durable_reference, str)
+        or not durable_reference
     ):
-        try:
-            object_key = storage.object_key_from_reference(durable_reference)
-            expected_prefix = (
-                f"businesses/{business_id}/marketing/uploads/{value.id}/"
-                if value.source_type == "import"
-                else (
-                    f"businesses/{business_id}/marketing/creatives/"
-                    f"{value.id}/final/"
-                )
-            )
-            final_name = object_key.removeprefix(expected_prefix)
-            if (
-                not object_key.startswith(expected_prefix)
-                or not final_name
-                or "/" in final_name
-            ):
-                raise StorageError("Invalid final creative reference")
-            candidate = storage.presentation_url(
-                object_key,
-                expires_in_seconds=signed_url_ttl_seconds,
-            )
-            if not _safe_creative_presentation_reference(candidate):
-                raise StorageError("Invalid creative presentation URL")
-            presentation_reference = candidate
-        except (StorageError, ValueError):
-            # A malformed, foreign, raw, or unavailable reference is never
-            # copied into the public response and is never sent to the signer.
-            presentation_reference = None
+        return response.model_copy(
+            update={"storage_reference": None}
+        )
+
+    expected_prefix = (
+        f"businesses/{business_id}/marketing/uploads/{value.id}/"
+        if value.source_type == "import"
+        else (
+            f"businesses/{business_id}/marketing/creatives/"
+            f"{value.id}/final/"
+        )
+    )
+
+    # Imported media can only originate from this asset's tenant-owned upload
+    # namespace. Reject obviously foreign/server-owned references before
+    # asking storage to resolve or sign anything.
+    if (
+        value.source_type == "import"
+        and f"/{expected_prefix}" not in durable_reference
+    ):
+        return response.model_copy(
+            update={"storage_reference": None}
+        )
+
+    try:
+        object_key = storage.object_key_from_reference(durable_reference)
+        final_name = object_key.removeprefix(expected_prefix)
+
+        if (
+            not object_key.startswith(expected_prefix)
+            or not final_name
+            or "/" in final_name
+        ):
+            raise StorageError("Invalid final creative reference")
+
+        candidate = storage.presentation_url(
+            object_key,
+            expires_in_seconds=signed_url_ttl_seconds,
+        )
+        if not _safe_creative_presentation_reference(candidate):
+            raise StorageError("Invalid creative presentation URL")
+
+        presentation_reference = candidate
+    except (StorageError, ValueError):
+        # A malformed, foreign, raw, or unavailable reference is never
+        # copied into the public response and is never sent to the signer.
+        presentation_reference = None
 
     return response.model_copy(
         update={"storage_reference": presentation_reference}
