@@ -290,7 +290,12 @@ export function CreatePublishComposer({
         {mode === "manual" && <input type="hidden" name="language" value="en" />}
         {error && <p className="create-publish-form-error" role="alert">{error}</p>}
         {progressLabel && (
-          <div className="create-publish-progress" role="status" aria-live="polite">
+          <div
+            className="create-publish-progress"
+            data-processing={uploadedAsset?.generation_status === "processing"}
+            role="status"
+            aria-live="polite"
+          >
             <span /> {progressLabel}
           </div>
         )}
@@ -390,6 +395,8 @@ function MediaDropzone({
       className="create-publish-dropzone"
       data-dragging={dragging}
       data-has-media={Boolean(asset)}
+      data-uploading={uploading}
+      data-processing={asset?.generation_status === "processing"}
       onDragOver={(event) => event.preventDefault()}
       onDragEnter={onDragEnter}
       onDragLeave={onDragLeave}
@@ -405,7 +412,10 @@ function MediaDropzone({
       {asset ? (
         <>
           {previewUrl && (
-            <div className="create-publish-upload-preview">
+            <div
+              className="create-publish-upload-preview"
+              data-processing={asset.generation_status === "processing"}
+            >
               {asset.media_type === "video" ? (
                 <video src={previewUrl} controls preload="metadata" />
               ) : (
@@ -415,11 +425,20 @@ function MediaDropzone({
           )}
           <div>
             <strong>
-              {asset.generation_status === "processing"
-                ? "Preparing video…"
-                : asset.generation_status === "failed"
-                  ? "Video needs a new upload"
-                  : "Media ready"}
+              {asset.generation_status === "processing" ? (
+                <span className="create-publish-motion-label">
+                  Preparing video
+                  <span className="create-publish-motion-dots" aria-hidden="true">
+                    <i />
+                    <i />
+                    <i />
+                  </span>
+                </span>
+              ) : asset.generation_status === "failed" ? (
+                "Video needs a new upload"
+              ) : (
+                "Media ready"
+              )}
             </strong>
             <p role={asset.generation_status === "failed" ? "alert" : "status"}>
               {asset.generation_status === "processing"
@@ -435,7 +454,20 @@ function MediaDropzone({
         <>
           <Upload />
           <div>
-            <strong>{uploading ? "Uploading media…" : "Drop a photo or video here"}</strong>
+            <strong>
+              {uploading ? (
+                <span className="create-publish-motion-label">
+                  Uploading media
+                  <span className="create-publish-motion-dots" aria-hidden="true">
+                    <i />
+                    <i />
+                    <i />
+                  </span>
+                </span>
+              ) : (
+                "Drop a photo or video here"
+              )}
+            </strong>
             <p>JPG, PNG, WEBP, MP4, MOV or WEBM</p>
             <Button type="button" className="btn-sm" onClick={onChoose} disabled={uploading}>
               Choose file
