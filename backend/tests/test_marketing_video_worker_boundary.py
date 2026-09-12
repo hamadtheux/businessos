@@ -216,5 +216,166 @@ class MarketingVideoWorkerBoundaryTests(
         self.assertTrue(kwargs["retryable"])
 
 
+class _SingleIterationStopEvent:
+    """Allow exactly one worker loop iteration during unit tests."""
+
+    def __init__(self) -> None:
+        self._checks = 0
+        self._forced = False
+
+    def is_set(self) -> bool:
+        if self._forced:
+            return True
+        self._checks += 1
+        return self._checks >= 2
+
+    def set(self) -> None:
+        self._forced = True
+
+    async def wait(self) -> None:
+        return None
+
+
+class _NoopSignalLoop:
+    def add_signal_handler(self, *_args, **_kwargs) -> None:
+        return None
+
+
+class _WorkerLoopSession:
+    def __init__(self) -> None:
+        self.committed = False
+        self.exited = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        self.exited = True
+        return False
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+class _WorkerLoopSessionFactory:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.sessions: list[_WorkerLoopSession] = []
+
+    def __call__(self) -> _WorkerLoopSession:
+        self.calls += 1
+        session = _WorkerLoopSession()
+        self.sessions.append(session)
+        return session
+
+
+class MarketingVideoWorkerRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exhausted_lease_sweep_uses_isolated_committed_transaction(
+        self,
+    ) -> None:
+        factory = _WorkerLoopSessionFactory()
+        terminalize = AsyncMock(return_value=1)
+
+        with (
+            patch.object(
+                worker_module,
+                "AsyncSessionFactory",
+                new=factory,
+            ),
+            patch.object(
+                worker_module,
+                "dead_letter_exhausted_leases",
+                new=terminalize,
+            ),
+        ):
+            count = await worker_module.sweep_exhausted_job_leases(
+                worker_id="worker-recovery-test"
+            )
+
+        self.assertEqual(count, 1)
+        self.assertEqual(factory.calls, 1)
+        self.assertTrue(factory.sessions[0].committed)
+        self.assertTrue(factory.sessions[0].exited)
+        terminalize.assert_awaited_once_with(factory.sessions[0])
+
+    async def test_sweep_failure_does_not_block_normal_worker_claiming(
+        self,
+    ) -> None:
+        factory = _WorkerLoopSessionFactory()
+        terminalize = AsyncMock(
+            side_effect=RuntimeError("cleanup temporarily unavailable")
+        )
+        claim = AsyncMock(return_value=[])
+        heartbeat = AsyncMock()
+        dispose = AsyncMock()
+
+        with (
+            patch.object(
+                worker_module.asyncio,
+                "Event",
+                new=_SingleIterationStopEvent,
+            ),
+            patch.object(
+                worker_module.asyncio,
+                "get_running_loop",
+                return_value=_NoopSignalLoop(),
+            ),
+            patch.object(
+                worker_module,
+                "AsyncSessionFactory",
+                new=factory,
+            ),
+            patch.object(
+                worker_module,
+                "dead_letter_exhausted_leases",
+                new=terminalize,
+            ),
+            patch.object(
+                worker_module,
+                "claim_jobs",
+                new=claim,
+            ),
+            patch.object(
+                worker_module,
+                "upsert_worker_heartbeat",
+                new=heartbeat,
+            ),
+            patch.object(
+                worker_module,
+                "configure_logging",
+            ),
+            patch.object(
+                worker_module,
+                "build_instance_id",
+                return_value="worker-recovery-test",
+            ),
+            patch.object(
+                worker_module,
+                "engine",
+                new=SimpleNamespace(dispose=dispose),
+            ),
+        ):
+            await worker_module.run_worker()
+
+        terminalize.assert_awaited_once()
+
+        # The cleanup exception is intentionally contained by the sweep helper;
+        # normal durable job claiming must still occur in the same iteration.
+        claim.assert_awaited_once()
+        self.assertEqual(
+            claim.await_args.kwargs["worker_id"],
+            "worker-recovery-test",
+        )
+
+        # Sweep, claim/heartbeat, and final stopped heartbeat each use their own
+        # short session boundary.
+        self.assertEqual(factory.calls, 3)
+        self.assertFalse(factory.sessions[0].committed)
+        self.assertTrue(factory.sessions[1].committed)
+        self.assertTrue(factory.sessions[2].committed)
+        self.assertTrue(all(item.exited for item in factory.sessions))
+        dispose.assert_awaited_once()
+
+
 if __name__ == "__main__":
     unittest.main()

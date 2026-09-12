@@ -714,6 +714,70 @@ class BackgroundJobServiceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(job.failure_code, "retry_exhausted")
                 self.assertEqual(message.delivery_status, expected)
 
+    async def test_exhausted_video_preparation_lease_terminalizes_asset(
+        self,
+    ) -> None:
+        creative_asset_id = uuid4()
+        job = BackgroundJob(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            job_type="prepare_marketing_video",
+            status="processing",
+            priority=60,
+            idempotency_key=marketing_video_preparation_job_key(
+                creative_asset_id
+            ),
+            attempt_count=3,
+            max_attempts=3,
+            available_at=NOW - timedelta(minutes=3),
+            claimed_at=NOW - timedelta(minutes=2),
+            lease_expires_at=NOW - timedelta(minutes=1),
+            worker_id="dead-video-worker",
+            creative_asset_id=creative_asset_id,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        source_reference = "https://media.example.test/source.mp4"
+        asset = SimpleNamespace(
+            id=creative_asset_id,
+            business_id=BUSINESS_ID,
+            generation_status="processing",
+            source_type="import",
+            storage_reference=source_reference,
+            creative_metadata={
+                "video_preparation": {
+                    "status": "processing",
+                    "version": 1,
+                }
+            },
+        )
+        session = _Session(
+            scalar_values=[asset],
+            scalar_items=[job],
+        )
+
+        count = await dead_letter_exhausted_leases(
+            session,  # type: ignore[arg-type]
+            now=NOW,
+            limit=10,
+        )
+
+        self.assertEqual(count, 1)
+        self.assertEqual(job.status, "dead_letter")
+        self.assertEqual(job.failure_code, "retry_exhausted")
+        self.assertEqual(job.completed_at, NOW)
+
+        self.assertEqual(asset.generation_status, "failed")
+        self.assertEqual(asset.storage_reference, source_reference)
+        self.assertEqual(
+            asset.creative_metadata["video_preparation"]["status"],
+            "failed",
+        )
+        self.assertEqual(
+            asset.creative_metadata["video_preparation"]["failure_code"],
+            "marketing_video_preparation_unavailable",
+        )
+
     async def test_permanent_and_uncertain_failures_do_not_retry(self) -> None:
         for code in ("invalid_job_state", "uncertain_external_outcome"):
             job = _processing_job()

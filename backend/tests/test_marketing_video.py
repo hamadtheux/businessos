@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import unittest
@@ -437,6 +438,39 @@ class MarketingVideoRendererTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("+faststart", captured_args)
         self.assertIn("-map_metadata", captured_args)
         self.assertIn("-map_chapters", captured_args)
+
+        # Production resource envelope: do not allow FFmpeg/x264 to silently
+        # return to auto-threading on memory-constrained workers.
+        input_index = captured_args.index("-i")
+        decoder_threads_index = captured_args.index("-threads")
+        self.assertLess(decoder_threads_index, input_index)
+        self.assertEqual(
+            captured_args[decoder_threads_index + 1],
+            "1",
+        )
+
+        filter_threads_index = captured_args.index("-filter_threads")
+        self.assertEqual(
+            captured_args[filter_threads_index + 1],
+            "1",
+        )
+
+        encoder_threads_index = captured_args.index("-threads:v")
+        self.assertEqual(
+            captured_args[encoder_threads_index + 1],
+            "1",
+        )
+
+        preset_index = captured_args.index("-preset")
+        self.assertEqual(
+            captured_args[preset_index + 1],
+            "veryfast",
+        )
+
+        self.assertEqual(
+            captured_kwargs.get("stderr"),
+            asyncio.subprocess.DEVNULL,
+        )
 
         self.assertNotIn("shell", captured_kwargs)
         self.assertNotIn("bash", captured_args)

@@ -14,6 +14,7 @@ from app.db.session import AsyncSessionFactory, engine
 from app.models.background_job import BackgroundJob
 from app.services.background_jobs import (
     claim_jobs,
+    dead_letter_exhausted_leases,
     record_job_failure,
     record_job_success,
     renew_job_lease,
@@ -167,6 +168,38 @@ async def process_claimed_job(job: BackgroundJob, *, worker_id: str) -> None:
         )
 
 
+async def sweep_exhausted_job_leases(*, worker_id: str) -> int:
+    """
+    Terminalize jobs whose final processing lease expired.
+
+    Cleanup uses its own short transaction so a cleanup failure cannot prevent
+    the worker from continuing to claim unrelated healthy jobs.
+    """
+    try:
+        async with AsyncSessionFactory() as session:
+            count = await dead_letter_exhausted_leases(session)
+            await session.commit()
+    except Exception as exc:
+        logger.error(
+            "exhausted_job_lease_cleanup_failed",
+            extra={
+                "worker_id": worker_id,
+                "exception_type": type(exc).__name__,
+            },
+        )
+        return 0
+
+    if count:
+        logger.warning(
+            "exhausted_job_leases_dead_lettered",
+            extra={
+                "worker_id": worker_id,
+                "count": count,
+            },
+        )
+    return count
+
+
 async def run_worker() -> None:
     worker_id = build_instance_id("worker")
     stop = asyncio.Event()
@@ -180,6 +213,8 @@ async def run_worker() -> None:
     logger.info("worker_started", extra={"worker_id": worker_id})
     try:
         while not stop.is_set():
+            await sweep_exhausted_job_leases(worker_id=worker_id)
+
             try:
                 async with AsyncSessionFactory() as session:
                     await upsert_worker_heartbeat(

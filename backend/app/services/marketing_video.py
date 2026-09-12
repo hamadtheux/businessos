@@ -330,6 +330,13 @@ async def render_marketing_video_variant(
             "error",
             "-nostdin",
             "-y",
+            # Bound decoder/filter concurrency explicitly. Render workers are
+            # memory-constrained and FFmpeg otherwise auto-sizes worker pools
+            # from available CPUs.
+            "-filter_threads",
+            "1",
+            "-threads",
+            "1",
             "-i",
             str(source_path),
             "-map",
@@ -346,8 +353,12 @@ async def render_marketing_video_variant(
             video_filter,
             "-c:v",
             "libx264",
+            # veryfast substantially reduces x264 lookahead/work buffers while
+            # CRF 21 retains the existing quality target.
             "-preset",
-            "medium",
+            "veryfast",
+            "-threads:v",
+            "1",
             "-crf",
             "21",
             "-profile:v",
@@ -368,7 +379,10 @@ async def render_marketing_video_variant(
             "+faststart",
             str(output_path),
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+            # FFmpeg diagnostics are intentionally not exposed and are not
+            # needed by the renderer. Avoid buffering subprocess stderr in the
+            # Python worker process.
+            stderr=asyncio.subprocess.DEVNULL,
         )
     except OSError:
         raise
