@@ -966,6 +966,7 @@ export type CreativeAsset = {
     | "generating"
     | "reviewing"
     | "repairing"
+    | "processing"
     | "ready"
     | "failed"
     | "archived";

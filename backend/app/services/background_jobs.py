@@ -352,7 +352,13 @@ async def _finalize_terminal_creative_job(
     job: BackgroundJob,
 ) -> None:
     """Leave a terminal creative job with a truthful terminal asset state."""
-    if job.job_type != "generate_creative_asset" or job.creative_asset_id is None:
+    if (
+        job.job_type not in {
+            "generate_creative_asset",
+            "prepare_marketing_video",
+        }
+        or job.creative_asset_id is None
+    ):
         return
     asset = await session.scalar(
         select(CreativeAsset)
@@ -362,7 +368,20 @@ async def _finalize_terminal_creative_job(
         )
         .with_for_update()
     )
-    if asset is not None and asset.generation_status in {
+    if (
+        asset is not None
+        and job.job_type == "prepare_marketing_video"
+        and asset.generation_status == "processing"
+    ):
+        metadata = dict(asset.creative_metadata or {})
+        metadata["video_preparation"] = {
+            "status": "failed",
+            "failure_code": "marketing_video_preparation_unavailable",
+            "version": 1,
+        }
+        asset.creative_metadata = metadata
+        asset.generation_status = "failed"
+    elif asset is not None and asset.generation_status in {
         "queued",
         "generating",
         "reviewing",

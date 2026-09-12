@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import sqlite3
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from datetime import UTC, datetime
 from io import BytesIO
@@ -12,6 +16,7 @@ from uuid import uuid4
 from fastapi import UploadFile
 from PIL import Image
 from pydantic import ValidationError
+from sqlalchemy import CheckConstraint
 from sqlalchemy.exc import SQLAlchemyError
 
 os.environ.setdefault(
@@ -26,7 +31,10 @@ from app.exceptions.marketing import (  # noqa: E402
     MarketingPersistenceError,
     MarketingValidationError,
 )
-from app.models.marketing import MarketingContent  # noqa: E402
+from app.exceptions.background_jobs import (  # noqa: E402
+    BackgroundJobPersistenceError,
+)
+from app.models.marketing import CreativeAsset, MarketingContent  # noqa: E402
 from app.schemas.ai_agent import MAX_AGENT_TASK_LENGTH  # noqa: E402
 from app.schemas.marketing import (  # noqa: E402
     ContentPackageGenerateRequest,
@@ -47,13 +55,23 @@ from app.services.marketing import (  # noqa: E402
 )
 from app.services.marketing_media import (  # noqa: E402
     PreparedMarketingMedia,
+    cleanup_prepared_marketing_media,
     read_marketing_media,
 )
+from app.storage.base import StorageOperationError  # noqa: E402
 
 
 BUSINESS_ID = uuid4()
 USER_ID = uuid4()
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
+
+_EXPECTED_MEDIA_DURATION_CONSTRAINT = (
+    "(media_type = 'image' AND duration_seconds IS NULL) OR "
+    "(media_type = 'video' AND ((duration_seconds IS NOT NULL AND "
+    "duration_seconds BETWEEN 1 AND 3600) OR (duration_seconds IS NULL AND "
+    "source_type = 'import' AND asset_type = 'video_source' AND "
+    "generation_status IN ('processing','failed'))))"
+)
 
 
 class _Rows:
@@ -106,10 +124,59 @@ class _FailingFlushSession(_Session):
         self.rollback_calls += 1
 
 
+class _RollbackSession(_Session):
+    def __init__(self) -> None:
+        super().__init__()
+        self.info: dict[str, object] = {}
+        self.rollback_calls = 0
+
+    async def rollback(self) -> None:
+        self.rollback_calls += 1
+
+
 def _png() -> bytes:
     output = BytesIO()
     Image.new("RGB", (64, 64), (28, 58, 102)).save(output, format="PNG")
     return output.getvalue()
+
+
+def _duration_constraint_accepts(
+    expression: str,
+    *,
+    media_type: str,
+    duration_seconds: int | None,
+    source_type: str,
+    asset_type: str,
+    generation_status: str,
+) -> bool:
+    connection = sqlite3.connect(":memory:")
+    try:
+        row = connection.execute(
+            f"""
+            SELECT ({expression})
+            FROM (
+                SELECT
+                    ? AS media_type,
+                    ? AS duration_seconds,
+                    ? AS source_type,
+                    ? AS asset_type,
+                    ? AS generation_status
+            )
+            """,
+            (
+                media_type,
+                duration_seconds,
+                source_type,
+                asset_type,
+                generation_status,
+            ),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    if row is None:
+        raise AssertionError("duration constraint query returned no row")
+    return row[0] == 1
 
 
 
@@ -128,6 +195,144 @@ def _typed_package_execution(execution: SimpleNamespace) -> SimpleNamespace:
 
 
 class CreatePublishFlowTests(unittest.IsolatedAsyncioTestCase):
+    def test_creative_asset_constraints_allow_unknown_processing_metadata(
+        self,
+    ) -> None:
+        constraints = {
+            constraint.name: str(constraint.sqltext)
+            for constraint in CreativeAsset.__table__.constraints
+            if isinstance(constraint, CheckConstraint)
+        }
+
+        self.assertIn(
+            "video_source",
+            constraints[
+                "ck_marketing_creative_assets_valid_asset_type"
+            ],
+        )
+        processing = constraints[
+            "ck_marketing_creative_assets_consistent_processing_video_state"
+        ]
+        self.assertIn("duration_seconds IS NULL", processing)
+        self.assertIn("width IS NULL", processing)
+        self.assertIn("height IS NULL", processing)
+        self.assertIn("aspect_ratio IS NULL", processing)
+
+        self.assertEqual(
+            constraints[
+                "ck_marketing_creative_assets_consistent_media_duration"
+            ],
+            _EXPECTED_MEDIA_DURATION_CONSTRAINT,
+        )
+
+        ready = constraints[
+            "ck_marketing_creative_assets_consistent_ready_video_metadata"
+        ]
+        self.assertIn("creative_metadata ? 'video_preparation'", ready)
+        self.assertIn(
+            "COALESCE(creative_metadata #>> "
+            "'{video_preparation,status}', '') = 'ready'",
+            ready,
+        )
+        self.assertIn("duration_seconds BETWEEN 1 AND 3600", ready)
+        self.assertIn("width BETWEEN 1 AND 20000", ready)
+        self.assertIn("height BETWEEN 1 AND 20000", ready)
+
+    def test_duration_constraint_allows_null_only_for_async_video_source_states(
+        self,
+    ) -> None:
+        for generation_status in ("processing", "failed"):
+            with self.subTest(generation_status=generation_status):
+                self.assertTrue(
+                    _duration_constraint_accepts(
+                        _EXPECTED_MEDIA_DURATION_CONSTRAINT,
+                        media_type="video",
+                        duration_seconds=None,
+                        source_type="import",
+                        asset_type="video_source",
+                        generation_status=generation_status,
+                    )
+                )
+
+    def test_duration_constraint_requires_bounded_ready_video_duration(
+        self,
+    ) -> None:
+        for duration_seconds, accepted in (
+            (None, False),
+            (0, False),
+            (1, True),
+            (3600, True),
+            (3601, False),
+        ):
+            with self.subTest(duration_seconds=duration_seconds):
+                self.assertEqual(
+                    _duration_constraint_accepts(
+                        _EXPECTED_MEDIA_DURATION_CONSTRAINT,
+                        media_type="video",
+                        duration_seconds=duration_seconds,
+                        source_type="import",
+                        asset_type="video_vertical",
+                        generation_status="ready",
+                    ),
+                    accepted,
+                )
+
+    def test_duration_constraint_rejects_null_for_provider_async_states(
+        self,
+    ) -> None:
+        for generation_status in (
+            "queued",
+            "generating",
+            "reviewing",
+            "repairing",
+        ):
+            with self.subTest(generation_status=generation_status):
+                self.assertFalse(
+                    _duration_constraint_accepts(
+                        _EXPECTED_MEDIA_DURATION_CONSTRAINT,
+                        media_type="video",
+                        duration_seconds=None,
+                        source_type="future_provider",
+                        asset_type="video_vertical",
+                        generation_status=generation_status,
+                    )
+                )
+
+    def test_duration_constraint_rejects_null_for_ordinary_video_states(
+        self,
+    ) -> None:
+        for generation_status in (
+            "draft",
+            "strategy_ready",
+            "provider_required",
+        ):
+            with self.subTest(generation_status=generation_status):
+                self.assertFalse(
+                    _duration_constraint_accepts(
+                        _EXPECTED_MEDIA_DURATION_CONSTRAINT,
+                        media_type="video",
+                        duration_seconds=None,
+                        source_type="manual",
+                        asset_type="video_landscape",
+                        generation_status=generation_status,
+                    )
+                )
+
+    def test_duration_constraint_keeps_image_duration_null(self) -> None:
+        for duration_seconds, accepted in ((None, True), (1, False)):
+            with self.subTest(duration_seconds=duration_seconds):
+                self.assertEqual(
+                    _duration_constraint_accepts(
+                        _EXPECTED_MEDIA_DURATION_CONSTRAINT,
+                        media_type="image",
+                        duration_seconds=duration_seconds,
+                        source_type="import",
+                        asset_type="other",
+                        generation_status="ready",
+                    ),
+                    accepted,
+                )
+
     def test_maximum_create_publish_input_is_bounded_before_agent_runtime(self) -> None:
         data = ContentPackageGenerateRequest(
             goal="OWNER-GOAL-START " + ("g" * 2383),
@@ -399,14 +604,18 @@ class CreatePublishFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.platform_fields["caption"], "Original body")
 
     async def test_upload_reader_sanitizes_images_and_rejects_fake_video(self) -> None:
-        image = await read_marketing_media(
-            UploadFile(
-                filename="../Launch.PNG",
-                file=BytesIO(_png()),
-                headers={"content-type": "image/png"},
-            ),
-            duration_seconds=None,
-        )
+        with patch(
+            "app.services.marketing_media.NamedTemporaryFile",
+        ) as temporary_file:
+            image = await read_marketing_media(
+                UploadFile(
+                    filename="../Launch.PNG",
+                    file=BytesIO(_png()),
+                    headers={"content-type": "image/png"},
+                ),
+                duration_seconds=None,
+            )
+        temporary_file.assert_not_called()
         self.assertEqual(image.media_type, "image")
         self.assertEqual(image.content_type, "image/png")
         self.assertEqual(image.original_name, "Launch.PNG")
@@ -421,6 +630,298 @@ class CreatePublishFlowTests(unittest.IsolatedAsyncioTestCase):
                 ),
                     duration_seconds=10,
                 )
+
+    async def test_failed_video_spool_is_removed_for_every_error_kind(
+        self,
+    ) -> None:
+        signature = b"\x00\x00\x00\x18ftypisom"
+        cases = (
+            (
+                "validation",
+                [b"not-a-video", b""],
+                MarketingValidationError,
+            ),
+            (
+                "os-error",
+                [signature, OSError("read failed")],
+                MarketingValidationError,
+            ),
+            (
+                "unexpected",
+                [signature, RuntimeError("read failed")],
+                RuntimeError,
+            ),
+        )
+
+        for name, reads, error_type in cases:
+            with self.subTest(name=name), TemporaryDirectory() as directory:
+                source_path = Path(directory) / "spool.mp4"
+                upload = SimpleNamespace(
+                    filename="launch.mp4",
+                    content_type="video/mp4",
+                    read=AsyncMock(side_effect=reads),
+                )
+
+                with (
+                    patch(
+                        "app.services.marketing_media.NamedTemporaryFile",
+                        side_effect=lambda **_: source_path.open("w+b"),
+                    ),
+                    self.assertRaises(error_type),
+                ):
+                    await read_marketing_media(upload)
+
+                self.assertFalse(source_path.exists())
+
+    async def test_cancelled_video_spool_is_removed_without_hiding_cancellation(
+        self,
+    ) -> None:
+        signature = b"\x00\x00\x00\x18ftypisom"
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "spool.mp4"
+            upload = SimpleNamespace(
+                filename="launch.mp4",
+                content_type="video/mp4",
+                read=AsyncMock(
+                    side_effect=[signature, asyncio.CancelledError()]
+                ),
+            )
+
+            with (
+                patch(
+                    "app.services.marketing_media.NamedTemporaryFile",
+                    side_effect=lambda **_: source_path.open("w+b"),
+                ),
+                self.assertRaises(asyncio.CancelledError),
+            ):
+                await read_marketing_media(upload)
+
+            self.assertFalse(source_path.exists())
+
+    async def test_video_reader_spools_without_trusting_client_duration(
+        self,
+    ) -> None:
+        content = b"\x00\x00\x00\x18ftypisom" + (b"video" * 20)
+        media = await read_marketing_media(
+            UploadFile(
+                filename="launch.mp4",
+                file=BytesIO(content),
+                headers={"content-type": "video/mp4"},
+            ),
+            duration_seconds=9999,
+        )
+
+        self.assertEqual(media.media_type, "video")
+        self.assertIsNone(media.content)
+        self.assertIsNone(media.duration_seconds)
+        self.assertIsNotNone(media.source_path)
+        assert media.source_path is not None
+        self.assertTrue(media.source_path.exists())
+        self.assertEqual(media.source_path.read_bytes(), content)
+
+        await cleanup_prepared_marketing_media(media)
+        self.assertFalse(media.source_path.exists())
+
+    async def test_image_upload_stays_ready_without_queueing(self) -> None:
+        session = _Session()
+        storage = SimpleNamespace(
+            put=AsyncMock(),
+            put_file=AsyncMock(),
+            delete=AsyncMock(),
+            public_url=lambda key: f"https://media.example.test/{key}",
+        )
+        media = PreparedMarketingMedia(
+            content=_png(),
+            content_type="image/png",
+            extension="png",
+            media_type="image",
+            width=64,
+            height=64,
+            duration_seconds=None,
+            original_name="launch.png",
+        )
+
+        with patch(
+            "app.services.marketing.enqueue_job",
+            new=AsyncMock(),
+        ) as enqueue:
+            asset = await prepare_uploaded_creative_asset(
+                session,
+                business_id=BUSINESS_ID,
+                actor_user_id=USER_ID,
+                media=media,
+                storage=storage,
+            )
+
+        self.assertEqual(asset.generation_status, "ready")
+        self.assertEqual(asset.asset_type, "other")
+        self.assertEqual((asset.width, asset.height), (64, 64))
+        self.assertEqual(storage.put.await_count, 5)
+        storage.put_file.assert_not_awaited()
+        enqueue.assert_not_awaited()
+
+    async def test_video_upload_is_processing_and_enqueues_once(self) -> None:
+        session = _Session()
+        storage = SimpleNamespace(
+            put=AsyncMock(),
+            put_file=AsyncMock(),
+            delete=AsyncMock(),
+            public_url=lambda key: f"https://media.example.test/{key}",
+        )
+
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "upload.mp4"
+            source_path.write_bytes(b"bounded-video-source")
+            media = PreparedMarketingMedia(
+                content=None,
+                content_type="video/mp4",
+                extension="mp4",
+                media_type="video",
+                width=None,
+                height=None,
+                duration_seconds=None,
+                original_name="launch.mp4",
+                source_path=source_path,
+            )
+
+            with patch(
+                "app.services.marketing.enqueue_job",
+                new=AsyncMock(return_value=SimpleNamespace()),
+            ) as enqueue:
+                asset = await prepare_uploaded_creative_asset(
+                    session,
+                    business_id=BUSINESS_ID,
+                    actor_user_id=USER_ID,
+                    media=media,
+                    storage=storage,
+                )
+
+        self.assertEqual(asset.generation_status, "processing")
+        self.assertEqual(asset.asset_type, "video_source")
+        self.assertIsNone(asset.duration_seconds)
+        self.assertIsNone(asset.width)
+        self.assertIsNone(asset.height)
+        self.assertIsNone(asset.aspect_ratio)
+        storage.put.assert_not_awaited()
+        storage.put_file.assert_awaited_once()
+        enqueue.assert_awaited_once()
+        self.assertEqual(
+            enqueue.await_args.kwargs["business_id"],
+            BUSINESS_ID,
+        )
+        self.assertEqual(
+            enqueue.await_args.kwargs["creative_asset_id"],
+            asset.id,
+        )
+        self.assertEqual(
+            enqueue.await_args.kwargs["job_type"],
+            "prepare_marketing_video",
+        )
+        self.assertEqual(
+            enqueue.await_args.kwargs["idempotency_key"],
+            f"marketing-video-preparation:{asset.id}",
+        )
+
+    async def test_video_enqueue_failure_deletes_immutable_source(
+        self,
+    ) -> None:
+        session = _RollbackSession()
+        storage = SimpleNamespace(
+            put=AsyncMock(),
+            put_file=AsyncMock(),
+            delete=AsyncMock(),
+            public_url=lambda key: f"https://media.example.test/{key}",
+        )
+
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "upload.webm"
+            source_path.write_bytes(b"bounded-video-source")
+            media = PreparedMarketingMedia(
+                content=None,
+                content_type="video/webm",
+                extension="webm",
+                media_type="video",
+                width=None,
+                height=None,
+                duration_seconds=None,
+                original_name="launch.webm",
+                source_path=source_path,
+            )
+
+            with (
+                patch(
+                    "app.services.marketing.enqueue_job",
+                    new=AsyncMock(
+                        side_effect=BackgroundJobPersistenceError(
+                            "job_enqueue_failed"
+                        )
+                    ),
+                ),
+                self.assertRaises(MarketingPersistenceError),
+            ):
+                await prepare_uploaded_creative_asset(
+                    session,
+                    business_id=BUSINESS_ID,
+                    actor_user_id=USER_ID,
+                    media=media,
+                    storage=storage,
+                )
+
+        self.assertEqual(session.rollback_calls, 1)
+        storage.delete.assert_awaited_once()
+        deleted_key = storage.delete.await_args.args[0]
+        self.assertRegex(
+            deleted_key,
+            rf"^businesses/{BUSINESS_ID}/marketing/uploads/"
+            r"[0-9a-f-]{36}/source\.webm$",
+        )
+        self.assertEqual(
+            session.info.get("pending_creative_storage_compensations"),
+            [],
+        )
+
+    async def test_partial_video_source_write_is_compensated(self) -> None:
+        session = _Session()
+        storage = SimpleNamespace(
+            put=AsyncMock(),
+            put_file=AsyncMock(
+                side_effect=StorageOperationError("partial write")
+            ),
+            delete=AsyncMock(),
+            public_url=lambda key: f"https://media.example.test/{key}",
+        )
+
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "upload.mp4"
+            source_path.write_bytes(b"bounded-video-source")
+            media = PreparedMarketingMedia(
+                content=None,
+                content_type="video/mp4",
+                extension="mp4",
+                media_type="video",
+                width=None,
+                height=None,
+                duration_seconds=None,
+                original_name="launch.mp4",
+                source_path=source_path,
+            )
+
+            with self.assertRaises(MarketingPersistenceError):
+                await prepare_uploaded_creative_asset(
+                    session,
+                    business_id=BUSINESS_ID,
+                    actor_user_id=USER_ID,
+                    media=media,
+                    storage=storage,
+                )
+
+        storage.delete.assert_awaited_once()
+        self.assertRegex(
+            storage.delete.await_args.args[0],
+            rf"^businesses/{BUSINESS_ID}/marketing/uploads/"
+            r"[0-9a-f-]{36}/source\.mp4$",
+        )
+        self.assertEqual(session.flush_calls, 0)
 
     async def test_media_selection_is_tenant_scoped_and_single_use(self) -> None:
         media_id = uuid4()

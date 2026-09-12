@@ -23,6 +23,7 @@ from app.agents.runtime import (
     execute_ai_agent,
     execute_ai_agent_typed_with_metadata,
 )
+from app.domain.background_jobs import marketing_video_preparation_job_key
 from app.domain.marketing import CAMPAIGN_TRANSITIONS, CONTENT_TRANSITIONS, MARKETING_PLAN_TRANSITIONS, TREND_TRANSITIONS
 from app.domain.business_industries import get_business_industry, is_healthcare_business_type
 from app.domain.audience_safety import contains_sensitive_targeting
@@ -32,6 +33,7 @@ from app.exceptions.ai_agent import (
     AIAgentResponseError,
 )
 from app.exceptions.ai_context import AIContextAssemblyError
+from app.exceptions.background_jobs import BackgroundJobError
 from app.exceptions.marketing import MarketingAIError, MarketingNotFoundError, MarketingPersistenceError, MarketingStateError, MarketingValidationError
 from app.services.ai_context_policy import cmo_context_policy
 from app.models.business import Business
@@ -112,7 +114,10 @@ from app.services.background_jobs import enqueue_job
 from app.db.transactions import rollback_session
 from app.services.business_branding import validated_business_logo_key
 from app.services.logo_image import MAX_LOGO_UPLOAD_BYTES, sanitize_logo_bytes
-from app.services.marketing_media import PreparedMarketingMedia
+from app.services.marketing_media import (
+    MAX_MARKETING_VIDEO_BYTES,
+    PreparedMarketingMedia,
+)
 from app.exceptions.logo import LogoError
 from app.storage.base import ObjectNotFoundError, ObjectStorage, StorageError
 
@@ -2888,8 +2893,31 @@ async def prepare_uploaded_creative_asset(
     variant_records: dict[str, dict[str, object]] = {}
 
     try:
-        await storage.put(object_key, media.content, media.content_type)
-        stored_object_keys.append(object_key)
+        if media.media_type == "video":
+            if media.source_path is None:
+                raise MarketingValidationError(
+                    "marketing_media_unreadable"
+                )
+            # Register the deterministic key before the external write so a
+            # provider error after partial persistence is still compensated.
+            stored_object_keys.append(object_key)
+            await storage.put_file(
+                object_key,
+                media.source_path,
+                media.content_type,
+                max_bytes=MAX_MARKETING_VIDEO_BYTES,
+            )
+        else:
+            if media.content is None:
+                raise MarketingValidationError(
+                    "marketing_media_unreadable"
+                )
+            await storage.put(
+                object_key,
+                media.content,
+                media.content_type,
+            )
+            stored_object_keys.append(object_key)
 
         reference = storage.public_url(object_key)
         if not isinstance(reference, str) or not reference or len(reference) > 1024:
@@ -2927,7 +2955,13 @@ async def prepare_uploaded_creative_asset(
                     "aspect_ratio": variant.aspect_ratio,
                     "transformation": "contain_no_crop",
                 }
-    except (StorageError, ValueError, MarketingValidationError):
+    except (
+        StorageError,
+        OSError,
+        NotImplementedError,
+        ValueError,
+        MarketingValidationError,
+    ):
         for stored_key in reversed(stored_object_keys):
             await _best_effort_delete(storage, stored_key)
         raise MarketingPersistenceError from None
@@ -2936,24 +2970,24 @@ async def prepare_uploaded_creative_asset(
         business_id=business_id,
         campaign_id=None,
         content_id=content.id if content is not None else None,
-        asset_type=(
-            "video_vertical" if media.media_type == "video" else "other"
-        ),
+        asset_type="video_source" if media.media_type == "video" else "other",
         media_type=media.media_type,
         source_type="import",
         instructions=f"Uploaded source media: {media.original_name}"[:5000],
         visual_direction=None,
-        generation_status="ready",
+        generation_status=(
+            "processing" if media.media_type == "video" else "ready"
+        ),
         storage_reference=reference,
-        width=media.width,
-        height=media.height,
+        width=None if media.media_type == "video" else media.width,
+        height=None if media.media_type == "video" else media.height,
         aspect_ratio=(
             f"{media.width}:{media.height}"
-            if media.width and media.height
+            if media.media_type == "image" and media.width and media.height
             else None
         ),
         alt_text=None,
-        duration_seconds=media.duration_seconds,
+        duration_seconds=None,
         provider_key=None,
         provider_job_reference=None,
         creative_metadata={
@@ -2961,6 +2995,16 @@ async def prepare_uploaded_creative_asset(
             "original_name": media.original_name,
             "original_immutable": True,
             "variants": variant_records,
+            **(
+                {
+                    "video_preparation": {
+                        "status": "processing",
+                        "version": 1,
+                    }
+                }
+                if media.media_type == "video"
+                else {}
+            ),
         },
     )
     session.add(value)
@@ -2973,6 +3017,16 @@ async def prepare_uploaded_creative_asset(
         )
     try:
         await _flush(session)
+        if media.media_type == "video":
+            await enqueue_job(
+                session,
+                business_id=business_id,
+                job_type="prepare_marketing_video",
+                idempotency_key=marketing_video_preparation_job_key(
+                    value.id
+                ),
+                creative_asset_id=value.id,
+            )
     except MarketingPersistenceError:
         for persisted_key in persisted_object_keys:
             _remove_creative_storage_compensation(
@@ -2982,6 +3036,16 @@ async def prepare_uploaded_creative_asset(
         for persisted_key in reversed(persisted_object_keys):
             await _best_effort_delete(storage, persisted_key)
         raise
+    except BackgroundJobError:
+        await _rollback_session(session)
+        for persisted_key in persisted_object_keys:
+            _remove_creative_storage_compensation(
+                session,
+                persisted_key,
+            )
+        for persisted_key in reversed(persisted_object_keys):
+            await _best_effort_delete(storage, persisted_key)
+        raise MarketingPersistenceError from None
     record_audit(
         session,
         business_id=business_id,

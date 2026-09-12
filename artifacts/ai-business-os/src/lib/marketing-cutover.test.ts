@@ -156,6 +156,25 @@ test("Create & Publish uploads media as authenticated multipart without JSON wra
   assert.equal(request?.body?.get("content_id"), "content-one");
 });
 
+test("Create & Publish video upload does not require browser-derived duration", async () => {
+  let body: FormData | null = null;
+  const api = await authenticated(async (input, init) => {
+    if (String(input).endsWith("/login")) return json(session);
+    body = init?.body instanceof FormData ? init.body : null;
+    return json({ generation_status: "processing" });
+  });
+  const file = new File(
+    [new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112])],
+    "launch.mp4",
+    { type: "video/mp4" },
+  );
+
+  await api.creative.upload(businessA, file);
+
+  assert.equal((body?.get("file") as File | undefined)?.name, file.name);
+  assert.equal(body?.get("duration_seconds"), null);
+});
+
 
 test("frontend creative API exposes uploaded-media reads and upload only", async () => {
   const source = await readFile(

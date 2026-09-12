@@ -918,6 +918,11 @@ async def prepare_content_publish_action(
     )
     if target == "instagram" and media is None:
         raise MarketingValidationError("instagram_media_required")
+    if media is not None and media.media_type == "video":
+        # Prepared video is ready for server-selected derivatives, but the
+        # current Meta connectors do not implement the required asynchronous
+        # Reels workflow. Do not create an executable approval yet.
+        raise MarketingValidationError("social_video_publish_unsupported")
 
     media_refs = [f"creative_asset:{media.id}"] if media is not None else []
     media_type = media.media_type if media is not None else None

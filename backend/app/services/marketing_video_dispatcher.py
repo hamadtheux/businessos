@@ -113,6 +113,7 @@ async def dispatch_marketing_video_preparation_job(
             if (
                 asset.media_type != "video"
                 or asset.source_type != "import"
+                or asset.asset_type != "video_source"
                 or asset.generation_status != "processing"
                 or not asset.storage_reference
             ):
@@ -241,6 +242,7 @@ async def dispatch_marketing_video_preparation_job(
             if (
                 asset.media_type != "video"
                 or asset.source_type != "import"
+                or asset.asset_type != "video_source"
                 or asset.generation_status != "processing"
                 or asset.storage_reference != context.source_reference
             ):

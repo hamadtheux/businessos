@@ -228,6 +228,60 @@ class SocialMediaDispatchTests(unittest.IsolatedAsyncioTestCase):
             [item[0] for item in storage.presented],
         )
 
+    async def test_meta_video_execution_remains_fail_closed(self) -> None:
+        business_id = uuid4()
+        action_id = uuid4()
+        content_id = uuid4()
+        asset_id = uuid4()
+        proposal = SimpleNamespace(
+            entity_id=content_id,
+            channel="instagram",
+        )
+        content = SimpleNamespace(
+            id=content_id,
+            business_id=business_id,
+            root_content_id=content_id,
+            proposal_key=None,
+        )
+        asset = SimpleNamespace(
+            id=asset_id,
+            business_id=business_id,
+            content_id=content_id,
+            source_type="import",
+            generation_status="ready",
+            media_type="video",
+            width=1080,
+            height=1920,
+            duration_seconds=30,
+            creative_metadata={},
+            storage_reference=(
+                "https://media.example.test/"
+                f"businesses/{business_id}/marketing/uploads/{asset_id}/"
+                "source.mp4"
+            ),
+        )
+        storage = _Storage(resolved_key="unused")
+
+        with self.assertRaisesRegex(
+            IntegrationStateError,
+            "publish_video_provider_unsupported",
+        ):
+            await _materialize_publish_media_payload(
+                _Session([proposal, content, asset]),
+                business_id=business_id,
+                action_id=action_id,
+                payload=PublishSocialPostPayload(
+                    platform="instagram",
+                    content="Approved post",
+                    media_refs=[f"creative_asset:{asset_id}"],
+                    media_type="video",
+                ),
+                storage=storage,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(storage.resolved, [])
+        self.assertEqual(storage.presented, [])
+
     async def test_create_publish_package_can_share_owner_media_across_platforms(self) -> None:
         business_id = uuid4()
         action_id = uuid4()

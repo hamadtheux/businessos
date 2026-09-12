@@ -601,6 +601,29 @@ async def _materialize_publish_media_payload(
     ):
         raise IntegrationStateError("publish_media_content_conflict")
 
+    if asset.media_type == "video":
+        from app.services.social_media_profiles import (
+            automatic_social_profile,
+        )
+
+        execution_profile = automatic_social_profile(
+            payload.platform,
+            media_type="video",
+            width=asset.width,
+            height=asset.height,
+            duration_seconds=asset.duration_seconds,
+        )
+        if (
+            execution_profile is None
+            or not execution_profile.provider_execution_supported
+        ):
+            # Prepared derivatives are deliberately resolvable for a future
+            # real provider workflow, but current Meta video execution stays
+            # fail-closed.
+            raise IntegrationStateError(
+                "publish_video_provider_unsupported"
+            )
+
     durable_reference, expected_variant = _publish_media_reference(
         asset=asset,
         payload=payload,
@@ -655,15 +678,7 @@ def _publish_media_reference(
     becomes part of the approval identity.
     """
 
-    if asset.media_type == "video":
-        reference = asset.storage_reference
-        if not isinstance(reference, str) or not reference:
-            raise IntegrationStateError(
-                "publish_media_reference_invalid"
-            )
-        return reference, None
-
-    if asset.media_type != "image":
+    if asset.media_type not in {"image", "video"}:
         raise IntegrationStateError("publish_media_asset_invalid")
 
     from app.services.social_media_profiles import (
@@ -672,12 +687,21 @@ def _publish_media_reference(
 
     profile = automatic_social_profile(
         payload.platform,
-        media_type="image",
+        media_type=asset.media_type,
         width=asset.width,
         height=asset.height,
+        duration_seconds=getattr(asset, "duration_seconds", None),
     )
 
-    if profile is None or profile.image_variant is None:
+    expected_variant = (
+        profile.video_variant
+        if profile is not None and asset.media_type == "video"
+        else profile.image_variant
+        if profile is not None
+        else None
+    )
+
+    if profile is None or expected_variant is None:
         raise IntegrationStateError(
             "publish_media_profile_unsupported"
         )
@@ -694,7 +718,7 @@ def _publish_media_reference(
             "publish_media_variants_required"
         )
 
-    variant = variants.get(profile.image_variant)
+    variant = variants.get(expected_variant)
     if not isinstance(variant, dict):
         raise IntegrationStateError(
             "publish_media_variants_required"
@@ -702,20 +726,35 @@ def _publish_media_reference(
 
     reference = variant.get("storage_reference")
 
-    if (
-        not isinstance(reference, str)
-        or not reference
-        or variant.get("content_type") != "image/jpeg"
-        or variant.get("width") != profile.target_width
-        or variant.get("height") != profile.target_height
-        or variant.get("aspect_ratio") != profile.aspect_ratio
-        or variant.get("transformation") != "contain_no_crop"
-    ):
+    if asset.media_type == "video":
+        expected_width, expected_height, expected_ratio = {
+            "vertical_9_16": (1080, 1920, "9:16"),
+            "landscape_16_9": (1920, 1080, "16:9"),
+        }[expected_variant]
+        valid_variant = (
+            variant.get("content_type") == "video/mp4"
+            and variant.get("width") == expected_width
+            and variant.get("height") == expected_height
+            and variant.get("aspect_ratio") == expected_ratio
+            and variant.get("video_codec") == "h264"
+            and variant.get("audio_codec") in {None, "aac"}
+            and variant.get("transformation") == "contain_no_crop"
+        )
+    else:
+        valid_variant = (
+            variant.get("content_type") == "image/jpeg"
+            and variant.get("width") == profile.target_width
+            and variant.get("height") == profile.target_height
+            and variant.get("aspect_ratio") == profile.aspect_ratio
+            and variant.get("transformation") == "contain_no_crop"
+        )
+
+    if not isinstance(reference, str) or not reference or not valid_variant:
         raise IntegrationStateError(
             "publish_media_variant_invalid"
         )
 
-    return reference, profile.image_variant
+    return reference, expected_variant
 
 
 async def _publish_asset_belongs_to_content(
@@ -772,7 +811,8 @@ def _trusted_publish_media_object_key(
         leaf = object_key.removeprefix(prefix)
 
         if expected_variant is not None:
-            return leaf == f"variants/{expected_variant}.jpg"
+            extension = "mp4" if asset.media_type == "video" else "jpg"
+            return leaf == f"variants/{expected_variant}.{extension}"
 
         return (
             leaf.startswith("source.")

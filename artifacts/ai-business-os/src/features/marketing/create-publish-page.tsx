@@ -102,6 +102,38 @@ export function CreatePublishPage() {
     },
     enabled: Boolean(activeBusinessId && contentPackage?.contents.length),
   });
+  const preparedMedia = useQuery({
+    queryKey: [
+      "marketing",
+      activeBusinessId,
+      "creative-assets",
+      media?.id,
+    ],
+    queryFn: ({ signal }) =>
+      marketingApi.creative.get(activeBusinessId, media!.id, signal),
+    enabled: Boolean(
+      activeBusinessId &&
+        media?.media_type === "video" &&
+        media.generation_status === "processing",
+    ),
+    refetchInterval: (query) => {
+      const status =
+        query.state.data?.generation_status || media?.generation_status;
+      return status === "processing" ? 1500 : false;
+    },
+  });
+
+  useEffect(() => {
+    const refreshed = preparedMedia.data;
+    if (
+      !refreshed ||
+      refreshed.id !== media?.id ||
+      refreshed.business_id !== activeBusinessId
+    ) {
+      return;
+    }
+    setMedia(refreshed);
+  }, [activeBusinessId, media?.id, preparedMedia.data]);
 
   const readiness = useMemo(
     () => Object.fromEntries(
@@ -119,14 +151,14 @@ export function CreatePublishPage() {
   );
 
   const upload = useMutation({
-    mutationFn: ({ file, duration, contentId }: { file: File; duration?: number; contentId?: string }) =>
-      marketingApi.creative.upload(activeBusinessId, file, duration, contentId),
+    mutationFn: ({ file, contentId }: { file: File; contentId?: string }) =>
+      marketingApi.creative.upload(activeBusinessId, file, undefined, contentId),
     onError: (reason) => {
       setError(humanizeApiError(reason, "This media could not be uploaded. Choose another file."));
     },
   });
 
-  const uploadMedia = async (file: File, duration?: number) => {
+  const uploadMedia = async (file: File) => {
     setError("");
     const currentContent = contentPackage ? mediaOwner(contentPackage.contents) : undefined;
     const nextPreview = URL.createObjectURL(file);
@@ -135,7 +167,6 @@ export function CreatePublishPage() {
     try {
       const asset = await upload.mutateAsync({
         file,
-        duration,
         contentId: currentContent?.id,
       });
       await persistMediaChoice(asset);
@@ -578,11 +609,15 @@ export function CreatePublishPage() {
       currentMedia.generation_status === "ready" &&
       currentMedia.storage_reference,
   );
+  const mediaBlocksActions = Boolean(
+    currentMedia && currentMedia.generation_status !== "ready",
+  );
 
   const actionPending =
     publish.isPending ||
     publishAndCampaign.isPending ||
-    schedule.isPending;
+    schedule.isPending ||
+    mediaBlocksActions;
 
   return (
     <div className="create-publish-page">
@@ -633,7 +668,12 @@ export function CreatePublishPage() {
           mediaPreviewUrl={mediaPreviewUrl}
           pending={createPackage.isPending || manualPackage.isPending}
           uploading={upload.isPending}
-          progressLabel={creationStage}
+          progressLabel={
+            creationStage ||
+            (currentMedia?.generation_status === "processing"
+              ? "Preparing your video for each platform…"
+              : "")
+          }
           error={error}
           onBack={resetComposer}
           onUpload={uploadMedia}

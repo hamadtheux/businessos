@@ -141,8 +141,10 @@ class BackgroundJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="consistent_conversation_message_reference",
         ),
         CheckConstraint(
-            "(job_type = 'generate_creative_asset' AND creative_asset_id IS NOT NULL) OR "
-            "(job_type <> 'generate_creative_asset' AND creative_asset_id IS NULL)",
+            "(job_type IN ('generate_creative_asset','prepare_marketing_video') "
+            "AND creative_asset_id IS NOT NULL) OR "
+            "(job_type NOT IN ('generate_creative_asset','prepare_marketing_video') "
+            "AND creative_asset_id IS NULL)",
             name="consistent_creative_asset_reference",
         ),
         Index(

@@ -20,6 +20,7 @@ from app.domain.background_jobs import (  # noqa: E402
     creative_asset_generation_job_key,
     initial_opportunity_analysis_job_key,
     initial_opportunity_analysis_request_key,
+    marketing_video_preparation_job_key,
     require_job_policy,
 )
 from app.exceptions.background_jobs import BackgroundJobStateError, BackgroundJobValidationError  # noqa: E402
@@ -179,6 +180,19 @@ class BackgroundJobModelAndRegistryTests(unittest.TestCase):
         self.assertIn("version:2", key)
         self.assertIn("variation:alternate_metaphor", key)
         self.assertLessEqual(len(key), 200)
+
+    def test_video_preparation_policy_and_identity_are_bounded(self) -> None:
+        asset_id = uuid4()
+        policy = require_job_policy("prepare_marketing_video")
+        self.assertEqual(policy.reference_field, "creative_asset_id")
+        self.assertEqual(policy.max_attempts, 3)
+        self.assertTrue(policy.retryable)
+        self.assertFalse(policy.manually_retryable)
+        self.assertTrue(policy.lease_recoverable)
+        self.assertEqual(
+            marketing_video_preparation_job_key(asset_id),
+            f"marketing-video-preparation:{asset_id}",
+        )
 
     def test_manual_message_dispatch_policy_is_bounded_and_crash_recoverable(self) -> None:
         policy = require_job_policy("dispatch_conversation_message")
@@ -613,6 +627,59 @@ class BackgroundJobServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "dead_letter")
         self.assertEqual(asset.generation_status, "failed")
         self.assertIsNone(asset.storage_reference)
+
+    async def test_video_retry_exhaustion_cannot_leave_asset_processing(self) -> None:
+        creative_asset_id = uuid4()
+        job = BackgroundJob(
+            id=uuid4(),
+            business_id=BUSINESS_ID,
+            job_type="prepare_marketing_video",
+            status="processing",
+            priority=60,
+            idempotency_key=marketing_video_preparation_job_key(
+                creative_asset_id
+            ),
+            attempt_count=3,
+            max_attempts=3,
+            available_at=NOW - timedelta(seconds=1),
+            claimed_at=NOW - timedelta(seconds=10),
+            lease_expires_at=NOW + timedelta(seconds=50),
+            worker_id="worker-a",
+            creative_asset_id=creative_asset_id,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        source_reference = "https://media.example.test/source.mp4"
+        asset = SimpleNamespace(
+            id=creative_asset_id,
+            business_id=BUSINESS_ID,
+            generation_status="processing",
+            source_type="import",
+            storage_reference=source_reference,
+            creative_metadata={
+                "video_preparation": {
+                    "status": "processing",
+                    "version": 1,
+                }
+            },
+        )
+        session = _Session(scalar_values=[job, asset])
+
+        result = await record_job_failure(
+            session,  # type: ignore[arg-type]
+            job_id=job.id,
+            worker_id="worker-a",
+            failure_code="dependency_unavailable",
+            retryable=True,
+        )
+
+        self.assertEqual(result.status, "dead_letter")
+        self.assertEqual(asset.generation_status, "failed")
+        self.assertEqual(asset.storage_reference, source_reference)
+        self.assertEqual(
+            asset.creative_metadata["video_preparation"]["failure_code"],
+            "marketing_video_preparation_unavailable",
+        )
 
     async def test_exhausted_manual_message_lease_cannot_leave_message_stuck(self) -> None:
         for initial, expected in (

@@ -166,6 +166,13 @@ _POLICIES = {
     "generate_creative_asset": JobPolicy(
         "generate_creative_asset", "creative_asset_id", 60, 3, True, False, True,
     ),
+    # Uploaded-video preparation is fully server-owned and replay-safe. The
+    # immutable source plus deterministic derivative keys make lease recovery
+    # and bounded infrastructure retries safe. Exhausted uploads recover by
+    # re-upload rather than by manually resetting failed domain state.
+    "prepare_marketing_video": JobPolicy(
+        "prepare_marketing_video", "creative_asset_id", 60, 3, True, False, True,
+    ),
 }
 
 JOB_POLICIES: Final = MappingProxyType(_POLICIES)
@@ -227,3 +234,10 @@ def creative_asset_generation_job_key(
         f"creative-generation:{creative_asset_id}:epoch:{generation_epoch}:"
         f"version:{generation_version}:variation:{variation_identity}"
     )
+
+
+def marketing_video_preparation_job_key(
+    creative_asset_id: UUID,
+) -> str:
+    """Return the single durable preparation identity for an upload."""
+    return f"marketing-video-preparation:{creative_asset_id}"

@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import httpx
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,7 +19,10 @@ os.environ.setdefault("AIBOS_AUTH_SECRET_KEY", "x" * 32)
 
 from app.api.dependencies.ai_agent import get_ai_agent_provider  # noqa: E402
 from app.api.dependencies.business import BusinessAccessContext, get_business_access  # noqa: E402
-from app.api.v1.marketing import _mutate as marketing_mutate  # noqa: E402
+from app.api.v1.marketing import (  # noqa: E402
+    _mutate as marketing_mutate,
+    upload_post_media,
+)
 from app.db.session import get_db_session  # noqa: E402
 from app.exceptions.marketing import MarketingStateError  # noqa: E402
 from app.main import app  # noqa: E402
@@ -128,6 +131,112 @@ class MarketingApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["id"], str(asset.id))
         self.assertEqual(get_asset.await_args.kwargs["business_id"], BUSINESS_ID)
+
+    async def test_video_upload_accepts_no_client_duration_and_returns_processing(
+        self,
+    ) -> None:
+        asset = _creative_asset()
+        asset.asset_type = "video_source"
+        asset.media_type = "video"
+        asset.source_type = "import"
+        asset.generation_status = "processing"
+        asset.storage_reference = (
+            "https://media.example.test/"
+            f"businesses/{BUSINESS_ID}/marketing/uploads/{asset.id}/"
+            "source.mp4"
+        )
+        asset.width = None
+        asset.height = None
+        asset.aspect_ratio = None
+        asset.duration_seconds = None
+        prepared = SimpleNamespace(source_path=None)
+
+        with (
+            patch(
+                "app.api.v1.marketing.read_marketing_media",
+                new=AsyncMock(return_value=prepared),
+            ) as reader,
+            patch(
+                "app.api.v1.marketing.service.prepare_uploaded_creative_asset",
+                new=AsyncMock(return_value=asset),
+            ) as service,
+        ):
+            response = await self.client.post(
+                self._url("creative-assets/upload"),
+                files={
+                    "file": (
+                        "launch.mp4",
+                        b"\x00\x00\x00\x18ftypisom",
+                        "video/mp4",
+                    )
+                },
+            )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            response.json()["generation_status"],
+            "processing",
+        )
+        self.assertIsNone(response.json()["duration_seconds"])
+        self.assertIsNone(reader.await_args.kwargs["duration_seconds"])
+        self.assertEqual(
+            service.await_args.kwargs["business_id"],
+            BUSINESS_ID,
+        )
+
+    async def test_upload_cleanup_runs_when_upload_file_close_raises(
+        self,
+    ) -> None:
+        asset = _creative_asset()
+        prepared = SimpleNamespace(source_path=object())
+        upload = SimpleNamespace(close=AsyncMock(side_effect=OSError("close")))
+        access = SimpleNamespace(
+            business=SimpleNamespace(id=BUSINESS_ID),
+            user=SimpleNamespace(id=USER_ID),
+        )
+
+        async def mutate_creative(
+            _response,
+            _session,
+            operation,
+            **_kwargs,
+        ):
+            return await operation
+
+        with (
+            patch(
+                "app.api.v1.marketing._guard",
+                new=AsyncMock(),
+            ),
+            patch(
+                "app.api.v1.marketing.read_marketing_media",
+                new=AsyncMock(return_value=prepared),
+            ),
+            patch(
+                "app.api.v1.marketing.service.prepare_uploaded_creative_asset",
+                new=AsyncMock(return_value=asset),
+            ),
+            patch(
+                "app.api.v1.marketing._mutate_creative",
+                new=mutate_creative,
+            ),
+            patch(
+                "app.api.v1.marketing.cleanup_prepared_marketing_media",
+                new=AsyncMock(),
+            ) as cleanup,
+            self.assertRaisesRegex(OSError, "close"),
+        ):
+            await upload_post_media(
+                access=access,
+                response=Response(),
+                session=self.session,
+                storage=self.storage,
+                file=upload,
+                duration_seconds=None,
+                content_id=None,
+            )
+
+        cleanup.assert_awaited_once_with(prepared)
 
     async def test_ready_creative_read_returns_fresh_presentation_only(self) -> None:
         asset = _creative_asset()

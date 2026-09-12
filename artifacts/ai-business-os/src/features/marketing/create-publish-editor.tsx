@@ -51,7 +51,7 @@ type EditorProps = {
   onSave: (content: MarketingContent, fields: EditablePlatformFields) => void;
   onRewrite: (content: MarketingContent, instruction: string) => void;
   onUseMedia: (media: CreativeAsset | null) => void;
-  onUpload: (file: File, durationSeconds?: number) => Promise<void>;
+  onUpload: (file: File) => Promise<void>;
   onConnect: () => void;
   onSchedule: () => void;
   onPublish: () => void;
@@ -163,7 +163,7 @@ export function CreatePublishEditor({
             accept=".jpg,.jpeg,.png,.webp,.mp4,.webm,image/jpeg,image/png,image/webp,video/mp4,video/webm"
             onChange={(event) => {
               const file = event.target.files?.[0];
-              if (file) void uploadWithDuration(file, onUpload);
+              if (file) void onUpload(file);
               event.target.value = "";
             }}
           />
@@ -398,6 +398,21 @@ function MediaFrame({
     );
   }
 
+  if (media?.generation_status === "processing") {
+    return (
+      <div
+        className="create-publish-media-frame create-publish-media-working"
+        role="status"
+        aria-live="polite"
+      >
+        <div className="create-publish-media-skeleton" />
+        <span>
+          <LoaderCircle /> Preparing your video for each platform…
+        </span>
+      </div>
+    );
+  }
+
   if (media && media.generation_status !== "ready") {
     return (
       <div
@@ -405,8 +420,8 @@ function MediaFrame({
         role="alert"
       >
         <AlertTriangle />
-        <strong>This media is not available for publishing.</strong>
-        <p>Upload an image or video to continue.</p>
+        <strong>We couldn’t prepare this video.</strong>
+        <p>Try uploading it again, or choose a previous ready upload.</p>
 
         <div>
           <Button
@@ -493,27 +508,4 @@ function creativeHistoryStatus(status: CreativeAsset["generation_status"]) {
   if (status === "ready") return "Ready";
   if (status === "archived") return "Archived";
   return "Unavailable";
-}
-
-async function uploadWithDuration(
-  file: File,
-  onUpload: (file: File, durationSeconds?: number) => Promise<void>,
-) {
-  if (!file.type.startsWith("video/")) {
-    await onUpload(file);
-    return;
-  }
-  const url = URL.createObjectURL(file);
-  try {
-    const duration = await new Promise<number | undefined>((resolve) => {
-      const video = document.createElement("video");
-      video.preload = "metadata";
-      video.onloadedmetadata = () => resolve(Math.max(1, Math.round(video.duration)));
-      video.onerror = () => resolve(undefined);
-      video.src = url;
-    });
-    await onUpload(file, duration);
-  } finally {
-    URL.revokeObjectURL(url);
-  }
 }

@@ -32,6 +32,11 @@ ImageVariant = Literal[
     "vertical_9_16",
 ]
 
+VideoVariant = Literal[
+    "vertical_9_16",
+    "landscape_16_9",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class SocialMediaProfile:
@@ -56,6 +61,7 @@ class SocialMediaProfile:
     aspect_ratio: str
 
     provider_execution_supported: bool
+    video_variant: VideoVariant | None = None
 
 
 _PROFILES: Final = MappingProxyType(
@@ -80,6 +86,7 @@ _PROFILES: Final = MappingProxyType(
             target_height=1920,
             aspect_ratio="9:16",
             provider_execution_supported=False,
+            video_variant="vertical_9_16",
         ),
         ("instagram", "reel"): SocialMediaProfile(
             platform="instagram",
@@ -90,6 +97,7 @@ _PROFILES: Final = MappingProxyType(
             target_height=1920,
             aspect_ratio="9:16",
             provider_execution_supported=False,
+            video_variant="vertical_9_16",
         ),
 
         # Facebook
@@ -112,6 +120,7 @@ _PROFILES: Final = MappingProxyType(
             target_height=1920,
             aspect_ratio="9:16",
             provider_execution_supported=False,
+            video_variant="vertical_9_16",
         ),
         ("facebook", "reel"): SocialMediaProfile(
             platform="facebook",
@@ -122,6 +131,7 @@ _PROFILES: Final = MappingProxyType(
             target_height=1920,
             aspect_ratio="9:16",
             provider_execution_supported=False,
+            video_variant="vertical_9_16",
         ),
 
         # LinkedIn
@@ -134,6 +144,7 @@ _PROFILES: Final = MappingProxyType(
             target_height=628,
             aspect_ratio="1.91:1",
             provider_execution_supported=False,
+            video_variant="landscape_16_9",
         ),
 
         # TikTok
@@ -156,6 +167,7 @@ _PROFILES: Final = MappingProxyType(
             target_height=1920,
             aspect_ratio="9:16",
             provider_execution_supported=False,
+            video_variant="vertical_9_16",
         ),
 
         # YouTube
@@ -168,6 +180,7 @@ _PROFILES: Final = MappingProxyType(
             target_height=1920,
             aspect_ratio="9:16",
             provider_execution_supported=False,
+            video_variant="vertical_9_16",
         ),
         ("youtube", "standard_video"): SocialMediaProfile(
             platform="youtube",
@@ -178,6 +191,7 @@ _PROFILES: Final = MappingProxyType(
             target_height=1080,
             aspect_ratio="16:9",
             provider_execution_supported=False,
+            video_variant="landscape_16_9",
         ),
     }
 )
@@ -298,3 +312,21 @@ def preferred_image_variant(
     )
 
     return profile.image_variant if profile else None
+
+
+def preferred_video_variant(
+    platform: str,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+    duration_seconds: int | None = None,
+) -> VideoVariant | None:
+    profile = automatic_social_profile(
+        platform,
+        media_type="video",
+        width=width,
+        height=height,
+        duration_seconds=duration_seconds,
+    )
+
+    return profile.video_variant if profile else None

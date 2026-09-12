@@ -106,7 +106,10 @@ from app.services.marketing_actions import (
     prepare_campaign_action,
     prepare_content_publish_action,
 )
-from app.services.marketing_media import read_marketing_media
+from app.services.marketing_media import (
+    cleanup_prepared_marketing_media,
+    read_marketing_media,
+)
 from app.services.advertising_spend_policy import (
     get_advertising_spend_policy,
     set_advertising_spend_policy,
@@ -445,43 +448,49 @@ async def upload_post_media(
     content_id: UUID | None = Form(default=None),
 ):
     await _guard(session, access.business.id, "marketing_cmo")
+    media = None
     try:
-        media = await read_marketing_media(
-            file,
-            duration_seconds=duration_seconds,
-        )
-    except MarketingValidationError as error:
-        code = str(error)
-        messages = {
-            "marketing_media_too_large": "The file is too large. Images can be up to 5 MB and videos up to 50 MB.",
-            "marketing_media_empty": "The selected file is empty.",
-            "marketing_media_unreadable": "The selected file could not be read.",
-            "marketing_video_duration_required": "The video duration could not be verified. Choose the file again.",
-            "marketing_media_unsupported": "Use a JPG, PNG, WEBP, MP4, or WEBM file.",
-        }
-        raise HTTPException(
-            status.HTTP_413_CONTENT_TOO_LARGE
-            if code == "marketing_media_too_large"
-            else status.HTTP_422_UNPROCESSABLE_CONTENT,
-            {"code": code, "message": messages.get(code, "Choose another media file.")},
-            headers=_PRIVATE_HEADERS,
-        ) from None
-    finally:
-        await file.close()
-    return await _mutate_creative(
-        response,
-        session,
-        service.prepare_uploaded_creative_asset(
+        try:
+            media = await read_marketing_media(
+                file,
+                duration_seconds=duration_seconds,
+            )
+        except MarketingValidationError as error:
+            code = str(error)
+            messages = {
+                "marketing_media_too_large": "The file is too large. Images can be up to 5 MB and videos up to 50 MB.",
+                "marketing_media_empty": "The selected file is empty.",
+                "marketing_media_unreadable": "The selected file could not be read.",
+                "marketing_media_unsupported": "Use a JPG, PNG, WEBP, MP4, or WEBM file.",
+            }
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE
+                if code == "marketing_media_too_large"
+                else status.HTTP_422_UNPROCESSABLE_CONTENT,
+                {"code": code, "message": messages.get(code, "Choose another media file.")},
+                headers=_PRIVATE_HEADERS,
+            ) from None
+
+        return await _mutate_creative(
+            response,
             session,
+            service.prepare_uploaded_creative_asset(
+                session,
+                business_id=access.business.id,
+                actor_user_id=access.user.id,
+                media=media,
+                storage=storage,
+                content_id=content_id,
+            ),
             business_id=access.business.id,
-            actor_user_id=access.user.id,
-            media=media,
             storage=storage,
-            content_id=content_id,
-        ),
-        business_id=access.business.id,
-        storage=storage,
-    )
+        )
+    finally:
+        try:
+            await file.close()
+        finally:
+            if media is not None:
+                await cleanup_prepared_marketing_media(media)
 
 
 @router.get(

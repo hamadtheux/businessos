@@ -38,7 +38,7 @@ type ComposerProps = {
   progressLabel?: string;
   error?: string;
   onBack: () => void;
-  onUpload: (file: File, durationSeconds?: number) => Promise<void>;
+  onUpload: (file: File) => Promise<void>;
   onGenerate: (input: GenerateContentPackageInput) => void;
   onManual: (input: ManualContentPackageInput) => void;
 };
@@ -76,10 +76,7 @@ export function CreatePublishComposer({
   const handleFiles = async (files: FileList | null) => {
     const file = files?.[0];
     if (!file) return;
-    const duration = file.type.startsWith("video/")
-      ? await readVideoDuration(file)
-      : undefined;
-    await onUpload(file, duration);
+    await onUpload(file);
   };
 
   const drop = (event: DragEvent<HTMLDivElement>) => {
@@ -90,7 +87,10 @@ export function CreatePublishComposer({
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!platforms.length) return;
+    if (
+      !platforms.length ||
+      (uploadedAsset && uploadedAsset.generation_status !== "ready")
+    ) return;
     const form = new FormData(event.currentTarget);
     if (mode === "manual") {
       onManual({
@@ -236,9 +236,9 @@ export function CreatePublishComposer({
           onToggle={togglePlatform}
         />
 
-        {uploadedAsset?.media_type === "image" && (
+        {uploadedAsset && (
           <p className="create-publish-auto-media-note">
-            Your image is automatically optimized for each selected platform.
+            Your media is automatically optimized for each selected platform.
           </p>
         )}
 
@@ -299,7 +299,16 @@ export function CreatePublishComposer({
           <Button
             variant="primary"
             type="submit"
-            disabled={pending || uploading || !platforms.length || (requiresMedia && !uploadedAsset)}
+            disabled={
+              pending ||
+              uploading ||
+              !platforms.length ||
+              (requiresMedia && !uploadedAsset) ||
+              Boolean(
+                uploadedAsset &&
+                  uploadedAsset.generation_status !== "ready",
+              )
+            }
             data-testid="create-publish-submit"
           >
             {mode === "manual" ? <FilePenLine /> : mode === "upload" ? <ImagePlus /> : <Sparkles />}
@@ -393,18 +402,32 @@ function MediaDropzone({
         required={required && !asset}
         onChange={(event) => void onFiles(event.target.files)}
       />
-      {previewUrl && asset ? (
+      {asset ? (
         <>
-          <div className="create-publish-upload-preview">
-            {asset.media_type === "video" ? (
-              <video src={previewUrl} controls preload="metadata" />
-            ) : (
-              <img src={previewUrl} alt="Selected post media" />
-            )}
-          </div>
+          {previewUrl && (
+            <div className="create-publish-upload-preview">
+              {asset.media_type === "video" ? (
+                <video src={previewUrl} controls preload="metadata" />
+              ) : (
+                <img src={previewUrl} alt="Selected post media" />
+              )}
+            </div>
+          )}
           <div>
-            <strong>Media ready</strong>
-            <p>{asset.media_type === "video" ? "Video" : "Image"} · Stored privately</p>
+            <strong>
+              {asset.generation_status === "processing"
+                ? "Preparing video…"
+                : asset.generation_status === "failed"
+                  ? "Video needs a new upload"
+                  : "Media ready"}
+            </strong>
+            <p role={asset.generation_status === "failed" ? "alert" : "status"}>
+              {asset.generation_status === "processing"
+                ? "Preparing your video for each platform…"
+                : asset.generation_status === "failed"
+                  ? "We couldn’t prepare this video. Try uploading it again."
+                  : `${asset.media_type === "video" ? "Video" : "Image"} · Stored privately`}
+            </p>
             <Button type="button" className="btn-sm" onClick={onChoose}>Replace</Button>
           </div>
         </>
@@ -422,24 +445,6 @@ function MediaDropzone({
       )}
     </div>
   );
-}
-
-async function readVideoDuration(file: File) {
-  const url = URL.createObjectURL(file);
-  try {
-    return await new Promise<number | undefined>((resolve) => {
-      const video = document.createElement("video");
-      video.preload = "metadata";
-      video.onloadedmetadata = () => {
-        const duration = Math.round(video.duration);
-        resolve(Number.isFinite(duration) && duration > 0 ? duration : undefined);
-      };
-      video.onerror = () => resolve(undefined);
-      video.src = url;
-    });
-  } finally {
-    URL.revokeObjectURL(url);
-  }
 }
 
 function valueOrNull(form: FormData, key: string) {

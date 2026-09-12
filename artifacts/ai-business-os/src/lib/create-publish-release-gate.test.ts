@@ -31,6 +31,44 @@ test("Create & Publish remounts its tenant-local state on business switch", asyn
   }
 });
 
+test("uploaded videos poll tenant-scoped status and block actions until ready", async () => {
+  const [page, composer, editor, apiTypes] = await Promise.all([
+    readFile(
+      new URL("../features/marketing/create-publish-page.tsx", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../features/marketing/create-publish-composer.tsx", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../features/marketing/create-publish-editor.tsx", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../services/api-types.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(
+    page,
+    /"marketing",\s*activeBusinessId,\s*"creative-assets",\s*media\?\.id/,
+  );
+  assert.match(
+    page,
+    /marketingApi\.creative\.get\(activeBusinessId, media!\.id, signal\)/,
+  );
+  assert.match(page, /refetchInterval:\s*\(query\)/);
+  assert.match(page, /status === "processing" \? 1500 : false/);
+  assert.match(page, /mediaBlocksActions/);
+  assert.match(page, /currentMedia\.generation_status !== "ready"/);
+  assert.match(composer, /uploadedAsset\.generation_status !== "ready"/);
+  assert.match(composer, /Preparing your video for each platform…/);
+  assert.match(editor, /Preparing your video for each platform…/);
+  assert.match(editor, /We couldn’t prepare this video\./);
+  assert.doesNotMatch(composer, /document\.createElement\("video"\)/);
+  assert.doesNotMatch(editor, /document\.createElement\("video"\)/);
+  assert.match(apiTypes, /\| "processing"/);
+});
+
 test("datetime-local values convert in the business IANA timezone", () => {
   assert.equal(
     localDateTimeToUtcIso("2026-09-15T19:00", "Asia/Karachi"),

@@ -14,6 +14,14 @@ MIGRATION_PATH = (
     / "e7b4c9d1a2f6_add_marketing_video_preparation.py"
 )
 
+_EXPECTED_MEDIA_DURATION_CONSTRAINT = (
+    "(media_type = 'image' AND duration_seconds IS NULL) OR "
+    "(media_type = 'video' AND ((duration_seconds IS NOT NULL AND "
+    "duration_seconds BETWEEN 1 AND 3600) OR (duration_seconds IS NULL AND "
+    "source_type = 'import' AND asset_type = 'video_source' AND "
+    "generation_status IN ('processing','failed'))))"
+)
+
 
 def _load_migration():
     spec = importlib.util.spec_from_file_location(
@@ -76,11 +84,21 @@ class MarketingVideoPreparationMigrationTests(unittest.TestCase):
                 migration.op,
                 "create_check_constraint",
             ) as create_check_constraint,
+            patch.object(
+                migration.op,
+                "execute",
+            ) as execute,
         ):
             migration.upgrade()
 
-        self.assertEqual(drop_constraint.call_count, 3)
-        self.assertEqual(create_check_constraint.call_count, 3)
+        self.assertEqual(drop_constraint.call_count, 6)
+        self.assertEqual(create_check_constraint.call_count, 9)
+        execute.assert_not_called()
+
+        self.assertEqual(
+            migration._CONSISTENT_MEDIA_DURATION_WITH_PROCESSING,
+            _EXPECTED_MEDIA_DURATION_CONSTRAINT,
+        )
 
         expressions = [
             str(call.args[2])
@@ -101,12 +119,58 @@ class MarketingVideoPreparationMigrationTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
+                "'video_source'" in expression
+                for expression in expressions
+            )
+        )
+        self.assertTrue(
+            any(
+                "generation_status <> 'processing'" in expression
+                and "duration_seconds IS NULL" in expression
+                and "width IS NULL" in expression
+                and "height IS NULL" in expression
+                for expression in expressions
+            )
+        )
+        self.assertTrue(
+            any(
+                "generation_status = 'ready'" in expression
+                and "creative_metadata ? 'video_preparation'" in expression
+                and "COALESCE(creative_metadata #>> "
+                "'{video_preparation,status}', '') = 'ready'" in expression
+                and "duration_seconds BETWEEN 1 AND 3600" in expression
+                and "width BETWEEN 1 AND 20000" in expression
+                and "height BETWEEN 1 AND 20000" in expression
+                for expression in expressions
+            )
+        )
+        self.assertTrue(
+            any(
                 "job_type IN "
                 "('generate_creative_asset','prepare_marketing_video')"
                 in expression
                 and "creative_asset_id IS NOT NULL" in expression
                 for expression in expressions
             )
+        )
+
+    def test_upgrade_contains_no_destructive_historical_video_update(
+        self,
+    ) -> None:
+        migration = _load_migration()
+
+        self.assertNotIn(
+            "UPDATE marketing_creative_assets",
+            MIGRATION_PATH.read_text(),
+        )
+        self.assertIn(
+            "creative_metadata ? 'video_preparation'",
+            migration._CONSISTENT_READY_VIDEO_METADATA,
+        )
+        self.assertIn(
+            "COALESCE(creative_metadata #>> "
+            "'{video_preparation,status}', '') = 'ready'",
+            migration._CONSISTENT_READY_VIDEO_METADATA,
         )
 
     def test_empty_data_downgrade_restores_historical_contract(self) -> None:
@@ -136,8 +200,8 @@ class MarketingVideoPreparationMigrationTests(unittest.TestCase):
             migration.downgrade()
 
         self.assertEqual(len(bind.statements), 2)
-        self.assertEqual(drop_constraint.call_count, 3)
-        self.assertEqual(create_check_constraint.call_count, 3)
+        self.assertEqual(drop_constraint.call_count, 9)
+        self.assertEqual(create_check_constraint.call_count, 6)
 
         expressions = [
             str(call.args[2])
@@ -229,7 +293,7 @@ class MarketingVideoPreparationMigrationTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "processing assets",
+                "asynchronous video state",
             ):
                 migration.downgrade()
 
@@ -238,6 +302,30 @@ class MarketingVideoPreparationMigrationTests(unittest.TestCase):
             "generation_status = 'processing'",
             bind.statements[1],
         )
+        self.assertIn("asset_type = 'video_source'", bind.statements[1])
+        drop_constraint.assert_not_called()
+        create_check_constraint.assert_not_called()
+
+    def test_failed_neutral_video_blocks_downgrade_before_ddl(self) -> None:
+        migration = _load_migration()
+        bind = _Bind([False, True])
+
+        with (
+            patch.object(migration.op, "get_bind", return_value=bind),
+            patch.object(migration.op, "f", side_effect=lambda value: value),
+            patch.object(migration.op, "drop_constraint") as drop_constraint,
+            patch.object(
+                migration.op,
+                "create_check_constraint",
+            ) as create_check_constraint,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "asynchronous video state",
+            ):
+                migration.downgrade()
+
+        self.assertIn("duration_seconds IS NULL", bind.statements[1])
         drop_constraint.assert_not_called()
         create_check_constraint.assert_not_called()
 

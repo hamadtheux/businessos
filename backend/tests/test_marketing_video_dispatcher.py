@@ -77,9 +77,9 @@ def _asset(*, business_id, asset_id, status="processing"):
         storage_reference=f"https://cdn.example.test/{source_key}",
         width=None,
         height=None,
-        duration_seconds=30,
+        duration_seconds=None,
         aspect_ratio=None,
-        asset_type="video_vertical",
+        asset_type="video_source",
         creative_metadata={
             "upload_content_type": "video/mp4",
             "original_immutable": True,

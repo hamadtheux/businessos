@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from fastapi import UploadFile
 from PIL import Image, ImageOps
@@ -22,7 +24,7 @@ _VIDEO_TYPES = {
 
 @dataclass(frozen=True, slots=True)
 class PreparedMarketingMedia:
-    content: bytes
+    content: bytes | None
     content_type: str
     extension: str
     media_type: str
@@ -30,6 +32,7 @@ class PreparedMarketingMedia:
     height: int | None
     duration_seconds: int | None
     original_name: str
+    source_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +66,8 @@ def build_marketing_image_variants(
     """
     if media.media_type != "image":
         return ()
+    if media.content is None:
+        raise MarketingValidationError("marketing_media_unreadable")
 
     try:
         with Image.open(BytesIO(media.content)) as opened:
@@ -112,14 +117,77 @@ def build_marketing_image_variants(
 async def read_marketing_media(
     upload: UploadFile,
     *,
-    duration_seconds: int | None,
+    duration_seconds: int | None = None,
 ) -> PreparedMarketingMedia:
+    # Accepted only for compatibility with older callers. Browser-derived
+    # duration is never authoritative; the background worker obtains it from
+    # server-side ffprobe after the immutable source has been persisted.
+    del duration_seconds
+
     declared_type = (upload.content_type or "").split(";", 1)[0].strip().casefold()
-    max_bytes = (
-        MAX_MARKETING_VIDEO_BYTES
-        if declared_type in _VIDEO_TYPES
-        else MAX_LOGO_UPLOAD_BYTES
+    original_name = _safe_original_name(upload.filename)
+
+    video_extension = _VIDEO_TYPES.get(declared_type)
+    if video_extension is not None:
+        if Path(original_name).suffix.casefold() != f".{video_extension}":
+            raise MarketingValidationError("marketing_media_unsupported")
+
+        source_path = await _stream_video_upload_to_file(
+            upload,
+            extension=video_extension,
+        )
+        return PreparedMarketingMedia(
+            content=None,
+            content_type=declared_type,
+            extension=video_extension,
+            media_type="video",
+            width=None,
+            height=None,
+            duration_seconds=None,
+            original_name=original_name,
+            source_path=source_path,
+        )
+
+    content = await _read_bounded_upload(
+        upload,
+        max_bytes=MAX_LOGO_UPLOAD_BYTES,
     )
+    if declared_type.startswith("image/"):
+        try:
+            image = sanitize_logo_bytes(content)
+        except LogoError:
+            raise MarketingValidationError("marketing_media_unsupported") from None
+        return PreparedMarketingMedia(
+            content=image.content,
+            content_type=image.content_type,
+            extension=image.extension,
+            media_type="image",
+            width=image.width,
+            height=image.height,
+            duration_seconds=None,
+            original_name=original_name,
+        )
+
+    raise MarketingValidationError("marketing_media_unsupported")
+
+
+async def cleanup_prepared_marketing_media(
+    media: PreparedMarketingMedia,
+) -> None:
+    """Remove the request-scoped video spool after persistence completes."""
+    if media.source_path is None:
+        return
+    try:
+        await asyncio.to_thread(media.source_path.unlink, missing_ok=True)
+    except OSError:
+        pass
+
+
+async def _read_bounded_upload(
+    upload: UploadFile,
+    *,
+    max_bytes: int,
+) -> bytes:
     content = bytearray()
     try:
         while True:
@@ -136,41 +204,58 @@ async def read_marketing_media(
 
     if not content:
         raise MarketingValidationError("marketing_media_empty")
+    return bytes(content)
 
-    original_name = _safe_original_name(upload.filename)
-    if declared_type.startswith("image/"):
-        try:
-            image = sanitize_logo_bytes(bytes(content))
-        except LogoError:
-            raise MarketingValidationError("marketing_media_unsupported") from None
-        return PreparedMarketingMedia(
-            content=image.content,
-            content_type=image.content_type,
-            extension=image.extension,
-            media_type="image",
-            width=image.width,
-            height=image.height,
-            duration_seconds=None,
-            original_name=original_name,
-        )
 
-    extension = _VIDEO_TYPES.get(declared_type)
-    if extension is None or Path(original_name).suffix.casefold() != f".{extension}":
-        raise MarketingValidationError("marketing_media_unsupported")
-    if duration_seconds is None or not 1 <= duration_seconds <= 3600:
-        raise MarketingValidationError("marketing_video_duration_required")
-    if not _valid_video_signature(bytes(content), extension):
-        raise MarketingValidationError("marketing_media_unsupported")
-    return PreparedMarketingMedia(
-        content=bytes(content),
-        content_type=declared_type,
-        extension=extension,
-        media_type="video",
-        width=None,
-        height=None,
-        duration_seconds=duration_seconds,
-        original_name=original_name,
+async def _stream_video_upload_to_file(
+    upload: UploadFile,
+    *,
+    extension: str,
+) -> Path:
+    temporary = NamedTemporaryFile(
+        mode="w+b",
+        prefix="aibos-marketing-video-upload-",
+        suffix=f".{extension}",
+        delete=False,
     )
+    source_path = Path(temporary.name)
+    size = 0
+    signature = bytearray()
+    succeeded = False
+
+    try:
+        while True:
+            chunk = await upload.read(_READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_MARKETING_VIDEO_BYTES:
+                raise MarketingValidationError("marketing_media_too_large")
+            if len(signature) < 12:
+                signature.extend(chunk[: 12 - len(signature)])
+            await asyncio.to_thread(temporary.write, chunk)
+
+        if size == 0:
+            raise MarketingValidationError("marketing_media_empty")
+        if not _valid_video_signature(bytes(signature), extension):
+            raise MarketingValidationError("marketing_media_unsupported")
+
+        await asyncio.to_thread(temporary.flush)
+        await asyncio.to_thread(temporary.close)
+        succeeded = True
+        return source_path
+    except (OSError, ValueError):
+        raise MarketingValidationError("marketing_media_unreadable") from None
+    finally:
+        if not succeeded:
+            try:
+                temporary.close()
+            except (OSError, ValueError):
+                pass
+            try:
+                source_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _safe_original_name(value: str | None) -> str:

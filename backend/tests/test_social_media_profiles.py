@@ -2,6 +2,7 @@ from app.services.social_media_profiles import (
     automatic_social_placement,
     automatic_social_profile,
     preferred_image_variant,
+    preferred_video_variant,
     social_media_profile,
 )
 
@@ -36,6 +37,11 @@ def test_video_defaults_match_each_platform_experience() -> None:
         "tiktok",
         media_type="video",
     ) == "video"
+
+    assert preferred_video_variant("instagram") == "vertical_9_16"
+    assert preferred_video_variant("facebook") == "vertical_9_16"
+    assert preferred_video_variant("linkedin") == "landscape_16_9"
+    assert preferred_video_variant("tiktok") == "vertical_9_16"
 
 
 def test_youtube_short_is_inferred_without_user_configuration() -> None:
