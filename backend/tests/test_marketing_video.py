@@ -156,6 +156,25 @@ class MarketingVideoProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("-show_entries", args)
         self.assertTrue(str(args[-1]).endswith("source.mp4"))
 
+    async def test_mov_probe_uses_ffprobe_as_final_container_authority(
+        self,
+    ) -> None:
+        process = _Process(stdout=_payload(duration="20"))
+
+        with patch(
+            "app.services.marketing_video.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=process),
+        ) as create_process:
+            result = await probe_marketing_video(
+                b"safe-bounded-quicktime-bytes",
+                extension="mov",
+            )
+
+        self.assertEqual(result.duration_seconds, 20)
+        args = create_process.await_args.args
+        self.assertEqual(args[0], "ffprobe")
+        self.assertTrue(str(args[-1]).endswith("source.mov"))
+
     async def test_probe_rejects_ffprobe_decode_failure_without_leaking_stderr(
         self,
     ) -> None:

@@ -160,7 +160,7 @@ export function CreatePublishEditor({
             ref={fileRef}
             hidden
             type="file"
-            accept=".jpg,.jpeg,.png,.webp,.mp4,.webm,image/jpeg,image/png,image/webp,video/mp4,video/webm"
+            accept=".jpg,.jpeg,.png,.webp,.mp4,.mov,.webm,image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm"
             onChange={(event) => {
               const file = event.target.files?.[0];
               if (file) void onUpload(file);

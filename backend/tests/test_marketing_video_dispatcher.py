@@ -63,10 +63,16 @@ class _Storage:
         return reference[len(prefix):]
 
 
-def _asset(*, business_id, asset_id, status="processing"):
+def _asset(
+    *,
+    business_id,
+    asset_id,
+    status="processing",
+    extension="mp4",
+):
     source_key = (
         f"businesses/{business_id}/marketing/uploads/{asset_id}/"
-        "source.mp4"
+        f"source.{extension}"
     )
     return SimpleNamespace(
         id=asset_id,
@@ -81,7 +87,9 @@ def _asset(*, business_id, asset_id, status="processing"):
         aspect_ratio=None,
         asset_type="video_source",
         creative_metadata={
-            "upload_content_type": "video/mp4",
+            "upload_content_type": (
+                "video/quicktime" if extension == "mov" else f"video/{extension}"
+            ),
             "original_immutable": True,
             "variants": {},
         },
@@ -193,6 +201,96 @@ class MarketingVideoDispatcherTests(
         self.assertEqual(
             set(variants),
             {"vertical_9_16", "landscape_16_9"},
+        )
+
+    async def test_mov_source_resolution_is_exact_and_tenant_scoped(
+        self,
+    ) -> None:
+        business_id = uuid4()
+        asset_id = uuid4()
+        asset = _asset(
+            business_id=business_id,
+            asset_id=asset_id,
+            extension="mov",
+        )
+        preparation = AsyncMock(
+            return_value=_package(
+                business_id=business_id,
+                asset_id=asset_id,
+            )
+        )
+
+        with (
+            patch(
+                "app.services.marketing_video_dispatcher.AsyncSessionFactory",
+                new=_SessionFactory([_Session(asset), _Session(asset)]),
+            ),
+            patch(
+                "app.services.marketing_video_dispatcher."
+                "prepare_marketing_video_derivatives",
+                new=preparation,
+            ),
+        ):
+            outcome = await dispatch_marketing_video_preparation_job(
+                _job(
+                    business_id=business_id,
+                    asset_id=asset_id,
+                ),
+                storage=_Storage(),
+            )
+
+        self.assertTrue(outcome.succeeded)
+        self.assertEqual(
+            preparation.await_args.kwargs["source_extension"],
+            "mov",
+        )
+        self.assertEqual(
+            preparation.await_args.kwargs["source_reference"],
+            "https://cdn.example.test/"
+            f"businesses/{business_id}/marketing/uploads/{asset_id}/source.mov",
+        )
+
+    async def test_forged_tenant_mov_source_is_rejected_before_preparation(
+        self,
+    ) -> None:
+        business_id = uuid4()
+        asset_id = uuid4()
+        asset = _asset(
+            business_id=business_id,
+            asset_id=asset_id,
+            extension="mov",
+        )
+        asset.storage_reference = (
+            "https://cdn.example.test/"
+            f"businesses/{uuid4()}/marketing/uploads/{asset_id}/source.mov"
+        )
+        preparation = AsyncMock()
+
+        with (
+            patch(
+                "app.services.marketing_video_dispatcher.AsyncSessionFactory",
+                new=_SessionFactory([_Session(asset)]),
+            ),
+            patch(
+                "app.services.marketing_video_dispatcher."
+                "prepare_marketing_video_derivatives",
+                new=preparation,
+            ),
+        ):
+            outcome = await dispatch_marketing_video_preparation_job(
+                _job(
+                    business_id=business_id,
+                    asset_id=asset_id,
+                ),
+                storage=_Storage(),
+            )
+
+        self.assertTrue(outcome.succeeded)
+        preparation.assert_not_awaited()
+        self.assertEqual(asset.generation_status, "failed")
+        self.assertEqual(
+            asset.creative_metadata["video_preparation"]["failure_code"],
+            "marketing_media_reference_invalid",
         )
 
     async def test_invalid_customer_media_becomes_terminal_failed(

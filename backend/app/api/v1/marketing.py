@@ -461,7 +461,7 @@ async def upload_post_media(
                 "marketing_media_too_large": "The file is too large. Images can be up to 5 MB and videos up to 50 MB.",
                 "marketing_media_empty": "The selected file is empty.",
                 "marketing_media_unreadable": "The selected file could not be read.",
-                "marketing_media_unsupported": "Use a JPG, PNG, WEBP, MP4, or WEBM file.",
+                "marketing_media_unsupported": "Use a JPG, PNG, WEBP, MP4, MOV or WEBM file.",
             }
             raise HTTPException(
                 status.HTTP_413_CONTENT_TOO_LARGE

@@ -297,6 +297,8 @@ def _trusted_source_extension(
         return "mp4"
     if object_key == f"{prefix}webm":
         return "webm"
+    if object_key == f"{prefix}mov":
+        return "mov"
 
     raise MarketingValidationError(
         "marketing_media_reference_invalid"

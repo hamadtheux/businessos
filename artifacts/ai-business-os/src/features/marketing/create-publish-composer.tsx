@@ -398,7 +398,7 @@ function MediaDropzone({
       <input
         ref={fileRef}
         type="file"
-        accept=".jpg,.jpeg,.png,.webp,.mp4,.webm,image/jpeg,image/png,image/webp,video/mp4,video/webm"
+        accept=".jpg,.jpeg,.png,.webp,.mp4,.mov,.webm,image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm"
         required={required && !asset}
         onChange={(event) => void onFiles(event.target.files)}
       />
@@ -436,7 +436,7 @@ function MediaDropzone({
           <Upload />
           <div>
             <strong>{uploading ? "Uploading media…" : "Drop a photo or video here"}</strong>
-            <p>JPG, PNG, WEBP, MP4 or WEBM</p>
+            <p>JPG, PNG, WEBP, MP4, MOV or WEBM</p>
             <Button type="button" className="btn-sm" onClick={onChoose} disabled={uploading}>
               Choose file
             </Button>

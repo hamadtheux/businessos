@@ -21,7 +21,7 @@ from app.storage.base import ObjectStorage, StorageError
 # input cannot create unbounded object-storage writes.
 MAX_MARKETING_VIDEO_DERIVATIVE_BYTES = 250_000_000
 
-_SOURCE_EXTENSIONS = frozenset({"mp4", "webm"})
+_SOURCE_EXTENSIONS = frozenset({"mp4", "webm", "mov"})
 
 
 @dataclass(frozen=True, slots=True)

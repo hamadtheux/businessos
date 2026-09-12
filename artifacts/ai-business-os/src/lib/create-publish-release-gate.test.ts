@@ -69,6 +69,24 @@ test("uploaded videos poll tenant-scoped status and block actions until ready", 
   assert.match(apiTypes, /\| "processing"/);
 });
 
+test("Create & Publish inputs and guidance include MOV uploads", async () => {
+  const [composer, editor] = await Promise.all([
+    readFile(
+      new URL("../features/marketing/create-publish-composer.tsx", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../features/marketing/create-publish-editor.tsx", import.meta.url),
+      "utf8",
+    ),
+  ]);
+
+  for (const source of [composer, editor]) {
+    assert.match(source, /accept="[^"]*\.mov[^"]*video\/quicktime[^"]*"/);
+  }
+  assert.match(composer, /JPG, PNG, WEBP, MP4, MOV or WEBM/);
+});
+
 test("datetime-local values convert in the business IANA timezone", () => {
   assert.equal(
     localDateTimeToUtcIso("2026-09-15T19:00", "Asia/Karachi"),

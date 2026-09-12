@@ -65,6 +65,10 @@ BUSINESS_ID = uuid4()
 USER_ID = uuid4()
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
+_VALID_MP4 = b"\x00\x00\x00\x18ftypisom" + (b"video" * 20)
+_VALID_MOV = b"\x00\x00\x00\x14ftypqt  " + (b"video" * 20)
+_VALID_WEBM = b"\x1aE\xdf\xa3" + (b"video" * 20)
+
 _EXPECTED_MEDIA_DURATION_CONSTRAINT = (
     "(media_type = 'image' AND duration_seconds IS NULL) OR "
     "(media_type = 'video' AND ((duration_seconds IS NOT NULL AND "
@@ -621,15 +625,35 @@ class CreatePublishFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image.original_name, "Launch.PNG")
         self.assertEqual((image.width, image.height), (64, 64))
 
+        for filename, content_type in (
+            ("launch.mp4", "video/mp4"),
+            ("launch.mov", "video/quicktime"),
+            ("launch.webm", "video/webm"),
+        ):
+            with (
+                self.subTest(filename=filename),
+                self.assertRaisesRegex(
+                    MarketingValidationError,
+                    "unsupported",
+                ),
+            ):
+                await read_marketing_media(
+                    UploadFile(
+                        filename=filename,
+                        file=BytesIO(b"not-a-video"),
+                        headers={"content-type": content_type},
+                    ),
+                    duration_seconds=10,
+                )
+
         with self.assertRaisesRegex(MarketingValidationError, "unsupported"):
             await read_marketing_media(
                 UploadFile(
-                    filename="launch.mp4",
-                    file=BytesIO(b"not-a-video"),
+                    filename="renamed.txt",
+                    file=BytesIO(_VALID_MP4),
                     headers={"content-type": "video/mp4"},
-                ),
-                    duration_seconds=10,
                 )
+            )
 
     async def test_failed_video_spool_is_removed_for_every_error_kind(
         self,
@@ -698,29 +722,64 @@ class CreatePublishFlowTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertFalse(source_path.exists())
 
-    async def test_video_reader_spools_without_trusting_client_duration(
+    async def test_video_reader_accepts_browser_mime_variants_by_container(
         self,
     ) -> None:
-        content = b"\x00\x00\x00\x18ftypisom" + (b"video" * 20)
-        media = await read_marketing_media(
-            UploadFile(
-                filename="launch.mp4",
-                file=BytesIO(content),
-                headers={"content-type": "video/mp4"},
+        cases = (
+            ("launch.mp4", "video/mp4", _VALID_MP4, "mp4", "video/mp4"),
+            (
+                "launch.mp4",
+                "application/octet-stream",
+                _VALID_MP4,
+                "mp4",
+                "video/mp4",
             ),
-            duration_seconds=9999,
+            ("launch.mp4", None, _VALID_MP4, "mp4", "video/mp4"),
+            (
+                "launch.mov",
+                "video/quicktime",
+                _VALID_MOV,
+                "mov",
+                "video/quicktime",
+            ),
+            (
+                "launch.mov",
+                "application/octet-stream",
+                _VALID_MOV,
+                "mov",
+                "video/quicktime",
+            ),
+            ("launch.webm", "video/webm", _VALID_WEBM, "webm", "video/webm"),
         )
 
-        self.assertEqual(media.media_type, "video")
-        self.assertIsNone(media.content)
-        self.assertIsNone(media.duration_seconds)
-        self.assertIsNotNone(media.source_path)
-        assert media.source_path is not None
-        self.assertTrue(media.source_path.exists())
-        self.assertEqual(media.source_path.read_bytes(), content)
+        for filename, browser_type, content, extension, canonical_type in cases:
+            with self.subTest(filename=filename, browser_type=browser_type):
+                headers = (
+                    {"content-type": browser_type}
+                    if browser_type is not None
+                    else {}
+                )
+                media = await read_marketing_media(
+                    UploadFile(
+                        filename=filename,
+                        file=BytesIO(content),
+                        headers=headers,
+                    ),
+                    duration_seconds=9999,
+                )
 
-        await cleanup_prepared_marketing_media(media)
-        self.assertFalse(media.source_path.exists())
+                self.assertEqual(media.media_type, "video")
+                self.assertEqual(media.extension, extension)
+                self.assertEqual(media.content_type, canonical_type)
+                self.assertIsNone(media.content)
+                self.assertIsNone(media.duration_seconds)
+                self.assertIsNotNone(media.source_path)
+                assert media.source_path is not None
+                self.assertTrue(media.source_path.exists())
+                self.assertEqual(media.source_path.read_bytes(), content)
+
+                await cleanup_prepared_marketing_media(media)
+                self.assertFalse(media.source_path.exists())
 
     async def test_image_upload_stays_ready_without_queueing(self) -> None:
         session = _Session()
@@ -820,6 +879,54 @@ class CreatePublishFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             enqueue.await_args.kwargs["idempotency_key"],
             f"marketing-video-preparation:{asset.id}",
+        )
+
+    async def test_mov_upload_uses_tenant_safe_immutable_source_key(
+        self,
+    ) -> None:
+        session = _Session()
+        storage = SimpleNamespace(
+            put=AsyncMock(),
+            put_file=AsyncMock(),
+            delete=AsyncMock(),
+            public_url=lambda key: f"https://media.example.test/{key}",
+        )
+
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "upload.mov"
+            source_path.write_bytes(_VALID_MOV)
+            media = PreparedMarketingMedia(
+                content=None,
+                content_type="video/quicktime",
+                extension="mov",
+                media_type="video",
+                width=None,
+                height=None,
+                duration_seconds=None,
+                original_name="launch.mov",
+                source_path=source_path,
+            )
+
+            with patch(
+                "app.services.marketing.enqueue_job",
+                new=AsyncMock(return_value=SimpleNamespace()),
+            ):
+                asset = await prepare_uploaded_creative_asset(
+                    session,
+                    business_id=BUSINESS_ID,
+                    actor_user_id=USER_ID,
+                    media=media,
+                    storage=storage,
+                )
+
+        stored_key = storage.put_file.await_args.args[0]
+        self.assertEqual(
+            stored_key,
+            f"businesses/{BUSINESS_ID}/marketing/uploads/{asset.id}/source.mov",
+        )
+        self.assertEqual(
+            storage.put_file.await_args.args[2],
+            "video/quicktime",
         )
 
     async def test_video_enqueue_failure_deletes_immutable_source(

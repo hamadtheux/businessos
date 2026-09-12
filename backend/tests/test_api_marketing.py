@@ -184,6 +184,88 @@ class MarketingApiTests(unittest.IsolatedAsyncioTestCase):
             BUSINESS_ID,
         )
 
+    async def test_video_upload_accepts_weak_mime_and_mov_candidates(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "launch.mp4",
+                "application/octet-stream",
+                b"\x00\x00\x00\x18ftypisom",
+                "mp4",
+                "video/mp4",
+            ),
+            (
+                "launch.mov",
+                "video/quicktime",
+                b"\x00\x00\x00\x14ftypqt  ",
+                "mov",
+                "video/quicktime",
+            ),
+        )
+
+        for filename, browser_type, content, extension, canonical_type in cases:
+            with self.subTest(filename=filename, browser_type=browser_type):
+                asset = _creative_asset()
+                asset.asset_type = "video_source"
+                asset.media_type = "video"
+                asset.source_type = "import"
+                asset.generation_status = "processing"
+                asset.storage_reference = (
+                    "https://media.example.test/"
+                    f"businesses/{BUSINESS_ID}/marketing/uploads/{asset.id}/"
+                    f"source.{extension}"
+                )
+                asset.width = None
+                asset.height = None
+                asset.aspect_ratio = None
+                asset.duration_seconds = None
+
+                with patch(
+                    "app.api.v1.marketing.service.prepare_uploaded_creative_asset",
+                    new=AsyncMock(return_value=asset),
+                ) as service:
+                    response = await self.client.post(
+                        self._url("creative-assets/upload"),
+                        files={
+                            "file": (
+                                filename,
+                                content,
+                                browser_type,
+                            )
+                        },
+                    )
+
+                self.assertEqual(response.status_code, 201)
+                prepared = service.await_args.kwargs["media"]
+                self.assertEqual(prepared.extension, extension)
+                self.assertEqual(prepared.content_type, canonical_type)
+                self.assertIsNotNone(prepared.source_path)
+                self.assertFalse(prepared.source_path.exists())
+
+    async def test_invalid_mov_error_copy_lists_supported_video_types(
+        self,
+    ) -> None:
+        response = await self.client.post(
+            self._url("creative-assets/upload"),
+            files={
+                "file": (
+                    "renamed.mov",
+                    b"not-a-quicktime-container",
+                    "video/quicktime",
+                )
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json()["detail"],
+            {
+                "code": "marketing_media_unsupported",
+                "message": "Use a JPG, PNG, WEBP, MP4, MOV or WEBM file.",
+            },
+        )
+
     async def test_upload_cleanup_runs_when_upload_file_close_raises(
         self,
     ) -> None:

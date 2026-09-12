@@ -16,9 +16,10 @@ from app.services.logo_image import MAX_LOGO_UPLOAD_BYTES, sanitize_logo_bytes
 
 MAX_MARKETING_VIDEO_BYTES = 50_000_000
 _READ_CHUNK_BYTES = 64 * 1024
-_VIDEO_TYPES = {
-    "video/mp4": "mp4",
-    "video/webm": "webm",
+_VIDEO_SOURCE_CONTENT_TYPES = {
+    "mp4": "video/mp4",
+    "webm": "video/webm",
+    "mov": "video/quicktime",
 }
 
 
@@ -127,18 +128,17 @@ async def read_marketing_media(
     declared_type = (upload.content_type or "").split(";", 1)[0].strip().casefold()
     original_name = _safe_original_name(upload.filename)
 
-    video_extension = _VIDEO_TYPES.get(declared_type)
-    if video_extension is not None:
-        if Path(original_name).suffix.casefold() != f".{video_extension}":
-            raise MarketingValidationError("marketing_media_unsupported")
-
+    suffix = Path(original_name).suffix.casefold()
+    video_extension = suffix[1:] if suffix.startswith(".") else ""
+    canonical_content_type = _VIDEO_SOURCE_CONTENT_TYPES.get(video_extension)
+    if canonical_content_type is not None:
         source_path = await _stream_video_upload_to_file(
             upload,
             extension=video_extension,
         )
         return PreparedMarketingMedia(
             content=None,
-            content_type=declared_type,
+            content_type=canonical_content_type,
             extension=video_extension,
             media_type="video",
             width=None,
@@ -266,6 +266,8 @@ def _safe_original_name(value: str | None) -> str:
 
 
 def _valid_video_signature(content: bytes, extension: str) -> bool:
-    if extension == "mp4":
+    if extension in {"mp4", "mov"}:
         return len(content) >= 12 and content[4:8] == b"ftyp"
-    return len(content) >= 4 and content[:4] == b"\x1aE\xdf\xa3"
+    if extension == "webm":
+        return len(content) >= 4 and content[:4] == b"\x1aE\xdf\xa3"
+    return False

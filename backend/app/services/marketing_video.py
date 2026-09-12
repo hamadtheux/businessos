@@ -13,7 +13,7 @@ from app.services.marketing_media import MAX_MARKETING_VIDEO_BYTES
 
 _FFPROBE_TIMEOUT_SECONDS = 20
 _MAX_FFPROBE_OUTPUT_BYTES = 1_000_000
-_SUPPORTED_SOURCE_EXTENSIONS = frozenset({"mp4", "webm"})
+_SUPPORTED_SOURCE_EXTENSIONS = frozenset({"mp4", "webm", "mov"})
 
 
 @dataclass(frozen=True, slots=True)

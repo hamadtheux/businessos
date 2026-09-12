@@ -44,6 +44,7 @@ class _Storage:
         )
         self.get_file_calls: list[str] = []
         self.put_file_calls: list[str] = []
+        self.put_file_content_types: list[str] = []
         self.deleted: list[str] = []
 
     def public_url(self, object_key: str) -> str:
@@ -86,9 +87,10 @@ class _Storage:
         *,
         max_bytes: int,
     ) -> None:
-        del content_type, max_bytes
+        del max_bytes
 
         self.put_file_calls.append(object_key)
+        self.put_file_content_types.append(content_type)
 
         if self.fail_put_key and object_key.endswith(
             self.fail_put_key
@@ -242,6 +244,60 @@ class MarketingVideoPreparationTests(
         )
 
         self.assertEqual(storage.deleted, [])
+
+    async def test_mov_source_is_prepared_into_trusted_mp4_derivatives(
+        self,
+    ) -> None:
+        business_id = uuid4()
+        asset_id = uuid4()
+        storage = _Storage(
+            business_id=business_id,
+            asset_id=asset_id,
+            extension="mov",
+        )
+        probes = [
+            _probe(width=720, height=1280),
+            _probe(width=1080, height=1920),
+            _probe(width=1920, height=1080),
+        ]
+
+        with (
+            patch(
+                "app.services.marketing_video_preparation."
+                "probe_marketing_video_file",
+                new=AsyncMock(side_effect=probes),
+            ),
+            patch(
+                "app.services.marketing_video_preparation."
+                "render_marketing_video_variant",
+                new=AsyncMock(side_effect=_fake_render),
+            ),
+        ):
+            result = await prepare_marketing_video_derivatives(
+                storage=storage,
+                business_id=business_id,
+                asset_id=asset_id,
+                source_reference=storage.public_url(storage.source_key),
+                source_extension="mov",
+            )
+
+        self.assertEqual(
+            storage.get_file_calls,
+            [
+                f"businesses/{business_id}/marketing/uploads/{asset_id}/"
+                "source.mov"
+            ],
+        )
+        self.assertTrue(
+            all(key.endswith(".mp4") for key in storage.put_file_calls)
+        )
+        self.assertEqual(
+            storage.put_file_content_types,
+            ["video/mp4", "video/mp4"],
+        )
+        self.assertTrue(
+            all(item.content_type == "video/mp4" for item in result.variants)
+        )
 
     async def test_forged_tenant_source_is_rejected_before_read(
         self,
